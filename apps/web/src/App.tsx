@@ -145,6 +145,7 @@ function App() {
     <main className="main">
       <header className="topbar"><div><span className="eyebrow">MORTAL / LOCAL</span><h1>{page === "analysis" ? "第一打分析" : page === "history" ? "历史运行" : "设置与诊断"}</h1></div><div className="top-meta"><span className="status-dot"></span>{message}<code>v0.1 alpha</code></div></header>
       {error && <div className="alert danger">{error}</div>}
+      {capabilities && !capabilities.cuda_available && <div className="alert danger">CUDA unavailable: this is a GPU-only build. Install CUDA-enabled PyTorch and verify the NVIDIA driver.</div>}
       {page === "analysis" && <Analysis config={config} update={update} candidates={candidates} start={start} cancel={cancel} status={status} progress={progress} result={result} capabilities={capabilities} />}
       {page === "history" && <History runs={history} loadRun={loadRun} deleteRun={deleteRun} />}
       {page === "settings" && <Settings capabilities={capabilities} />}
