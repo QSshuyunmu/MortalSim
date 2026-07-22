@@ -17,13 +17,13 @@ jobs:
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install CPU dependencies
-        run: python -m pip install -r requirements-cpu.txt pyinstaller
+      - name: Install CUDA dependencies
+        run: python -m pip install -r requirements-cuda.txt pyinstaller
       - name: Build package
         shell: pwsh
-        run: ./packaging/build_windows.ps1 -Variant CPU -AllowMissingModel
+        run: ./packaging/build_windows.ps1 -Variant CUDA -AllowMissingModel
       - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
-          name: MortalSim-Windows-x64-CPU
+          name: MortalSim-Windows-x64-CUDA
           path: release/*.zip

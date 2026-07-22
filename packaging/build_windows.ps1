@@ -12,9 +12,9 @@ if (-not $env:PYO3_PYTHON) {
     $env:PYO3_PYTHON = (Get-Command python).Source
 }
 Write-Host "Using Python: $env:PYO3_PYTHON"
-$cudaProbe = & $env:PYO3_PYTHON -c "import sys,torch; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}'); sys.exit(0 if torch.version.cuda and torch.cuda.is_available() else 1)"
+$cudaProbe = & $env:PYO3_PYTHON -c "import sys,torch; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}'); sys.exit(0 if torch.version.cuda else 1)"
 if ($LASTEXITCODE -ne 0) {
-    throw "CUDA build requires CUDA-enabled PyTorch and an available NVIDIA GPU. Install requirements-cuda.txt first."
+    throw "CUDA build requires CUDA-enabled PyTorch. Install requirements-cuda.txt first. A GPU is required at runtime, not on the build host."
 }
 
 $modelPath = Join-Path $root "Akagi/model_v4_20240308_best_min.pth"
