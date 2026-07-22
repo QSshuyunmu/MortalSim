@@ -42,6 +42,8 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCOD
 
 $version = (Get-Content pyproject.toml | Select-String '^version =').ToString().Split('"')[1]
 $dist = Join-Path $root "dist/MortalSim"
+$marker = Join-Path $dist "GPU_ONLY_CUDA_BUILD.txt"
+"MortalSim CUDA-only package" | Set-Content $marker -Encoding UTF8
 $releaseDir = Join-Path $root "release"
 New-Item -ItemType Directory -Force $releaseDir | Out-Null
 $archive = Join-Path $releaseDir "MortalSim-Windows-x64-$Variant-v$version.zip"
