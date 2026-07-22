@@ -40,6 +40,9 @@ def main() -> None:
     try:
         import uvicorn
         from apps.api.main import app
+        from mortal_app.service import require_cuda
+
+        require_cuda()
 
         port = int(os.environ.get("MORTALSIM_PORT", "0")) or free_port()
         # GUI-mode PyInstaller builds expose no stderr; disable Uvicorn's
