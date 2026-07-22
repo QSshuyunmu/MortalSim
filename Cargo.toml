@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = [
+    "libriichi",
+    "exe-wrapper",
+]
+
+[profile.release]
+lto = true
+codegen-units = 1
+debug = 1
+overflow-checks = false

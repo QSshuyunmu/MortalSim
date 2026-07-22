@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "mortal-v4-20240308",
+      "filename": "model_v4_20240308_best_min.pth",
+      "format": "pytorch-state-dict",
+      "size_bytes": 95392490,
+      "sha256": "0a88ddad649804d085491b5397d895f596b0e55f30632c549ea145bb44786563",
+      "engine": "python-amp",
+      "source": "Mortal v4 model",
+      "redistribution": "verify-before-public-release"
+    }
+  ]
+}

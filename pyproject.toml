@@ -1,0 +1,17 @@
+[project]
+name = "mortalsim"
+version = "0.1.0a0"
+description = "Local web desktop application for Mortal first-discard simulation"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "fastapi==0.137.1",
+  "uvicorn==0.46.0",
+  "pydantic==2.13.3",
+]
+
+[project.optional-dependencies]
+runtime = ["torch==2.6.0"]
+build = ["pyinstaller==6.21.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "mortal_app"]

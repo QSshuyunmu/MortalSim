@@ -1,0 +1,9 @@
+MortalSim
+=========
+
+MortalSim is a local web desktop application built around the Mortal
+mahjong simulation engine and the libriichi Rust runner.
+
+The application code remains covered by AGPL-3.0-or-later unless a file
+states otherwise. Third-party components and model weights may have separate
+terms; see THIRD_PARTY_LICENSES.md and MODEL_LICENSE.md.
