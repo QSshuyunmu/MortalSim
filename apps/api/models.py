@@ -59,6 +59,11 @@ class CapabilityResponse(BaseModel):
     platform: str
     python: str
     cuda_available: bool
+    cuda_required: bool
+    torch_version: str | None = None
+    cuda_version: str | None = None
+    gpu_name: str | None = None
+    cuda_error: str | None = None
     nvidia_smi_available: bool
     model_exists: bool
     model_path: str

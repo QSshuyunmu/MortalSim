@@ -6,7 +6,7 @@
 
 ## CUDA 不可用
 
-在设置页查看 Python、模型、`nvidia-smi` 和 CUDA 状态。没有兼容 NVIDIA 驱动时使用 CPU 包或 CPU 模式。
+在设置页查看 Python、模型、`nvidia-smi` 和 CUDA 状态。MortalSim 仅支持 GPU；请安装 `requirements-cuda.txt`，确认 `torch.version.cuda` 非空且 `torch.cuda.is_available()` 返回 `True`。
 
 ## 模拟失败
 

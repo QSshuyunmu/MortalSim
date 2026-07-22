@@ -31,6 +31,43 @@ def _prepare_imports(rayon_threads: int) -> None:
     sys.path.insert(0, str(AKAGI_DIR))
 
 
+def cuda_diagnostics() -> dict[str, Any]:
+    """Report CUDA state; the GPU edition never silently falls back to CPU."""
+    result: dict[str, Any] = {
+        "available": False,
+        "torch_version": None,
+        "cuda_version": None,
+        "gpu_name": None,
+        "error": None,
+    }
+    try:
+        import torch
+
+        result["torch_version"] = torch.__version__
+        result["cuda_version"] = torch.version.cuda
+        result["available"] = bool(torch.cuda.is_available())
+        if result["available"]:
+            result["gpu_name"] = torch.cuda.get_device_name(0)
+        elif torch.version.cuda is None:
+            result["error"] = "CPU-only PyTorch is installed"
+        else:
+            result["error"] = "CUDA runtime or NVIDIA driver is unavailable"
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
+def require_cuda() -> dict[str, Any]:
+    status = cuda_diagnostics()
+    if not status["available"]:
+        detail = status["error"] or "CUDA is unavailable"
+        raise RuntimeError(
+            "MortalSim GPU edition requires an NVIDIA GPU with CUDA support; "
+            f"CPU fallback is disabled ({detail})."
+        )
+    return status
+
+
 def _load_engine():
     import torch
     from engine import MortalEngine
@@ -39,10 +76,11 @@ def _load_engine():
     if not MODEL_PATH.exists():
         raise FileNotFoundError(f"模型文件不存在: {MODEL_PATH}")
 
+    require_cuda()
     state = torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
     cfg = state["config"]
     version = cfg["control"]["version"]
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda")
     brain = Brain(
         version=version,
         conv_channels=cfg["resnet"]["conv_channels"],

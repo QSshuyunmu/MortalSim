@@ -7,14 +7,15 @@ uploaded.
 
 ## Quick Start
 
-Download the CPU or CUDA Portable ZIP from GitHub Releases, extract it, and
-double-click `MortalSim.exe`. The app listens on `127.0.0.1` and opens the
-browser automatically.
+Download the CUDA Portable ZIP from GitHub Releases, extract it, and
+double-click `MortalSim.exe`. MortalSim is GPU-only: an NVIDIA GPU, a current
+driver, and CUDA-enabled PyTorch are required. The app listens on `127.0.0.1`
+and opens the browser automatically.
 
 For development:
 
 ```powershell
-python -m pip install -r requirements-cpu.txt
+python -m pip install -r requirements-cuda.txt
 npm --prefix apps/web ci
 npm --prefix apps/web run build
 python run_mortalsim.py

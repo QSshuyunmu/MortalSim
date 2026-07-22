@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from mortal_app.service import LIBRIICHI_DIR, MODEL_PATH
+from mortal_app.service import LIBRIICHI_DIR, MODEL_PATH, cuda_diagnostics, require_cuda
 
 from .job_manager import JobManager
 from .models import CapabilityResponse, RunRequest
@@ -45,17 +45,16 @@ def health() -> dict[str, str]:
 
 @app.get("/api/capabilities", response_model=CapabilityResponse)
 def capabilities() -> CapabilityResponse:
-    cuda = False
-    try:
-        import torch
-
-        cuda = bool(torch.cuda.is_available())
-    except Exception:
-        pass
+    cuda = cuda_diagnostics()
     return CapabilityResponse(
         platform=platform.platform(),
         python=sys.version.split()[0],
-        cuda_available=cuda,
+        cuda_available=bool(cuda["available"]),
+        cuda_required=True,
+        torch_version=cuda["torch_version"],
+        cuda_version=cuda["cuda_version"],
+        gpu_name=cuda["gpu_name"],
+        cuda_error=cuda["error"],
         nvidia_smi_available=shutil.which("nvidia-smi") is not None,
         model_exists=MODEL_PATH.exists(),
         model_path=str(MODEL_PATH),
@@ -92,9 +91,10 @@ def models() -> list[dict[str, object]]:
 @app.post("/api/runs", status_code=202)
 def create_run(request: RunRequest) -> dict[str, object]:
     try:
+        require_cuda()
         job = manager.create(request)
     except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"run_id": str(job.run_id), "status": job.status}
 
 

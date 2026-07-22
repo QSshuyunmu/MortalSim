@@ -19,7 +19,9 @@ def test_health_and_capabilities_contract() -> None:
         assert health.json()["status"] == "ok"
         capabilities = client.get("/api/capabilities")
         assert capabilities.status_code == 200
-        assert "cuda_available" in capabilities.json()
+        payload = capabilities.json()
+        assert payload["cuda_required"] is True
+        assert "cuda_error" in payload
 
 
 def test_run_request_accepts_public_payload() -> None:
@@ -36,6 +38,20 @@ def test_run_request_accepts_public_payload() -> None:
         engine="python",
     )
     assert request.model_dump()["strict_comparison"] is True
+
+
+def test_gpu_only_runtime_rejects_cpu(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "require_cuda", lambda: (_ for _ in ()).throw(RuntimeError("CUDA unavailable")))
+    payload = {
+        "hand": "4567m3477p13406s",
+        "first_tsumo": "6s",
+        "dora": "9s",
+        "discards": ["1s"],
+    }
+    with TestClient(app) as client:
+        response = client.post("/api/runs", json=payload)
+    assert response.status_code == 503
+    assert "CUDA unavailable" in response.json()["detail"]
 
 
 def test_completed_run_metadata_survives_manager_restart() -> None:

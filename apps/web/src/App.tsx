@@ -90,6 +90,10 @@ function App() {
   const update = (key: keyof Config, value: string | boolean) => setConfig((old) => ({ ...old, [key]: value }));
 
   const start = async () => {
+    if (capabilities && !capabilities.cuda_available) {
+      setError("CUDA unavailable. This GPU-only build requires an NVIDIA GPU and CUDA-enabled PyTorch; CPU fallback is disabled.");
+      return;
+    }
     if (capabilities && !capabilities.model_exists) {
       setError("未找到 Mortal 模型，请先在设置页检查模型路径。");
       return;
