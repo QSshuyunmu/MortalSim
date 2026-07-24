@@ -1,5 +1,7 @@
 # MortalSim
 
+**English** | [简体中文](README.zh-CN.md)
+
 <p align="center">
   <img src="apps/web/public/mascot.webp" alt="MortalSim red crab mascot holding a mahjong tile" width="160">
 </p>
@@ -22,6 +24,12 @@ is Simplified Chinese.
 - Background history extension, cancellation, replay, and GPU telemetry
 - Local model library with SHA-256 identity and CUDA compatibility checks
 - Excel, JSON, and self-contained HTML exports
+
+## Screenshots
+
+![MortalSim analysis workbench](docs/images/analysis-workbench.png)
+
+![MortalSim result comparison](docs/images/result-comparison.png)
 
 ## Quick Start
 
@@ -64,7 +72,7 @@ npm --prefix apps/web run build
 `v0.2.0-alpha.0` is a prerelease. The Python AMP engine is production-facing.
 ONNX remains experimental until strict per-seed action equivalence is proven.
 See `docs/INSTALL.md`,
-`docs/USER_GUIDE.md` and `docs/SMOKE_TEST.md`.
+the [Chinese user guide](docs/USER_GUIDE.md) and `docs/SMOKE_TEST.md`.
 
 ## License
 
