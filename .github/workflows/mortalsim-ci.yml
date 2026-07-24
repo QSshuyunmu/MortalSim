@@ -9,12 +9,12 @@ jobs:
   python-api:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - name: Install application dependencies
-        run: python -m pip install -r requirements-app.txt pytest
+        run: python -m pip install -r requirements-app.txt -r requirements-test.txt
       - name: Python tests
         run: python -m pytest tests mortal_app/test_gpu_monitor.py -q
   web:
@@ -23,8 +23,8 @@ jobs:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
@@ -35,7 +35,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -44,4 +44,6 @@ jobs:
       # changes across Rust releases. Run Clippy as an advisory gate while
       # rustfmt and tests remain blocking.
       - run: cargo clippy -p libriichi --lib -- --cap-lints warn
-      - run: cargo test -p libriichi --lib
+      # PyO3's extension-module feature intentionally omits libpython linkage
+      # on Unix. Disable it for the Rust test executable.
+      - run: cargo test -p libriichi --lib --no-default-features --features mimalloc

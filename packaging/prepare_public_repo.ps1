@@ -20,7 +20,7 @@ $directories = @('Akagi', 'apps', 'docs', 'libriichi', 'models', 'mortal', 'mort
 $rootFiles = @(
     '.gitattributes', '.gitignore', 'Cargo.lock', 'Cargo.toml', 'CONTRIBUTING.md', 'LICENSE',
     'MODEL_LICENSE.md', 'NOTICE', 'pyproject.toml', 'README.md',
-    'requirements-app.txt', 'requirements-cuda.txt', 'requirements-lock.txt',
+    'requirements-app.txt', 'requirements-cuda.txt', 'requirements-lock.txt', 'requirements-test.txt',
     'run_mortalsim.py', 'SECURITY.md', 'start_mortalsim.bat', 'THIRD_PARTY_LICENSES.md'
 )
 

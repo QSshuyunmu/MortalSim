@@ -40,6 +40,7 @@ For development:
 
 ```powershell
 python -m pip install -r requirements-lock.txt
+python -m pip install -r requirements-test.txt
 npm --prefix apps/web ci
 npm --prefix apps/web run build
 python run_mortalsim.py
