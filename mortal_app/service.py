@@ -14,10 +14,10 @@ from .model_registry import DEFAULT_MODEL_ID, ModelRegistry
 
 
 ROOT = Path(__file__).resolve().parents[1]
-AKAGI_DIR = ROOT / "Akagi"
+SIMULATOR_DIR = ROOT / "simulator"
 MORTAL_DIR = ROOT / "mortal"
 LIBRIICHI_DIR = ROOT / "target" / "release"
-MODEL_PATH = AKAGI_DIR / "model_v4_20240308_best_min.pth"
+MODEL_PATH = ROOT / "models" / "model_v4_20240308_best_min.pth"
 
 OUTCOMES = ("self_win", "self_deal_in", "draw", "sideways", "other_tsumo")
 ENGINE_TO_PUBLIC_HONOR = {
@@ -84,7 +84,7 @@ def _emit(emit: Callable[[dict[str, Any]], None], kind: str, **payload: Any) -> 
 
 def _prepare_imports(rayon_threads: int) -> None:
     os.environ["RAYON_NUM_THREADS"] = str(rayon_threads)
-    for path in (MORTAL_DIR, LIBRIICHI_DIR, AKAGI_DIR):
+    for path in (MORTAL_DIR, LIBRIICHI_DIR, SIMULATOR_DIR):
         if str(path) not in sys.path:
             sys.path.insert(0, str(path))
 

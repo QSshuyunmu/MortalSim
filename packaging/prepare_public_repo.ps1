@@ -16,7 +16,7 @@ if (Test-Path $destinationPath) {
     New-Item -ItemType Directory -Path $destinationPath | Out-Null
 }
 
-$directories = @('Akagi', 'apps', 'docs', 'libriichi', 'models', 'mortal', 'mortal_app', 'packaging', 'tests', '.github')
+$directories = @('simulator', 'apps', 'docs', 'libriichi', 'models', 'mortal', 'mortal_app', 'packaging', 'tests', '.github')
 $rootFiles = @(
     '.gitattributes', '.gitignore', 'Cargo.lock', 'Cargo.toml', 'CONTRIBUTING.md', 'LICENSE',
     'MODEL_LICENSE.md', 'NOTICE', 'pyproject.toml', 'README.md',

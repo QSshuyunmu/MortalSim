@@ -7,7 +7,7 @@ ROOT = Path(SPEC).resolve().parents[1]
 web_dist = ROOT / "apps" / "web" / "dist"
 manifest = ROOT / "models" / "MODEL_MANIFEST.json"
 mortal = ROOT / "mortal"
-akagi = ROOT / "Akagi"
+simulator = ROOT / "simulator"
 release = ROOT / "target" / "release"
 
 torch_binaries = collect_dynamic_libs("torch")
@@ -19,9 +19,9 @@ if web_dist.exists():
 # Checkpoints are never part of the portable application. Users import a
 # compatible local file after startup; this keeps model distribution outside
 # of the public project and release pipeline.
-kyoku_parser = ROOT / "Akagi" / "kyoku_sim_win.py"
+kyoku_parser = simulator / "kyoku_sim_win.py"
 if kyoku_parser.exists():
-    datas.append((str(kyoku_parser), "Akagi"))
+    datas.append((str(kyoku_parser), "simulator"))
 if manifest.exists():
     datas.append((str(manifest), "models"))
 for source in mortal.glob("*.py"):

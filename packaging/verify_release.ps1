@@ -29,7 +29,7 @@ foreach ($archive in $archives) {
             if ($entry.FullName -match '\.(pth|onnx|log|pyc)$' -or $entry.FullName -match '(^|/)(__pycache__|models\.json)(/|$)') {
                 throw "Forbidden private or generated file in $($archive.Name): $($entry.FullName)"
             }
-            $ownedText = $entry.FullName -notmatch '^_internal/' -or $entry.FullName -match '^_internal/(apps|Akagi|mortal|models)/'
+            $ownedText = $entry.FullName -notmatch '^_internal/' -or $entry.FullName -match '^_internal/(apps|simulator|mortal|models)/'
             if ($ownedText -and $entry.Length -le 10MB -and $entry.FullName -match '\.(svg|md|txt|json|html|css|js|py|ps1|cmd|toml|ya?ml)$') {
                 $reader = [IO.StreamReader]::new($entry.Open())
                 try { $content = $reader.ReadToEnd() } finally { $reader.Dispose() }

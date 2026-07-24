@@ -13,8 +13,8 @@ from pathlib import Path
 MORTAL_ROOT = Path(__file__).resolve().parents[1]
 MORTAL_DIR = str(MORTAL_ROOT / "mortal")
 LIBRIICHI_DIR = str(MORTAL_ROOT / "target" / "release")
-MODEL_PATH = str(MORTAL_ROOT / "Akagi" / "model_v4_20240308_best_min.pth")
-ONNX_MODEL_PATH = str(MORTAL_ROOT / "Akagi" / "model_v4_20240308_best_min.onnx")
+MODEL_PATH = str(MORTAL_ROOT / "models" / "model_v4_20240308_best_min.pth")
+ONNX_MODEL_PATH = str(MORTAL_ROOT / "models" / "model_v4_20240308_best_min.onnx")
 
 TILE_NAMES = {"1m","2m","3m","4m","5m","6m","7m","8m","9m",
     "1p","2p","3p","4p","5p","6p","7p","8p","9p",

@@ -48,7 +48,7 @@ python run_mortalsim.py
 
 Model weights are intentionally not committed. For local development, a
 compatible v4 checkpoint may be placed at
-`Akagi/model_v4_20240308_best_min.pth`; public builds still exclude it.
+`models/model_v4_20240308_best_min.pth`; public builds still exclude it.
 
 Run the source checks with:
 

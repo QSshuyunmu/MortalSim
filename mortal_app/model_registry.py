@@ -11,11 +11,11 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-AKAGI_DIR = ROOT / "Akagi"
+MODELS_DIR = ROOT / "models"
 MORTAL_DIR = ROOT / "mortal"
 LIBRIICHI_DIR = ROOT / "target" / "release"
 DEFAULT_MODEL_ID = "mortal-v4-20240308"
-DEFAULT_MODEL_PATH = AKAGI_DIR / "model_v4_20240308_best_min.pth"
+DEFAULT_MODEL_PATH = MODELS_DIR / "model_v4_20240308_best_min.pth"
 MAX_MODEL_BYTES = 2 * 1024 * 1024 * 1024
 
 

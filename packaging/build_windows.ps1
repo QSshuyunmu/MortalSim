@@ -198,7 +198,7 @@ New-Item -ItemType Directory -Force $stage, $releaseDir | Out-Null
 Write-Host 'Preparing a model-safe release stage...'
 Get-ChildItem -LiteralPath $dist -Recurse -File | ForEach-Object {
     $relative = Get-RelativeReleasePath $dist $_.FullName
-    if ($relative -ne '_internal/Akagi/model_v4_20240308_best_min.pth') {
+    if ($relative -notmatch '\.(pth|onnx)$') {
         New-HardLinkOrCopy $_.FullName (Join-Path $stage $relative)
     }
 }
