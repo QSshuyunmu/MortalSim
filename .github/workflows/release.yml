@@ -63,6 +63,7 @@ jobs:
         if: inputs.publish
         shell: pwsh
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: |
           if ($env:TAG -notmatch '^v\d+\.\d+\.\d+') { throw 'Use a semantic version tag/ref when publishing.' }
