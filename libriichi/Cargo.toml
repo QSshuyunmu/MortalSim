@@ -40,7 +40,7 @@ ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "
 pyo3-build-config = "0.25"
 
 [dev-dependencies]
-criterion = "0.6"
+criterion = "0.8"
 
 [[bench]]
 name = "bench"
