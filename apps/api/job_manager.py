@@ -168,19 +168,38 @@ class JobManager:
         parent = self.get(run_id)
         if parent.status != "completed" or not parent.result:
             raise RuntimeError("only completed analyses can be extended")
-        if int(parent.result.get("schema_version", 0)) != 2:
-            raise RuntimeError("only schema v2 analyses can be extended")
+        if int(parent.result.get("schema_version", 0)) != 3:
+            raise RuntimeError("schema v1/v2 analyses are read-only; rerun them as Formal Lite before extending")
         if int(parent.result.get("metrics_version", 0)) != 2:
             raise RuntimeError("the analysis metrics version is not extendable")
         if any(job.extension_of == run_id and job.status in {"queued", "running"} for job in self.jobs.values()):
             raise RuntimeError("this analysis already has an active extension")
         request = dict(parent.request)
+        contract = parent.result.get("decision_contract")
+        if contract != "stable_advantage_v2":
+            raise RuntimeError("only stable_advantage_v2 analyses can be extended in Formal Lite")
+        if request.get("decision_contract") != contract:
+            raise RuntimeError("analysis request and result decision contracts do not match")
+        parent_runtime = parent.result.get("runtime") or {}
+        required_runtime = (
+            "engine_id",
+            "artifact_sha256",
+            "build_id",
+            "compute_capability",
+            "batch_size",
+            "batch_capacity",
+            "precision_profile",
+        )
+        if any(parent_runtime.get(key) is None for key in required_runtime):
+            raise RuntimeError("analysis does not contain a complete Formal Lite runtime identity")
         model = ModelRegistry(self.data_dir).get(request.get("model_id"))
         expected_hash = (parent.result.get("model") or {}).get("sha256")
         if expected_hash and str(expected_hash).lower() != str(model["sha256"]).lower():
             raise RuntimeError("扩容模型与原分析不一致，请保留原模型文件")
         total_before = int(parent.result.get("total_runs", parent.result.get("runs", request.get("runs", 0))))
         parent_batch = int(request.get("batch_size", 1000))
+        if parent_batch != 1000 or int(parent_runtime.get("batch_size", 0)) != 1000:
+            raise RuntimeError("Formal Lite extensions require the original fixed batch_size=1000")
         if batch_size is not None and int(batch_size) != parent_batch:
             # CUDA AMP can choose different convolution kernels for a different
             # batch shape. That occasionally changes a near-tied argmax, which
@@ -323,7 +342,7 @@ class JobManager:
 
     def _persist(self, job: Job) -> None:
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
             "run_id": str(job.run_id),
             "status": job.status,
             "created_at": job.created_at.isoformat(),
@@ -341,7 +360,7 @@ class JobManager:
 
     def record(self, job: Job) -> dict[str, Any]:
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "run_id": str(job.run_id),
             "status": job.status,
             "created_at": job.created_at.isoformat(),

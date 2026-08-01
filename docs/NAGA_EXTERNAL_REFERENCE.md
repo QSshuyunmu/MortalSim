@@ -64,3 +64,16 @@ explained by model, random-stream, and sample variation.
 MortalSim metrics v2 exposes only `value.point`, the NAGA-compatible terminal
 round balance. Exact score snapshots remain internal validation data and are
 not a second user-facing point metric.
+
+## Formal Lite v0.3 RC check
+
+`stable_advantage_v2` 使用相同模型 SHA、seed 89 和局面各运行 1,000 局，得到：
+
+| Candidate | Average round balance | Win rate | Deal-in rate |
+| --- | ---: | ---: | ---: |
+| 1m | +4110.7 | 48.9% | 10.1% |
+| 5m | +5237.1 | 49.0% | 11.9% |
+| 2s | +4994.9 | 45.5% | 12.9% |
+
+推荐仍为 `5m`，与 NAGA 及 Legacy AMP 对照一致。该 1,000 局检查只能验证推荐方向
+没有发生明显漂移，不替代 50,000 局/候选迁移 Gate。

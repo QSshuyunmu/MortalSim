@@ -1,13 +1,20 @@
 .vscode
-__pycache__
-.pytest_cache
+**/__pycache__/
+/.pytest_cache/
 
 /target
 *.pyd
 *.dll
 *.exe
 *.so
+*.obj
+*.lib
+*.exp
 *.pth
+*.onnx
+*.npz
+*.pte
+*.ptd
 
 .ipynb_checkpoints
 *.ipynb
@@ -20,19 +27,16 @@ __pycache__
 /apps/web/tsconfig.tsbuildinfo
 /build
 /dist
-/dist-score-fix
-/dist-package-test
-/dist-package-test2
+/dist-*/
 /release
+/release-v*/
+/release-final-lite-*/
+/smoke-extract-final-*/
 /MortalSim-Windows-*.zip
 /.mortalsim
-/.playwright-cli
-/.tmp-ui-data
-/.tmp-extension-regression
-/.tmp-package-smoke
-/.tmp-package-smoke2
-/.tmp-release-smoke
-/.tmp-release-smoke-final
+/.playwright-cli/
+/.tmp-*/
+/.tmp-*
 /output/
 
 # Research documentation and local build leftovers excluded from the public app repository

@@ -47,3 +47,16 @@ jobs:
       # PyO3's extension-module feature intentionally omits libpython linkage
       # on Unix. Disable it for the Rust test executable.
       - run: cargo test -p libriichi --lib --no-default-features --features mimalloc
+  repository-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+      - name: Check local documentation links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --no-progress README.md README.zh-CN.md docs/**/*.md
+          fail: true

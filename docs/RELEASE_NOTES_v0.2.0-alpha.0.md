@@ -7,15 +7,15 @@ application.
 
 - Windows 10 or 11 x64
 - NVIDIA GPU with a driver compatible with the bundled CUDA 12.4 runtime
-- Approximately 4 GiB of free disk space for the extracted application
+- Approximately 500 MiB of free disk space for the extracted application and
+  local cache
 
 MortalSim is GPU-only. It does not fall back to CPU inference.
 
 ## Installation
 
-Download the `Core` ZIP and all `Runtime-XX` ZIP files for this version.
-Extract every archive into the same directory, then run
-`Start-MortalSim.cmd`.
+Download `MortalSim-Windows-x64-Lite-v0.2.0a0.zip`, extract it into a normal
+folder, then run `Start-MortalSim.cmd`.
 
 The release does not contain or download model weights. Import a compatible
 local Mortal `.pth` file from Settings and Diagnostics after startup.
@@ -37,7 +37,10 @@ logs, and settings.
 
 ## Correctness status
 
-- Python AMP is the production inference path.
+- The Lite native CUDA graph is the selectable compact inference path. Its
+  strict action/trace equivalence gate against PyTorch AMP is still open; use
+  the fixed-seed validation record before treating results as interchangeable
+  with the reference engine.
 - The headline average round balance uses terminal Hora/Ryukyoku settlements;
   accepted-riichi payments are verified internally but are not exposed as a
   second point metric.
@@ -54,6 +57,6 @@ logs, and settings.
 
 ## Integrity and licenses
 
-Verify every downloaded archive against `SHA256SUMS.txt`. The Core archive
-contains `SBOM.cdx.json`, the release manifest, AGPL license, notices, model
-distribution policy, installation guide, and troubleshooting guide.
+Verify the downloaded archive against `SHA256SUMS-Lite.txt`. The ZIP contains
+the release manifest, AGPL license, notices, model distribution policy,
+installation guide, validation record and troubleshooting guide.

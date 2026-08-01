@@ -36,6 +36,8 @@ mpmath==1.3.0
     # via sympy
 networkx==3.6.1
     # via torch
+numpy==2.3.5
+    # via mortal lite engine and libriichi bridge
 openpyxl==3.1.5
     # via -r requirements-app.txt
 pydantic==2.13.3

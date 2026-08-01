@@ -15,19 +15,60 @@ import apps.api.job_manager as job_manager_module
 from apps.api.job_manager import Job, JobManager
 from apps.api.main import app
 from apps.api.models import RunRequest
+from apps.api.services import StatisticsService
 from mortal_app.service import _parse_inputs, resolve_simulation_context
+from mortal_app.model_registry import ModelRegistry
+
+
+FORMAL_RUNTIME = {
+    "engine_id": "aoti-cuda-sm89",
+    "artifact_sha256": "runtime-test",
+    "build_id": "build-test",
+    "compute_capability": "8.9",
+    "batch_size": 1000,
+    "batch_capacity": 1024,
+    "precision_profile": "amp-static-advantage",
+}
+
+
+def test_empty_model_registry_does_not_advertise_an_unbundled_builtin() -> None:
+    with TemporaryDirectory() as temporary:
+        assert ModelRegistry(Path(temporary)).list() == []
 
 
 def test_health_and_capabilities_contract() -> None:
     with TestClient(app) as client:
         health = client.get("/api/health")
         assert health.status_code == 200
+        assert health.headers["cache-control"] == "no-store"
         assert health.json()["status"] == "ok"
         capabilities = client.get("/api/capabilities")
         assert capabilities.status_code == 200
         payload = capabilities.json()
         assert payload["cuda_required"] is True
         assert "cuda_error" in payload
+        assert "formal_lite_ready" in payload
+        assert payload["supported_decision_contracts"] == ["stable_advantage_v2"]
+
+
+def test_schema_v3_envelope_persists_formal_runtime_identity() -> None:
+    run_id = uuid4()
+    result = StatisticsService.envelope(
+        run_id=run_id,
+        created_at=job_manager_module.utc_now(),
+        config={"engine": "lite", "decision_contract": "stable_advantage_v2"},
+        raw_result={
+            "metrics_version": 2,
+            "decision_contract": "stable_advantage_v2",
+            "runtime": FORMAL_RUNTIME,
+            "candidates": [],
+        },
+        gpu_telemetry=None,
+    )
+    assert result["schema_version"] == 3
+    assert result["metrics_version"] == 2
+    assert result["decision_contract"] == "stable_advantage_v2"
+    assert result["runtime"] == FORMAL_RUNTIME
 
 
 def test_run_request_accepts_public_payload() -> None:
@@ -45,6 +86,7 @@ def test_run_request_accepts_public_payload() -> None:
         model_id="mortal-v4-20240308",
         rayon_threads=4,
         engine="python",
+        decision_contract="legacy_amp_v1",
     )
     assert request.model_dump()["strict_comparison"] is True
     assert request.first_tsumo is None
@@ -85,6 +127,21 @@ def test_new_hand_input_requires_fourteen_tiles_and_keeps_legacy_records_compati
         RunRequest(hand="4567m3477p13406s", dora="9s", discards=["1s"])
     legacy = RunRequest(hand="4567m3477p13406s", first_tsumo="6s", dora="9s", discards=["1s"])
     assert legacy.first_tsumo == "6s"
+
+
+def test_formal_lite_contract_fixes_public_batch_and_engine_pairing() -> None:
+    base = {"hand": "4567m3477p134066s", "dora": "9s", "discards": ["1s"]}
+    with pytest.raises(ValidationError, match="batch_size=1000"):
+        RunRequest(**base, batch_size=999)
+    with pytest.raises(ValidationError, match="legacy_amp_v1"):
+        RunRequest(**base, engine="python")
+    legacy = RunRequest(
+        **base,
+        engine="python",
+        decision_contract="legacy_amp_v1",
+        batch_size=32,
+    )
+    assert legacy.decision_contract == "legacy_amp_v1"
 
 
 def test_fourteenth_tile_is_derived_as_first_tsumo() -> None:
@@ -297,9 +354,25 @@ def test_extension_inherits_configuration_and_uses_next_seed(monkeypatch) -> Non
         )
         parent = Job(
             run_id=uuid4(),
-            request={"discards": ["1s", "6s"], "seed": 42, "runs": 1000, "round": "S2"},
+            request={
+                "discards": ["1s", "6s"],
+                "seed": 42,
+                "runs": 1000,
+                "round": "S2",
+                "batch_size": 1000,
+                "decision_contract": "stable_advantage_v2",
+            },
             status="completed",
-            result={"schema_version": 2, "metrics_version": 2, "seed": 42, "runs": 1000, "total_runs": 1000},
+            result={
+                "schema_version": 3,
+                "metrics_version": 2,
+                "decision_contract": "stable_advantage_v2",
+                "runtime": FORMAL_RUNTIME,
+                "model": {"sha256": "test"},
+                "seed": 42,
+                "runs": 1000,
+                "total_runs": 1000,
+            },
         )
         manager.jobs[parent.run_id] = parent
         captured: dict = {}
@@ -327,13 +400,42 @@ def test_extension_rejects_batch_change_to_preserve_amp_trace(monkeypatch) -> No
         )
         parent = Job(
             run_id=uuid4(),
-            request={"discards": ["1s"], "seed": 42, "runs": 1000, "batch_size": 1000},
+            request={
+                "discards": ["1s"],
+                "seed": 42,
+                "runs": 1000,
+                "batch_size": 1000,
+                "decision_contract": "stable_advantage_v2",
+            },
             status="completed",
-            result={"schema_version": 2, "metrics_version": 2, "seed": 42, "runs": 1000, "total_runs": 1000},
+            result={
+                "schema_version": 3,
+                "metrics_version": 2,
+                "decision_contract": "stable_advantage_v2",
+                "runtime": FORMAL_RUNTIME,
+                "model": {"sha256": "test"},
+                "seed": 42,
+                "runs": 1000,
+                "total_runs": 1000,
+            },
         )
         manager.jobs[parent.run_id] = parent
-        with pytest.raises(RuntimeError, match="Batch"):
+        with pytest.raises(RuntimeError, match="Batch|batch"):
             manager.create_extension(parent.run_id, 100, batch_size=1)
+
+
+def test_schema_v2_history_is_read_only_for_extensions() -> None:
+    with TemporaryDirectory() as directory:
+        manager = JobManager(data_dir=Path(directory))
+        parent = Job(
+            run_id=uuid4(),
+            request={"discards": ["1s"], "seed": 42, "runs": 1000},
+            status="completed",
+            result={"schema_version": 2, "metrics_version": 2, "runs": 1000},
+        )
+        manager.jobs[parent.run_id] = parent
+        with pytest.raises(RuntimeError, match="read-only"):
+            manager.create_extension(parent.run_id, 100)
 
 
 def test_active_tasks_expose_extension_progress(monkeypatch) -> None:

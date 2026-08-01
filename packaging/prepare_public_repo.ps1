@@ -16,10 +16,10 @@ if (Test-Path $destinationPath) {
     New-Item -ItemType Directory -Path $destinationPath | Out-Null
 }
 
-$directories = @('simulator', 'apps', 'docs', 'libriichi', 'models', 'mortal', 'mortal_app', 'packaging', 'tests', '.github')
+$directories = @('simulator', 'apps', 'docs', 'libriichi', 'models', 'mortal', 'mortal_app', 'packaging', 'tests', 'tools', '.github')
 $rootFiles = @(
     '.gitattributes', '.gitignore', 'Cargo.lock', 'Cargo.toml', 'CONTRIBUTING.md', 'LICENSE',
-    'MODEL_LICENSE.md', 'NOTICE', 'pyproject.toml', 'README.md',
+    'MODEL_LICENSE.md', 'NOTICE', 'pyproject.toml', 'README.md', 'README.zh-CN.md',
     'requirements-app.txt', 'requirements-cuda.txt', 'requirements-lock.txt', 'requirements-test.txt',
     'run_mortalsim.py', 'SECURITY.md', 'start_mortalsim.bat', 'THIRD_PARTY_LICENSES.md'
 )
@@ -30,11 +30,11 @@ foreach ($directory in $directories) {
     $target = Join-Path $destinationPath $directory
     Get-ChildItem -LiteralPath $source -Recurse -Force | ForEach-Object {
         $relative = $_.FullName.Substring($source.Length).TrimStart('\', '/')
-        if ($relative -match '(^|\\)(target|node_modules|dist|build|release|__pycache__)(\\|$)' -or $_.Name -match '\.(pth|onnx|dll|pyd|exe|zip|log)$') {
+        if ($relative -match '(^|\\)(target|node_modules|dist|build|release|__pycache__)(\\|$)' -or $_.Name -match '\.(pth|onnx|npz|pte|ptd|dll|pyd|exe|zip|log|pyc)$') {
             return
         }
         if (
-            ($directory -eq 'docs' -and $relative -match '^(src|css)(\\|$)|^(book\.toml|\.gitignore)$') -or
+            ($directory -eq 'docs' -and $relative -match '^(src|css)(\\|$)|^(book\.toml|\.gitignore)$|^CODEBASE_SLIMMING_PLAN\.md$') -or
             ($directory -eq 'libriichi' -and $relative -eq 'test_write.txt')
         ) {
             return
@@ -67,11 +67,11 @@ try {
     if ($trackedLarge) {
         throw "Public export still contains files larger than 100 MiB: $($trackedLarge -join ', ')"
     }
-    $forbiddenTracked = git ls-files | Where-Object { $_ -match '\.(pth|onnx|dll|pyd|exe|zip|log|pyc)$' }
+    $forbiddenTracked = git ls-files | Where-Object { $_ -match '\.(pth|onnx|npz|pte|ptd|dll|pyd|exe|zip|log|pyc)$' }
     if ($forbiddenTracked) {
         throw "Public export contains forbidden generated or model files: $($forbiddenTracked -join ', ')"
     }
-    $personalPaths = @(git grep -n -I -E '[A-Za-z]:\\(Users|tenhoulib)\\' -- . 2>$null)
+    $personalPaths = @(git grep -n -I -E '[A-Za-z]:[\\/](Users|tenhoulib)[\\/]' -- . 2>$null)
     if ($personalPaths) {
         throw "Public export contains absolute personal paths: $($personalPaths -join '; ')"
     }

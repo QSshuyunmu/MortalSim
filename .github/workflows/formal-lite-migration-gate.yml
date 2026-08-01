@@ -1,0 +1,71 @@
+name: Formal Lite Migration Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      checkpoint_path:
+        description: Runner-local v4 checkpoint used by the immutable corpus
+        required: true
+        default: C:\MortalSimGate\model-v4.pth
+        type: string
+      corpus_path:
+        description: Runner-local Legacy AMP corpus containing at least 1,000,000 decisions
+        required: true
+        default: C:\MortalSimGate\legacy-million
+        type: string
+      games_per_candidate:
+        description: Paired games per candidate; final Gate requires 50000
+        required: true
+        default: "50000"
+        type: string
+
+jobs:
+  migration-sm89:
+    runs-on: [self-hosted, Windows, X64, mortalsim-gpu-primary, sm89]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install locked Legacy AMP and test dependencies
+        run: python -m pip install -r requirements-lock.txt -r requirements-test.txt
+      - name: Build libriichi and verify fixed inputs
+        shell: pwsh
+        run: |
+          if (-not $env:MORTALSIM_LITE_ARTIFACT_DIR) { throw 'MORTALSIM_LITE_ARTIFACT_DIR is missing' }
+          if (-not (Test-Path '${{ inputs.checkpoint_path }}')) { throw 'Checkpoint is missing on the runner' }
+          if (-not (Test-Path '${{ inputs.corpus_path }}\manifest.json')) { throw 'Legacy corpus is missing on the runner' }
+          $env:PYO3_PYTHON = (Get-Command python).Source
+          cargo build --release --lib -p libriichi
+          Copy-Item target/release/libriichi.dll target/release/libriichi.cp313-win_amd64.pyd -Force
+      - name: Compare at least one million decisions
+        shell: pwsh
+        run: |
+          python tools/parity/compare_runtime.py `
+            --corpus '${{ inputs.corpus_path }}' `
+            --checkpoint '${{ inputs.checkpoint_path }}' `
+            --runtime-dir $env:MORTALSIM_LITE_ARTIFACT_DIR `
+            --max-decisions 1000000 `
+            --output migration-actions.json
+          $report = Get-Content migration-actions.json -Raw | ConvertFrom-Json
+          if ($report.decisions -lt 1000000) { throw 'Migration corpus contains fewer than one million decisions' }
+          if (-not $report.passed) { throw 'Action migration threshold failed' }
+      - name: Compare paired round statistics
+        shell: pwsh
+        run: |
+          python tools/parity/migration_gate.py `
+            --checkpoint '${{ inputs.checkpoint_path }}' `
+            --runtime-dir $env:MORTALSIM_LITE_ARTIFACT_DIR `
+            --runs '${{ inputs.games_per_candidate }}' `
+            --output migration-rounds.json
+          $report = Get-Content migration-rounds.json -Raw | ConvertFrom-Json
+          if ($report.runs_per_candidate -lt 50000) { throw 'Final Gate requires 50,000 games per candidate' }
+          if (-not $report.passed) { throw 'Paired round migration threshold failed' }
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: formal-lite-migration-sm89
+          path: |
+            migration-actions.json
+            migration-rounds.json

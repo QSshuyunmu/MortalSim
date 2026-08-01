@@ -1,0 +1,26 @@
+{
+  "validation_version": 1,
+  "decision_contract": "stable_advantage_v2",
+  "model_sha256": "dd51dcbf0765b4f9589db66237a1466c9f3aadfa99383e3a654abdd581e2b3c8",
+  "runs": 1000,
+  "seed": 42,
+  "candidates": [
+    {
+      "discard": "1s",
+      "games": 1000,
+      "errors": 0,
+      "trace_result_sha256": "ca079b53f31d66f1d51b003394a50490558c111901300b304bdb3bb22060430c",
+      "elapsed_seconds": 47.33737570000085,
+      "games_per_second": 21.1249564474691
+    }
+  ],
+  "runtime": {
+    "engine_id": "aoti-cuda-sm89",
+    "artifact_sha256": "b9cc517e58283b5f5520904c0feef9bf04271b4e6093019e4bd0b99afb40d2fd",
+    "build_id": "v0.3.0rc1-b9cc517e5828",
+    "compute_capability": "8.9",
+    "batch_size": 1000,
+    "batch_capacity": 1024,
+    "precision_profile": "amp-static-advantage"
+  }
+}

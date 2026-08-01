@@ -1,0 +1,50 @@
+{
+  "manifest_version": 1,
+  "runtime_abi": "mortalsim-lite-abi-2",
+  "engine_id": "aoti-cuda-sm89",
+  "decision_contract": "stable_advantage_v2",
+  "compute_capability": "8.9",
+  "batch_size": 1000,
+  "batch_capacity": 1024,
+  "precision_profile": "amp-static-advantage",
+  "build_id": "v0.3.0rc1-b9cc517e5828",
+  "artifact_sha256": "b9cc517e58283b5f5520904c0feef9bf04271b4e6093019e4bd0b99afb40d2fd",
+  "files": {
+    "mortal_lite_runtime.dll": "eac24cf3f7bfb20da3a4e56383ae0ed4589eae9f4e3149701f3dcad1de2e1110",
+    "aoti_cuda_shims.dll": "fea6a85962218ca10f121d4fc63f39220cef5c9882687f15d074d60b46b021ed",
+    "cudart64_12.dll": "d954ca542b3b6bcf03cc2b798a7d00051501cf734ca751050e986af505cf9dad",
+    "model.dll": "72765afcd5c8a1ea0c695cb18a7d1bd4084c833219a1be0e827f301b2d70515c"
+  },
+  "graph_build": {
+    "manifest_version": 1,
+    "engine_id": "aoti-cuda-sm89",
+    "decision_contract": "stable_advantage_v2",
+    "precision_profile": "amp-static-advantage",
+    "batch_capacity": 1024,
+    "compute_capability": "8.9",
+    "architecture": {
+      "version": 4,
+      "conv_channels": 256,
+      "num_blocks": 54
+    },
+    "checkpoint_sha256": "dd51dcbf0765b4f9589db66237a1466c9f3aadfa99383e3a654abdd581e2b3c8",
+    "graph": {
+      "file": "mortal-v4-amp-advantage-b1024.pte",
+      "sha256": "5c0fa06f1c418884482542921b9017af7a23cca22cf1db8a18d42dc0ae8e343e"
+    },
+    "tensor_data": [
+      {
+        "file": "aoti_cuda_blob.ptd",
+        "sha256": "82a0e57e57556a377df9330c040e63f17a1ec3affab498481210bb8d60746619"
+      }
+    ],
+    "toolchain": {
+      "python": "3.13.13",
+      "pytorch": "2.13.0+cu126",
+      "executorch": "1.3.1",
+      "triton_windows": "3.7.1.post27",
+      "cuda": "12.6",
+      "host_compiler": "MSC v.1944 64 bit (AMD64)"
+    }
+  }
+}

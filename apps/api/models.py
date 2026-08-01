@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 ROUND_VALUES = tuple(f"{wind}{number}" for wind in "ESW" for number in range(1, 5))
+DecisionContract = Literal["stable_advantage_v2", "legacy_amp_v1"]
 
 
 def _count_tiles(notation: str) -> int:
@@ -104,7 +105,8 @@ class RunRequest(BaseModel):
     batch_size: int = Field(default=1000, ge=1, le=100_000)
     model_id: str = Field(default="mortal-v4-20240308", min_length=1, max_length=80)
     rayon_threads: int = Field(default=20, ge=1, le=256)
-    engine: Literal["python"] = "python"
+    engine: Literal["python", "lite"] = "lite"
+    decision_contract: DecisionContract = "stable_advantage_v2"
     strict_comparison: bool = True
     replay_of: UUID | None = None
     expected_trace_hash: str | None = None
@@ -119,6 +121,13 @@ class RunRequest(BaseModel):
         kamicha = 100_000 - self.kyotaku * 1_000 - self.scores.self - self.scores.shimocha - self.scores.toimen
         if kamicha < 0 or kamicha % 100:
             raise ValueError("derived kamicha score must be a non-negative multiple of 100")
+        if self.engine == "lite":
+            if self.decision_contract != "stable_advantage_v2":
+                raise ValueError("Formal Lite supports only stable_advantage_v2")
+            if self.batch_size != 1000:
+                raise ValueError("stable_advantage_v2 requires batch_size=1000")
+        elif self.decision_contract != "legacy_amp_v1":
+            raise ValueError("the Python development engine supports only legacy_amp_v1")
         return self
 
     @field_validator("discards", mode="before")
@@ -195,10 +204,15 @@ class CapabilityResponse(BaseModel):
     torch_version: str | None = None
     cuda_version: str | None = None
     gpu_name: str | None = None
+    compute_capability: str | None = None
     cuda_error: str | None = None
     nvidia_smi_available: bool
     model_exists: bool
     model_path: str
     libriichi_exists: bool
     recommended_engine: str
+    supported_decision_contracts: list[str]
+    runtime_build_id: str | None = None
+    runtime_artifact_sha256: str | None = None
+    formal_lite_ready: bool
     data_dir: str

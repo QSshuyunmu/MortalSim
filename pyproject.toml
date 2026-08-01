@@ -1,6 +1,6 @@
 [project]
 name = "mortalsim"
-version = "0.2.0a0"
+version = "0.3.0rc1"
 description = "Local web desktop application for Mortal first-discard simulation"
 requires-python = ">=3.13,<3.14"
 dependencies = [

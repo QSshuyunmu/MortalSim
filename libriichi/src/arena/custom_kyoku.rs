@@ -133,6 +133,39 @@ enum ForcedFirstAction {
     InvalidRiichi,
 }
 
+const STABLE_ADVANTAGE_V2: &str = "stable_advantage_v2";
+
+/// Select the lowest action id among exact ties without ever considering an
+/// illegal action.  This is the authoritative policy selector for the Lite
+/// decision contract; keep it independent from Python/NumPy argmax behavior.
+fn select_stable_action(
+    scores: &[f32],
+    legal: &[bool],
+    excluded_action: Option<usize>,
+) -> Result<usize, &'static str> {
+    if scores.len() != crate::consts::ACTION_SPACE || legal.len() != crate::consts::ACTION_SPACE {
+        return Err("stable selector expects 46 scores and mask entries");
+    }
+
+    let mut best: Option<(usize, f32)> = None;
+    for action in 0..crate::consts::ACTION_SPACE {
+        if !legal[action] || excluded_action == Some(action) {
+            continue;
+        }
+        let score = scores[action];
+        if score.is_nan() {
+            return Err("stable selector rejected a NaN policy score");
+        }
+        match best {
+            None => best = Some((action, score)),
+            Some((_, best_score)) if score > best_score => best = Some((action, score)),
+            _ => {}
+        }
+    }
+    best.map(|(action, _)| action)
+        .ok_or("stable selector found no legal action")
+}
+
 fn forced_first_action(
     is_first: bool,
     pending_riichi_discard: bool,
@@ -296,6 +329,11 @@ impl CustomKyokuRunner {
         let mut profile = RunProfile::default();
         let eng = engine.bind_borrowed(py);
         let ver: u32 = eng.getattr("version")?.extract()?;
+        let decision_contract = eng
+            .getattr("decision_contract")
+            .and_then(|value| value.extract::<String>())
+            .unwrap_or_else(|_| "legacy_amp_v1".to_owned());
+        let stable_advantage = decision_contract == STABLE_ADVANTAGE_V2;
 
         // P1-5: Read enable_rule_based_agari_guard from engine
         let enable_agari_guard: bool = eng
@@ -488,7 +526,17 @@ impl CustomKyokuRunner {
                 let decode_started = profiling.then(Instant::now);
                 for (i, &(gi, pid)) in batch_map.iter().enumerate() {
                     let g = &mut games[gi];
-                    let orig_act = actions[i];
+                    let orig_act = if stable_advantage {
+                        select_stable_action(&q_values[i], &masks_recv[i], None).map_err(
+                            |message| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "{message} at batch row {i}"
+                                ))
+                            },
+                        )?
+                    } else {
+                        actions[i]
+                    };
                     let actor = pid as u8;
                     let guard = g.enable_agari_guard;
 
@@ -500,20 +548,13 @@ impl CustomKyokuRunner {
                     // but rule_based_agari() disagrees, fall back to the best
                     // alternative action by q_value (excluding action 43).
                     let act = if guard && orig_act == 43 && !st.rule_based_agari() {
-                        let qs = &q_values[i];
-                        let ms = &masks_recv[i];
-                        let mut best = 45usize; // default: no-op
-                        let mut best_q = f32::MIN;
-                        for (j, &q) in qs.iter().enumerate() {
-                            if j == 43 || !ms[j] {
-                                continue;
-                            }
-                            if q > best_q {
-                                best_q = q;
-                                best = j;
-                            }
-                        }
-                        best
+                        select_stable_action(&q_values[i], &masks_recv[i], Some(43)).map_err(
+                            |message| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "{message} after agari guard at batch row {i}"
+                                ))
+                            },
+                        )?
                     } else {
                         orig_act
                     };
@@ -1157,8 +1198,39 @@ fn build_game(
 mod tests {
     use super::{
         Event, EventExt, ForcedFirstAction, RoundOutcome, classify_round_outcome,
-        forced_first_action, round_balances_from_events, score_deltas,
+        forced_first_action, round_balances_from_events, score_deltas, select_stable_action,
     };
+
+    #[test]
+    fn stable_selector_is_legal_deterministic_and_tie_stable() {
+        let mut scores = [-10.0; 46];
+        let mut legal = [false; 46];
+        legal[3] = true;
+        legal[9] = true;
+        scores[3] = 7.5;
+        scores[9] = 7.5;
+        assert_eq!(select_stable_action(&scores, &legal, None), Ok(3));
+
+        scores[9] = 8.0;
+        assert_eq!(select_stable_action(&scores, &legal, None), Ok(9));
+        assert_eq!(select_stable_action(&scores, &legal, Some(9)), Ok(3));
+    }
+
+    #[test]
+    fn stable_selector_rejects_nan_and_empty_masks() {
+        let mut scores = [-1.0; 46];
+        let mut legal = [false; 46];
+        legal[4] = true;
+        scores[4] = f32::NAN;
+        assert_eq!(
+            select_stable_action(&scores, &legal, None),
+            Err("stable selector rejected a NaN policy score")
+        );
+        assert_eq!(
+            select_stable_action(&[0.0; 46], &[false; 46], None),
+            Err("stable selector found no legal action")
+        );
+    }
 
     #[test]
     fn first_riichi_is_an_explicit_reach_then_forced_discard_sequence() {

@@ -53,11 +53,30 @@ class ModelRegistry:
         temporary.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(self.index_path)
 
+    @staticmethod
+    def _with_contracts(item: dict[str, Any]) -> dict[str, Any]:
+        lite_compatible = (
+            item.get("version") == 4
+            and item.get("conv_channels") == 256
+            and item.get("num_blocks") == 54
+        )
+        contracts = ["stable_advantage_v2"] if lite_compatible else []
+        if item.get("engine") == "python-amp":
+            contracts.append("legacy_amp_v1")
+        return {
+            **item,
+            "supported_decision_contracts": contracts,
+            "lite_compatible": lite_compatible,
+            "incompatibility_reason": None
+            if lite_compatible
+            else "Formal Lite requires Mortal v4 / 256 channels / 54 blocks",
+        }
+
     def builtin(self) -> dict[str, Any]:
         present = DEFAULT_MODEL_PATH.exists()
-        return {
+        return self._with_contracts({
             "id": DEFAULT_MODEL_ID,
-            "label": "Mortal v4 (内置)",
+            "label": "Mortal v4 (开发参考)",
             "filename": DEFAULT_MODEL_PATH.name,
             "path": str(DEFAULT_MODEL_PATH),
             "sha256": sha256(DEFAULT_MODEL_PATH) if present else None,
@@ -66,16 +85,18 @@ class ModelRegistry:
             "conv_channels": 256,
             "num_blocks": 54,
             "engine": "python-amp",
-            "source": "bundled",
+            "source": "local-development",
             "ready": present,
-            "error": None if present else "内置模型文件缺失",
-        }
+            "error": None if present else "开发参考模型未安装",
+        })
 
     def list(self) -> list[dict[str, Any]]:
-        models = [self.builtin()]
+        builtin = self.builtin()
+        models = [builtin] if builtin["ready"] else []
         for item in self._index().values():
             path = self.root / item.get("stored_filename", "")
             models.append({**item, "path": str(path), "ready": path.exists(), "error": None if path.exists() else "模型文件已丢失"})
+            models[-1] = self._with_contracts(models[-1])
         return models
 
     def get(self, model_id: str | None) -> dict[str, Any]:
@@ -139,7 +160,32 @@ class ModelRegistry:
             torch.cuda.empty_cache()
         return {"version": version, "conv_channels": channels, "num_blocks": blocks}
 
-    def register_staged(self, temporary: Path, filename: str, model_hash: str, written: int) -> dict[str, Any]:
+    def validate_lite(self, path: Path) -> dict[str, Any]:
+        """Validate the Lite-compatible checkpoint without importing PyTorch."""
+        from mortal.lite_weights import LiteWeightError, load_mortal_state
+
+        try:
+            config, state = load_mortal_state(path)
+            version = int(config["control"]["version"])
+            channels = int(config["resnet"]["conv_channels"])
+            blocks = int(config["resnet"]["num_blocks"])
+        except (KeyError, TypeError, ValueError, LiteWeightError) as exc:
+            raise ValueError(f"invalid Mortal Lite checkpoint: {exc}") from exc
+        if (version, channels, blocks) != (4, 256, 54):
+            raise ValueError("Mortal Lite supports only v4 with 256 channels and 54 blocks")
+        if len(state) != 767:
+            raise ValueError(f"Mortal Lite expects 767 tensors, found {len(state)}")
+        return {"version": version, "conv_channels": channels, "num_blocks": blocks, "lite_compatible": True}
+
+    def register_staged(
+        self,
+        temporary: Path,
+        filename: str,
+        model_hash: str,
+        written: int,
+        *,
+        engine: str = "lite",
+    ) -> dict[str, Any]:
         safe_name = Path(filename).name
         if not safe_name.lower().endswith(".pth"):
             raise ValueError("只接受 .pth 权重文件")
@@ -148,7 +194,7 @@ class ModelRegistry:
         existing = entries.get(model_id)
         if existing:
             return {**existing, "duplicate": True}
-        architecture = self.validate(temporary)
+        architecture = self.validate_lite(temporary) if engine == "lite" else self.validate(temporary)
         stored_filename = f"{model_hash}.pth"
         temporary.replace(self.root / stored_filename)
         entry = {
@@ -158,17 +204,18 @@ class ModelRegistry:
             "stored_filename": stored_filename,
             "sha256": model_hash,
             "size_bytes": written,
-            "engine": "python-amp",
+            "engine": "mortal-lite" if engine == "lite" else "python-amp",
             "source": "imported",
             "ready": True,
             "error": None,
             **architecture,
         }
+        entry = self._with_contracts(entry)
         entries[model_id] = entry
         self._write_index(entries)
         return entry
 
-    def import_chunks(self, filename: str, chunks: Iterable[bytes]) -> dict[str, Any]:
+    def import_chunks(self, filename: str, chunks: Iterable[bytes], *, engine: str = "lite") -> dict[str, Any]:
         safe_name = Path(filename).name
         temporary = self.root / f".{os.getpid()}-{safe_name}.upload"
         written, digest = 0, hashlib.sha256()
@@ -180,6 +227,6 @@ class ModelRegistry:
                         raise ValueError("模型文件超过 2 GiB 限制")
                     digest.update(chunk)
                     destination.write(chunk)
-            return self.register_staged(temporary, safe_name, digest.hexdigest(), written)
+            return self.register_staged(temporary, safe_name, digest.hexdigest(), written, engine=engine)
         finally:
             temporary.unlink(missing_ok=True)

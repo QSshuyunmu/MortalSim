@@ -1,0 +1,51 @@
+{
+  "validation_version": 1,
+  "decision_contract": "stable_advantage_v2",
+  "model_sha256": "0a88ddad649804d085491b5397d895f596b0e55f30632c549ea145bb44786563",
+  "runs": 1000,
+  "seed": 89,
+  "candidates": [
+    {
+      "discard": "1m",
+      "games": 1000,
+      "errors": 0,
+      "trace_result_sha256": "13094f260d31749eb51dc64d7c7d8e8ae7522c387fde72182225eb428414b90f",
+      "elapsed_seconds": 43.3310335999995,
+      "games_per_second": 23.07814785198227,
+      "average_point": 4110.7,
+      "win_rate": 0.489,
+      "deal_in_rate": 0.101
+    },
+    {
+      "discard": "5m",
+      "games": 1000,
+      "errors": 0,
+      "trace_result_sha256": "1e6911c353a96c70124962fc058023d1ebc9b76afae0c31fcf764973a8cecfb8",
+      "elapsed_seconds": 42.33659999999509,
+      "games_per_second": 23.620224581098057,
+      "average_point": 5237.1,
+      "win_rate": 0.49,
+      "deal_in_rate": 0.119
+    },
+    {
+      "discard": "2s",
+      "games": 1000,
+      "errors": 0,
+      "trace_result_sha256": "e764c68e221b639e5d7e22faebbe44e23fce1565c7d0d2a05d34cecd9609f440",
+      "elapsed_seconds": 44.02599090000149,
+      "games_per_second": 22.713855601145962,
+      "average_point": 4994.9,
+      "win_rate": 0.455,
+      "deal_in_rate": 0.129
+    }
+  ],
+  "runtime": {
+    "engine_id": "aoti-cuda-sm89",
+    "artifact_sha256": "b9cc517e58283b5f5520904c0feef9bf04271b4e6093019e4bd0b99afb40d2fd",
+    "build_id": "v0.3.0rc1-b9cc517e5828",
+    "compute_capability": "8.9",
+    "batch_size": 1000,
+    "batch_capacity": 1024,
+    "precision_profile": "amp-static-advantage"
+  }
+}

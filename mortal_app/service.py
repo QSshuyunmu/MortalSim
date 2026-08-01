@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -89,13 +91,45 @@ def _prepare_imports(rayon_threads: int) -> None:
             sys.path.insert(0, str(path))
 
 
-def cuda_diagnostics() -> dict[str, Any]:
-    result: dict[str, Any] = {"available": False, "torch_version": None, "cuda_version": None, "gpu_name": None, "error": None}
+def cuda_diagnostics(engine_name: str = "python") -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "available": False,
+        "torch_version": None,
+        "cuda_version": None,
+        "gpu_name": None,
+        "compute_capability": None,
+        "error": None,
+    }
+    if engine_name == "lite":
+        try:
+            executable = shutil.which("nvidia-smi")
+            if executable:
+                probe = subprocess.run(
+                    [executable, "--query-gpu=name,compute_cap", "--format=csv,noheader,nounits"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if probe.returncode == 0 and probe.stdout.strip():
+                    fields = [field.strip() for field in probe.stdout.strip().splitlines()[0].split(",")]
+                    result.update(
+                        available=True,
+                        gpu_name=fields[0],
+                        compute_capability=fields[1] if len(fields) > 1 else None,
+                    )
+                    return result
+        except (OSError, subprocess.SubprocessError) as exc:
+            result["error"] = f"{type(exc).__name__}: {exc}"
+        result["error"] = result["error"] or "NVIDIA driver or nvidia-smi is unavailable"
+        return result
     try:
         import torch
         result.update(torch_version=torch.__version__, cuda_version=torch.version.cuda, available=bool(torch.cuda.is_available()))
         if result["available"]:
             result["gpu_name"] = torch.cuda.get_device_name(0)
+            major, minor = torch.cuda.get_device_capability(0)
+            result["compute_capability"] = f"{major}.{minor}"
         elif torch.version.cuda is None:
             result["error"] = "CPU-only PyTorch is installed"
         else:
@@ -105,19 +139,109 @@ def cuda_diagnostics() -> dict[str, Any]:
     return result
 
 
-def require_cuda() -> dict[str, Any]:
+def require_cuda(engine_name: str = "python") -> dict[str, Any]:
+    if engine_name == "lite":
+        # The Lite build deliberately does not bundle PyTorch.  A driver-level
+        # query is enough to provide an early, readable diagnostic; the native
+        # runtime performs the definitive CUDA initialization check next.
+        try:
+            executable = shutil.which("nvidia-smi")
+            if executable:
+                probe = subprocess.run(
+                    [executable, "--query-gpu=name,compute_cap", "--format=csv,noheader,nounits"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if probe.returncode == 0 and probe.stdout.strip():
+                    fields = [field.strip() for field in probe.stdout.strip().splitlines()[0].split(",")]
+                    return {
+                        "available": True,
+                        "torch_version": None,
+                        "cuda_version": None,
+                        "gpu_name": fields[0],
+                        "compute_capability": fields[1] if len(fields) > 1 else None,
+                        "error": None,
+                    }
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise RuntimeError("MortalSim Lite requires an NVIDIA driver; nvidia-smi found no usable GPU")
     status = cuda_diagnostics()
     if not status["available"]:
         raise RuntimeError(f"MortalSim GPU edition requires CUDA; CPU fallback is disabled ({status['error'] or 'CUDA unavailable'}).")
     return status
 
 
-def _load_engine(model_id: str | None = None):
+def _load_engine(
+    model_id: str | None = None,
+    engine_name: str = "python",
+    decision_contract: str = "stable_advantage_v2",
+):
+    model = ModelRegistry().get(model_id)
+    model_path = Path(model["path"])
+    if engine_name == "lite":
+        if decision_contract != "stable_advantage_v2":
+            raise RuntimeError("Formal Lite supports only stable_advantage_v2")
+        try:
+            from mortal.lite_engine import MortalLiteEngine
+        except ImportError:
+            from lite_engine import MortalLiteEngine
+
+        runtime_dir = Path(
+            model.get("lite_runtime_dir")
+            or os.environ.get("MORTALSIM_LITE_RUNTIME_DIR", ROOT / "packaging" / "lite_runtime")
+        )
+        runtime_path = Path(
+            model.get("lite_runtime_path")
+            or os.environ.get("MORTALSIM_LITE_RUNTIME", runtime_dir / "mortal_lite_runtime.dll")
+        )
+        configured_model = model.get("lite_model_path") or os.environ.get("MORTALSIM_LITE_MODEL", "")
+        if configured_model:
+            lite_model = Path(configured_model)
+        else:
+            # Portable builds have used both the AOTInductor suffix and the
+            # simpler model.dll name.  Resolve either without requiring a
+            # per-machine config file.
+            candidates = (
+                runtime_dir / "mortal-v4-amp-advantage-b1024.wrapper.pyd",
+                runtime_dir / "mortal-v4-amp-b1024.wrapper.pyd",
+                runtime_dir / "mortal-v4-fp32-b256.wrapper.pyd",
+                runtime_dir / "model.dll",
+            )
+            lite_model = next((path for path in candidates if path.is_file()), candidates[0])
+        configured_weights = model.get("lite_weights_path") or os.environ.get("MORTALSIM_LITE_WEIGHTS", "")
+        lite_weights = Path(configured_weights) if configured_weights else None
+        if not all(path.is_file() for path in (runtime_path, lite_model)):
+            raise RuntimeError(
+                "Mortal Lite runtime is not installed. Set MORTALSIM_LITE_RUNTIME, "
+                "MORTALSIM_LITE_MODEL to the portable GPU files."
+            )
+        checkpoint_path = model_path if lite_weights is None or lite_weights.suffix.lower() == ".pth" else None
+        if lite_weights is not None and not lite_weights.is_file():
+            raise RuntimeError(f"Mortal Lite weight blob is missing: {lite_weights}")
+        require_cuda("lite")
+        capacity = int(model.get("lite_batch_capacity") or os.environ.get("MORTALSIM_LITE_BATCH_CAPACITY", "1024"))
+        for marker, marker_capacity in (("-b256", 256), ("-b512", 512), ("-b1024", 1024)):
+            if marker in lite_model.name.lower() and not model.get("lite_batch_capacity") and not os.environ.get("MORTALSIM_LITE_BATCH_CAPACITY"):
+                capacity = marker_capacity
+                break
+        engine = MortalLiteEngine(
+            runtime_path,
+            lite_model,
+            lite_weights if checkpoint_path is None else None,
+            checkpoint_path=checkpoint_path,
+            capacity=capacity,
+            name="Mortal Lite",
+        )
+        return engine, "cuda:0", {**model, "engine": "mortal-lite"}
+
+    if decision_contract != "legacy_amp_v1":
+        raise RuntimeError("The Python development engine supports only legacy_amp_v1")
+
     import torch
     from engine import MortalEngine
     from model import Brain, DQN
-    model = ModelRegistry().get(model_id)
-    model_path = Path(model["path"])
     require_cuda()
     state = torch.load(model_path, map_location="cpu", weights_only=True)
     cfg = state["config"]
@@ -127,7 +251,27 @@ def _load_engine(model_id: str | None = None):
     dqn = DQN(version=version).eval().to(device)
     brain.load_state_dict(state["mortal"])
     dqn.load_state_dict(state["current_dqn"])
-    return MortalEngine(brain, dqn, is_oracle=False, version=version, device=device, enable_amp=True, name="MortalApp", enable_rule_based_agari_guard=True), device, model
+    engine = MortalEngine(
+        brain,
+        dqn,
+        is_oracle=False,
+        version=version,
+        device=device,
+        enable_amp=True,
+        name="MortalApp",
+        enable_rule_based_agari_guard=True,
+    )
+    engine.decision_contract = "legacy_amp_v1"
+    engine.runtime_metadata = {
+        "engine_id": "pytorch-cuda-amp",
+        "artifact_sha256": None,
+        "build_id": f"torch-{torch.__version__}",
+        "compute_capability": ".".join(map(str, torch.cuda.get_device_capability(0))),
+        "batch_size": None,
+        "batch_capacity": None,
+        "precision_profile": "torch-autocast-cuda",
+    }
+    return engine, device, {**model, "engine": "python-amp"}
 
 
 def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
@@ -623,7 +767,28 @@ def _trim_samples(samples: list[dict[str, Any]], discard: str, metric: str) -> l
 
 
 def merge_results(base: dict[str, Any], extra: dict[str, Any], operation_id: str) -> dict[str, Any]:
-    """Merge a completed extension into a schema-v2 result."""
+    """Merge a completed extension only when its formal execution identity matches."""
+    if int(base.get("schema_version", 0)) != 3 or int(extra.get("schema_version", 0)) != 3:
+        raise ValueError("only schema v3 results can be merged")
+    if base.get("decision_contract") != extra.get("decision_contract"):
+        raise ValueError("decision contract mismatch")
+    if base.get("decision_contract") != "stable_advantage_v2":
+        raise ValueError("Formal Lite extensions require stable_advantage_v2")
+    identity_fields = (
+        "engine_id",
+        "artifact_sha256",
+        "build_id",
+        "compute_capability",
+        "batch_size",
+        "batch_capacity",
+        "precision_profile",
+    )
+    base_runtime, extra_runtime = base.get("runtime") or {}, extra.get("runtime") or {}
+    for field in identity_fields:
+        if base_runtime.get(field) is None or base_runtime.get(field) != extra_runtime.get(field):
+            raise ValueError(f"runtime identity mismatch: {field}")
+    if (base.get("model") or {}).get("sha256") != (extra.get("model") or {}).get("sha256"):
+        raise ValueError("model SHA256 mismatch")
     merged = deepcopy(base)
     extra_by_discard = {candidate_identity(item): item for item in extra.get("candidates", [])}
     candidates: list[dict[str, Any]] = []
@@ -667,9 +832,14 @@ def merge_results(base: dict[str, Any], extra: dict[str, Any], operation_id: str
         out["call"]["average_balance"] = _weighted(left["call"].get("average_balance"), call1, right["call"].get("average_balance"), call2)
         out["draw"]["average_balance"] = _weighted(left["draw"].get("average_balance"), draw1, right["draw"].get("average_balance"), draw2)
         out["draw"]["tenpai_count"] = int(left["draw"].get("tenpai_count", 0) or 0) + int(right["draw"].get("tenpai_count", 0) or 0)
-        out["win"]["han_distribution"] = deepcopy(left["win"].get("han_distribution") or {})
-        for key, count in (right["win"].get("han_distribution") or {}).items():
-            out["win"]["han_distribution"][key] = out["win"]["han_distribution"].get(key, 0) + count
+        left_han = left["win"].get("han_distribution")
+        right_han = right["win"].get("han_distribution")
+        if left_han is None and right_han is None:
+            out["win"]["han_distribution"] = None
+        else:
+            out["win"]["han_distribution"] = deepcopy(left_han or {})
+            for key, count in (right_han or {}).items():
+                out["win"]["han_distribution"][key] = out["win"]["han_distribution"].get(key, 0) + count
         out["special"] = {
             "yakuman": int(left["special"].get("yakuman", 0)) + int(right["special"].get("yakuman", 0)),
             "nagashi_mangan": int(left["special"].get("nagashi_mangan", 0)) + int(right["special"].get("nagashi_mangan", 0)),
@@ -681,9 +851,16 @@ def merge_results(base: dict[str, Any], extra: dict[str, Any], operation_id: str
         out["yaku"] = []
         for item in left.get("yaku", []):
             other = right_yaku.get(item["id"], {})
-            count = (item.get("count") or 0) + (other.get("count") or 0)
+            available = bool(item.get("available") or other.get("available"))
+            count = (item.get("count") or 0) + (other.get("count") or 0) if available else None
             total_tiles = None if item.get("total_tiles") is None and other.get("total_tiles") is None else (item.get("total_tiles") or 0) + (other.get("total_tiles") or 0)
-            out["yaku"].append({**item, "count": count, "rate": count / (wins1 + wins2) if wins1 + wins2 else 0.0, "total_tiles": total_tiles})
+            out["yaku"].append({
+                **item,
+                "count": count,
+                "rate": count / (wins1 + wins2) if available and wins1 + wins2 else (0.0 if available else None),
+                "total_tiles": total_tiles,
+                "available": available,
+            })
         out["samples"] = {}
         for metric in set(left.get("samples", {})) | set(right.get("samples", {})):
             out["samples"][metric] = _trim_samples(
@@ -732,6 +909,9 @@ def merge_results(base: dict[str, Any], extra: dict[str, Any], operation_id: str
         "batch_size": (extra.get("config") or {}).get("batch_size"),
         "model_id": (extra.get("model") or {}).get("id"),
         "model_sha256": (extra.get("model") or {}).get("sha256"),
+        "decision_contract": extra.get("decision_contract"),
+        "runtime_artifact_sha256": (extra.get("runtime") or {}).get("artifact_sha256"),
+        "runtime_build_id": (extra.get("runtime") or {}).get("build_id"),
     })
     merged["extension_history"] = history
     return merged
@@ -755,7 +935,11 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
     oya = int(context["oya"])
     _prepare_imports(rayon_threads)
     _emit(emit, "status", message="正在加载模型")
-    engine, device, model = _load_engine(request.get("model_id", DEFAULT_MODEL_ID))
+    engine, device, model = _load_engine(
+        request.get("model_id", DEFAULT_MODEL_ID),
+        request.get("engine", "lite"),
+        request.get("decision_contract", "stable_advantage_v2"),
+    )
     import libriichi
     runner = libriichi.arena.CustomKyokuRunner()
     _emit(emit, "status", message=f"设备: {device}")
@@ -795,6 +979,8 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
     comparisons = [_compare(candidates[0], candidate) for candidate in candidates[1:]]
     return {
         "metrics_version": 2,
+        "decision_contract": request.get("decision_contract", "stable_advantage_v2"),
+        "runtime": deepcopy(getattr(engine, "runtime_metadata", {})),
         "elapsed": time.perf_counter() - started,
         "device": str(device),
         "model": {key: model[key] for key in ("id", "label", "filename", "sha256", "version", "conv_channels", "num_blocks", "engine") if key in model},

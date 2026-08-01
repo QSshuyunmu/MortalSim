@@ -1,21 +1,23 @@
 # MortalSim Application
 
-MortalSim is the local web front end for the Mortal first-discard simulator.
-The development entry point is:
+MortalSim is a loopback-only FastAPI and React desktop application around the
+Rust `libriichi::arena::CustomKyokuRunner`. The launcher selects a random local
+port, starts simulation workers in separate processes and opens the default
+browser. Runtime data is stored under `%LOCALAPPDATA%\MortalSim` or the
+explicit `MORTALSIM_DATA_DIR`.
 
-```powershell
-python run_mortalsim.py
-```
+The public v0.3 Lite package is GPU-only, libtorch-free and supports the
+versioned `stable_advantage_v2` contract on NVIDIA SM89. It imports a standard
+Mortal v4/256/54 checkpoint through a restricted reader, replaces the AOT graph
+constants and returns raw advantage scores. Legal-action selection remains in
+Rust. The package does not contain or download model weights.
 
-It starts a FastAPI service on a random loopback port, opens the browser, and
-keeps simulation work in a separate process. Results are stored under
-`%LOCALAPPDATA%\\MortalSim` (or `MORTALSIM_DATA_DIR` when set), never in the
-source or installation directory.
+Development-only `legacy_amp_v1` uses PyTorch CUDA autocast and exists solely
+for migration experiments. It is not present in the public Portable package,
+and its schema v1/v2 results cannot be merged with schema v3.
 
-The current MVP supports fixed-seed candidate comparison, live progress and
-GPU telemetry, result persistence, history reopening, diagnostics, and JSON,
-Excel, or self-contained HTML exports. A manual one-game worker smoke test is
-available with `python -m tests.api.run_worker_smoke`.
-
-The Python AMP engine is the only production engine in this release; ONNX
-remains experimental until strict per-seed action equivalence is demonstrated.
+The application supports fixed-seed candidate comparison, live progress, GPU
+telemetry, persistent history, atomic background extension, replay, diagnostics
+and JSON/Excel/offline HTML exports. See `DECISION_CONTRACTS.md`,
+`RESULT_SCHEMA_V3.md` and `LITE_VALIDATION.md` for the formal contract and open
+release Gates.

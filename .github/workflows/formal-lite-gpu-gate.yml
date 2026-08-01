@@ -1,0 +1,147 @@
+name: Formal Lite GPU Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      checkpoint_path:
+        description: Runner-local compatible v4 checkpoint path
+        required: true
+        default: C:\MortalSimGate\model-v4.pth
+        type: string
+      runs:
+        description: Games per candidate (1000 for RC, 50000 for final migration gate)
+        required: true
+        default: "1000"
+        type: string
+      run_30_minute_stability:
+        description: Run the required 30-minute VRAM stability Gate on the primary GPU
+        required: true
+        default: false
+        type: boolean
+      run_extension_equivalence:
+        description: Run the required one-shot 2000 versus 1000 + 1000 Gate
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  primary-sm89:
+    runs-on: [self-hosted, Windows, X64, mortalsim-gpu-primary, sm89]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install gate dependencies
+        run: python -m pip install -r requirements-app.txt -r requirements-test.txt
+      - name: Build libriichi extension and verify runtime inputs
+        shell: pwsh
+        run: |
+          if (-not $env:MORTALSIM_LITE_ARTIFACT_DIR) {
+            throw "MORTALSIM_LITE_ARTIFACT_DIR is not configured on the GPU runner"
+          }
+          $required = @("mortal_lite_runtime.dll", "aoti_cuda_shims.dll", "cudart64_12.dll", "model.dll", "runtime_manifest.json")
+          foreach ($file in $required) {
+            if (-not (Test-Path (Join-Path $env:MORTALSIM_LITE_ARTIFACT_DIR $file))) {
+              throw "Formal Lite artifact missing: $file"
+            }
+          }
+          $env:PYO3_PYTHON = (Get-Command python).Source
+          cargo build --release --lib -p libriichi
+          Copy-Item target/release/libriichi.dll target/release/libriichi.cp313-win_amd64.pyd -Force
+          python -c "import sys; sys.path.insert(0, 'target/release'); import libriichi; assert hasattr(libriichi, 'arena')"
+      - name: Run three independent processes
+        shell: pwsh
+        env:
+          CHECKPOINT: ${{ inputs.checkpoint_path }}
+          RUNS: ${{ inputs.runs }}
+        run: |
+          1..3 | ForEach-Object {
+            python tools/validate_formal_lite.py --checkpoint $env:CHECKPOINT --runtime-dir $env:MORTALSIM_LITE_ARTIFACT_DIR --runs $env:RUNS --output "gate-primary-$_.json"
+          }
+          $first = (Get-Content gate-primary-1.json -Raw | ConvertFrom-Json)
+          foreach ($index in 2..3) {
+            $next = (Get-Content "gate-primary-$index.json" -Raw | ConvertFrom-Json)
+            if (($first.candidates.trace_result_sha256 -join ',') -ne ($next.candidates.trace_result_sha256 -join ',')) {
+              throw "Formal Lite is not repeatable across independent processes"
+            }
+          }
+      - name: Run 30-minute VRAM stability Gate
+        if: inputs.run_30_minute_stability
+        shell: pwsh
+        env:
+          CHECKPOINT: ${{ inputs.checkpoint_path }}
+        run: |
+          python tools/validate_vram_stability.py --checkpoint $env:CHECKPOINT --runtime-dir $env:MORTALSIM_LITE_ARTIFACT_DIR --duration-seconds 1800 --output gate-vram-stability.json
+      - name: Run extension equivalence Gate
+        if: inputs.run_extension_equivalence
+        shell: pwsh
+        env:
+          CHECKPOINT: ${{ inputs.checkpoint_path }}
+        run: |
+          python tools/validate_extension_equivalence.py --checkpoint $env:CHECKPOINT --runtime-dir $env:MORTALSIM_LITE_ARTIFACT_DIR --base-runs 1000 --additional-runs 1000 --output gate-extension-equivalence.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: formal-lite-primary-sm89
+          path: |
+            gate-primary-*.json
+            gate-vram-stability.json
+            gate-extension-equivalence.json
+
+  secondary-sm89:
+    runs-on: [self-hosted, Windows, X64, mortalsim-gpu-secondary, sm89]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install gate dependencies
+        run: python -m pip install -r requirements-app.txt -r requirements-test.txt
+      - name: Build libriichi extension and verify runtime inputs
+        shell: pwsh
+        run: |
+          if (-not $env:MORTALSIM_LITE_ARTIFACT_DIR) {
+            throw "MORTALSIM_LITE_ARTIFACT_DIR is not configured on the GPU runner"
+          }
+          $required = @("mortal_lite_runtime.dll", "aoti_cuda_shims.dll", "cudart64_12.dll", "model.dll", "runtime_manifest.json")
+          foreach ($file in $required) {
+            if (-not (Test-Path (Join-Path $env:MORTALSIM_LITE_ARTIFACT_DIR $file))) {
+              throw "Formal Lite artifact missing: $file"
+            }
+          }
+          $env:PYO3_PYTHON = (Get-Command python).Source
+          cargo build --release --lib -p libriichi
+          Copy-Item target/release/libriichi.dll target/release/libriichi.cp313-win_amd64.pyd -Force
+          python -c "import sys; sys.path.insert(0, 'target/release'); import libriichi; assert hasattr(libriichi, 'arena')"
+      - name: Run secondary RTX 40 signature
+        shell: pwsh
+        env:
+          CHECKPOINT: ${{ inputs.checkpoint_path }}
+          RUNS: ${{ inputs.runs }}
+        run: python tools/validate_formal_lite.py --checkpoint $env:CHECKPOINT --runtime-dir $env:MORTALSIM_LITE_ARTIFACT_DIR --runs $env:RUNS --output gate-secondary.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: formal-lite-secondary-sm89
+          path: gate-secondary.json
+
+  cross-device-compare:
+    needs: [primary-sm89, secondary-sm89]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: formal-lite-*-sm89
+          merge-multiple: true
+      - name: Require identical runtime and trajectory signatures
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+          primary = json.loads(Path("gate-primary-1.json").read_text())
+          secondary = json.loads(Path("gate-secondary.json").read_text())
+          assert primary["runtime"] == secondary["runtime"], "runtime identity differs"
+          left = [item["trace_result_sha256"] for item in primary["candidates"]]
+          right = [item["trace_result_sha256"] for item in secondary["candidates"]]
+          assert left == right, "SM89 trajectory signatures differ across GPUs"

@@ -1,9 +1,8 @@
 # Public Release Gate
 
-MortalSim's CUDA distribution is intentionally split because GitHub Release
-assets must be smaller than 2 GiB. A complete release contains one `Core`
-archive and every `Runtime-XX` archive with the same version. Users extract
-all of them into one directory and run `Start-MortalSim.cmd`.
+The public candidate is the checkpoint-free `Lite` archive. It contains the
+application, Rust extension, web assets and the libtorch-free CUDA runtime in
+one portable ZIP. Users extract it and run `Start-MortalSim.cmd`.
 
 ## Mandatory gates
 
@@ -11,12 +10,12 @@ all of them into one directory and run `Start-MortalSim.cmd`.
    is included in the public repository or release notes.
 2. Run `python -m pytest tests mortal_app/test_gpu_monitor.py -q`,
    `cargo test -p libriichi --lib`, and the web typecheck/build.
-3. Build the split package with `packaging/build_windows.ps1` and verify each
-   filename and SHA-256 in `release/SHA256SUMS.txt`.
-4. On a clean Windows x64 machine with an NVIDIA GPU, extract Core plus all
-   Runtime archives, start through `Start-MortalSim.cmd`, import the intended
-   model, and run the fixed-seed GPU smoke test.
-5. Generate and attach an SBOM, all component archives, `SHA256SUMS.txt`, and
+3. Build the Lite package with `packaging/build_lite_windows.ps1` and verify
+   its filename and SHA-256 with `packaging/verify_release.ps1`.
+4. On a clean Windows x64 machine with an NVIDIA GPU, extract the Lite ZIP,
+   start through `Start-MortalSim.cmd`, import a compatible local model, and
+   run the fixed-seed GPU smoke test.
+5. Generate and attach an SBOM, the Lite archive, `SHA256SUMS-Lite.txt`, and
    the release notes to the tagged GitHub Release.
 6. Create the public repository through
    `packaging/prepare_public_repo.ps1 -Destination <empty-directory>` rather

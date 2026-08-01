@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
+import pytest
+
 from mortal_app.service import OUTCOMES, _compare, _legacy_outcome, _public, _rate, _summarize, _trim_samples, merge_results
 
 
@@ -201,9 +205,21 @@ def test_extension_merge_matches_one_shot_aggregate() -> None:
     one_shot = _summarize(first_rows + second_rows, 0, "1s")
     left = _summarize(first_rows, 0, "1s")
     right = _summarize(second_rows, 0, "1s")
+    runtime = {
+        "engine_id": "aoti-cuda-sm89",
+        "artifact_sha256": "runtime-test",
+        "build_id": "build-test",
+        "compute_capability": "8.9",
+        "batch_size": 1000,
+        "batch_capacity": 1024,
+        "precision_profile": "amp-static-advantage",
+    }
     base = {
-        "schema_version": 2,
+        "schema_version": 3,
         "metrics_version": 2,
+        "decision_contract": "stable_advantage_v2",
+        "runtime": runtime,
+        "model": {"sha256": "model-test"},
         "runs": 100,
         "total_runs": 100,
         "seed": 1,
@@ -213,8 +229,11 @@ def test_extension_merge_matches_one_shot_aggregate() -> None:
         "extension_history": [],
     }
     extra = {
-        "schema_version": 2,
+        "schema_version": 3,
         "metrics_version": 2,
+        "decision_contract": "stable_advantage_v2",
+        "runtime": runtime,
+        "model": {"sha256": "model-test"},
         "runs": 100,
         "total_runs": 100,
         "seed": 101,
@@ -229,6 +248,8 @@ def test_extension_merge_matches_one_shot_aggregate() -> None:
     assert candidate["rank"] == one_shot["rank"]
     assert candidate["outcome"] == one_shot["outcome"]
     assert candidate["samples"] == one_shot["samples"]
+    assert candidate["win"]["han_distribution"] == one_shot["win"]["han_distribution"]
+    assert candidate["yaku"] == one_shot["yaku"]
     assert candidate["sample"]["seed_start"] == [1, 0xDEAD]
     assert candidate["sample"]["seed_end"] == [200, 0xDEAD]
     assert merged["total_runs"] == 200
@@ -243,3 +264,26 @@ def test_extension_sample_pool_accepts_json_lists_and_live_tuples() -> None:
         "outcome.draw",
     )
     assert [item["seed"] for item in items] == [[42, 0xDEAD], (43, 0xDEAD)]
+
+
+def test_schema_v3_merge_rejects_runtime_or_contract_drift() -> None:
+    base = {
+        "schema_version": 3,
+        "metrics_version": 2,
+        "decision_contract": "stable_advantage_v2",
+        "runtime": {
+            "engine_id": "aoti-cuda-sm89",
+            "artifact_sha256": "a",
+            "build_id": "build",
+            "compute_capability": "8.9",
+            "batch_size": 1000,
+            "batch_capacity": 1024,
+            "precision_profile": "amp-static-advantage",
+        },
+        "model": {"sha256": "model"},
+        "candidates": [],
+    }
+    changed = deepcopy(base)
+    changed["runtime"]["artifact_sha256"] = "b"
+    with pytest.raises(ValueError, match="artifact_sha256"):
+        merge_results(base, changed, "operation")

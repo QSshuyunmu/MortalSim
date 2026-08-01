@@ -19,15 +19,17 @@ the property of their respective authors.
 ## Python and application runtime
 
 - Python: PSF License Version 2
-- PyTorch: BSD-3-Clause
+- PyTorch AOTInductor generated runtime: BSD-3-Clause (the full PyTorch Python package is not redistributed in Lite)
+- ExecuTorch CUDA shim: BSD-3-Clause
 - FastAPI: MIT
 - Uvicorn: BSD-3-Clause
 - Pydantic: MIT
 - OpenPyXL: MIT
 - PyInstaller: GPL-2.0-or-later with the PyInstaller bootloader exception
 
-Pinned versions are declared in `requirements-app.txt`,
-`requirements-cuda.txt`, and `pyproject.toml`.
+Pinned application versions are declared in `requirements-app.txt`,
+`requirements-cuda.txt`, and `pyproject.toml`. The native graph build identity
+is recorded in `tools/lite-toolchain.lock.json` and `runtime_manifest.json`.
 
 ## Web application
 
@@ -51,8 +53,8 @@ AGPL-3.0-or-later.
 
 ## NVIDIA CUDA runtime
 
-The CUDA release contains redistributable runtime libraries supplied through
-the official CUDA-enabled PyTorch wheel. Those binaries are governed by the
+The Lite release contains the CUDA runtime selected by the pinned native build
+environment. Those binaries are governed by the
 NVIDIA CUDA Toolkit End User License Agreement and NVIDIA third-party notices,
 not by MortalSim's AGPL license. Users must review NVIDIA's terms before using
 the CUDA package.

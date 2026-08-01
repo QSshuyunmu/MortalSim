@@ -1,0 +1,92 @@
+# Formal Lite v0.3 验证说明
+
+本文区分两个决策契约，避免把“迁移后统计接近”写成“旧引擎位级一致”。机器可读
+状态以 [`LITE_VALIDATION-v0.3.0-rc.1.json`](LITE_VALIDATION-v0.3.0-rc.1.json)
+为准。
+
+## 契约
+
+- `legacy_amp_v1`：原 PyTorch CUDA autocast、最终 Q argmax，仅用于开发对照。
+- `stable_advantage_v2`：AOT CUDA 图输出 raw advantage，Rust 在合法动作中使用严格
+  `>` 扫描；并列保留较小动作 ID。公开 Batch 为 1000，图容量为 1024。
+
+模型 SHA256、运行时 Artifact SHA256、Build ID、SM89 cubin、Batch、padding 和 Rust
+选择器共同定义 v2 结果身份。schema v1/v2 历史只读，不得和 schema v3 合并。
+
+## Legacy Gate 结论
+
+在固定 300 局、14,397 次决策的参考轨迹中，最接近的 AMP-static 原生图仍有 3 次
+动作分歧。GEMM、Native Conv 和 FP32 图会在不同的近似并列状态分叉；更换卷积实现、
+精度或启发式动作偏置都不能构成严格复刻。旧 AMP 攻关因此按预定停止条件结束。
+
+该失败不是 v2 Gate 的“通过”。v0.3 通过建立新决策契约来获得轻量、可复现的正式
+语义，并通过大样本迁移阈值判断它是否足够接近旧版统计行为。
+
+## 当前 RC 已验证
+
+本机环境：Windows x64、RTX 4050 Laptop、Compute Capability 8.9。
+
+- `stable_advantage_v2` 图可以加载、导入用户 v4/256/54 权重并完成原生推理。
+- 原生运行时 ABI、单文件 SHA 和聚合 Artifact SHA 在启动前验证。
+- Rust 稳定选择器覆盖非法动作、并列、负数、NaN、空 mask 和和牌守卫。
+- schema v3 保存契约、模型和运行时身份；扩容要求完全相同的身份与 Batch。
+- 发布构建排除 PyTorch、`.pth`、`.onnx`、日志和开发工具链。
+- 本地 Formal Lite 冒烟测试已产生 0 error 的逐局签名。
+
+本 RC 的运行时身份：
+
+```text
+engine_id: aoti-cuda-sm89
+build_id: v0.3.0rc1-b9cc517e5828
+artifact_sha256: b9cc517e58283b5f5520904c0feef9bf04271b4e6093019e4bd0b99afb40d2fd
+batch_size: 1000
+batch_capacity: 1024
+precision_profile: amp-static-advantage
+```
+
+## 最终 v0.3.0 尚未完成的 Gate
+
+1. 至少 100 万次 Legacy 决策语料，动作变化率不超过 0.10%。
+2. 每候选 50,000 局，配对平均局收支差 CI 完全位于 `[-100,+100]`，五类终局、
+   和牌率和放铳率差不超过 0.25pp。
+3. 三个独立进程产生完全相同的动作、终局、得点和 trace 签名。
+4. `1000 + 追加1000` 与一次 2000 局完全一致。
+5. 三个本地兼容 v4 权重分别完成 1000 局冒烟。
+6. 第二台 RTX 40 Windows 设备运行同一 Artifact，固定语料签名与主机完全相同。
+7. 连续 30 分钟显存无持续增长，GPU 监测开销不超过 1%。
+8. Portable ZIP、解压体积、启动、模型导入、API smoke 和敏感文件审计全部通过。
+
+任一迁移阈值失败时维持 RC/alpha，不发布正式 `v0.3.0`。缺少第二台硬件证据时也只能
+发布 RC。不得手工把验证 JSON 的 `formal_release_ready` 改为 `true`。
+
+## 复现工具
+
+```powershell
+# 采集 Legacy AMP 决策语料
+python tools/parity/collect_corpus.py --output D:\corpora\legacy --runs 300
+
+# 分层输出与 ULP 比较
+python tools/parity/layer_probe.py --help
+python tools/parity/compare_ulp.py reference.npz candidate.npz
+
+# 对 100 万决策检查 Lite 动作变化率
+python tools/parity/compare_runtime.py `
+  --corpus D:\corpora\legacy `
+  --checkpoint D:\models\model.pth `
+  --runtime-dir D:\runtime `
+  --output migration-actions.json
+
+# 50,000 局/候选统计迁移 Gate
+python tools/parity/migration_gate.py `
+  --checkpoint D:\models\model.pth `
+  --runtime-dir D:\runtime `
+  --runs 50000 `
+  --output migration-rounds.json
+
+# 正式固定 seed 硬件签名
+python tools/validate_formal_lite.py `
+  --checkpoint D:\models\model.pth `
+  --runtime-dir D:\runtime `
+  --runs 1000 `
+  --output gate.json
+```

@@ -1,15 +1,16 @@
 {
-  "schema_version": 1,
-  "models": [
-    {
-      "id": "mortal-v4-20240308",
-      "filename": "model_v4_20240308_best_min.pth",
-      "format": "pytorch-state-dict",
-      "size_bytes": 95392490,
-      "sha256": "0a88ddad649804d085491b5397d895f596b0e55f30632c549ea145bb44786563",
-      "engine": "python-amp",
-      "source": "local-development-reference",
-      "redistribution": "never-bundled"
-    }
-  ]
+  "schema_version": 2,
+  "bundled_models": [],
+  "downloads_models": false,
+  "import_contract": {
+    "format": "pytorch-state-dict",
+    "architecture": {
+      "version": 4,
+      "conv_channels": 256,
+      "num_blocks": 54
+    },
+    "identity": "sha256",
+    "decision_contract": "stable_advantage_v2"
+  },
+  "policy": "Users import a local compatible checkpoint; source and release assets contain no model weights."
 }
