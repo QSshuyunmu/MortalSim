@@ -1,5 +1,7 @@
 # MortalSim
 
+[简体中文安装与使用指南](README.zh-CN.md)
+
 <p align="center">
   <img src="apps/web/public/mascot.webp" alt="MortalSim red crab mascot holding a mahjong tile" width="160">
 </p>
