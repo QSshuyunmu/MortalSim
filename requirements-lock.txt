@@ -40,7 +40,7 @@ numpy==2.3.5
     # via mortal lite engine and libriichi bridge
 openpyxl==3.1.5
     # via -r requirements-app.txt
-pydantic==2.13.3
+pydantic==2.13.4
     # via
     #   -r requirements-app.txt
     #   fastapi
