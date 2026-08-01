@@ -33,8 +33,9 @@ MortalSim 是一个只在本机运行的日麻自亲第一打对比工具。下�
 ![MortalSim 红蟹吉祥物](apps/web/public/mascot.webp)
 
 > `v0.3.0-rc.1` 定义了新的 `stable_advantage_v2` 决策契约。它不是对旧
-> PyTorch AMP 的位级复刻，也不能与旧契约结果合并。当前 RC 已完成单机原生
-> 推理和协议测试，但仍缺少第二台 RTX 40、大样本迁移和 30 分钟稳定性 Gate；
+> PyTorch AMP 的位级复刻，也不能与旧契约结果合并。当前 RC 已通过本机
+> 110 万决策、每候选 50,000 局、扩容等价和 30 分钟稳定性 Gate；现在只缺
+> 第二台 RTX 40 的跨设备复现；
 > 证据见 [`docs/LITE_VALIDATION-v0.3.0-rc.1.json`](docs/LITE_VALIDATION-v0.3.0-rc.1.json)。
 
 ## Features
