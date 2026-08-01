@@ -65,7 +65,7 @@ jobs:
         shell: pwsh
         run: ./packaging/verify_release.ps1
       - name: Upload verified Lite release candidate
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: MortalSim-Windows-x64-Lite-checkpoint-free
           path: |

@@ -62,7 +62,7 @@ jobs:
           $report = Get-Content migration-rounds.json -Raw | ConvertFrom-Json
           if ($report.runs_per_candidate -lt 50000) { throw 'Final Gate requires 50,000 games per candidate' }
           if (-not $report.passed) { throw 'Paired round migration threshold failed' }
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: formal-lite-migration-sm89

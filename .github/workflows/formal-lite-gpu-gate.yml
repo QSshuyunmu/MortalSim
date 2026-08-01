@@ -81,7 +81,7 @@ jobs:
           CHECKPOINT: ${{ inputs.checkpoint_path }}
         run: |
           python tools/validate_extension_equivalence.py --checkpoint $env:CHECKPOINT --runtime-dir $env:MORTALSIM_LITE_ARTIFACT_DIR --base-runs 1000 --additional-runs 1000 --output gate-extension-equivalence.json
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: formal-lite-primary-sm89
           path: |
@@ -121,7 +121,7 @@ jobs:
           CHECKPOINT: ${{ inputs.checkpoint_path }}
           RUNS: ${{ inputs.runs }}
         run: python tools/validate_formal_lite.py --checkpoint $env:CHECKPOINT --runtime-dir $env:MORTALSIM_LITE_ARTIFACT_DIR --runs $env:RUNS --output gate-secondary.json
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: formal-lite-secondary-sm89
           path: gate-secondary.json
