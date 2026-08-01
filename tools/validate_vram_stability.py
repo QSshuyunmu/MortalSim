@@ -31,7 +31,13 @@ def main() -> int:
     parser.add_argument("--duration-seconds", type=int, default=1800)
     parser.add_argument("--rayon-threads", type=int, default=20)
     parser.add_argument("--max-growth-mib", type=float, default=128.0)
+    parser.add_argument("--overhead-pairs", type=int, default=3)
+    parser.add_argument("--max-monitor-overhead-percent", type=float, default=1.0)
     args = parser.parse_args()
+    if args.overhead_pairs < 1:
+        parser.error("--overhead-pairs must be at least 1")
+    if args.max_monitor_overhead_percent < 0:
+        parser.error("--max-monitor-overhead-percent cannot be negative")
 
     os.environ["MORTALSIM_LITE_RUNTIME_DIR"] = str(args.runtime_dir.resolve())
     with tempfile.TemporaryDirectory(prefix="mortalsim-vram-gate-") as temporary:
@@ -86,6 +92,40 @@ def main() -> int:
             )
 
         run_batch(0)  # Warm allocations before measuring growth.
+
+        unmonitored_durations: list[float] = []
+        monitored_durations: list[float] = []
+        overhead_errors = 0
+        next_seed_batch = 1
+        for pair in range(args.overhead_pairs):
+            before = time.perf_counter()
+            rows = run_batch(next_seed_batch * 1000)
+            unmonitored_durations.append(time.perf_counter() - before)
+            overhead_errors += sum(bool((row.get("result") or {}).get("error")) for row in rows)
+            next_seed_batch += 1
+
+            pair_monitor = GpuMonitor(
+                lambda _: None,
+                data_root / f"telemetry-overhead-{pair}.csv",
+                interval=2.0,
+            )
+            pair_monitor.start()
+            try:
+                before = time.perf_counter()
+                rows = run_batch(next_seed_batch * 1000)
+                monitored_durations.append(time.perf_counter() - before)
+                overhead_errors += sum(bool((row.get("result") or {}).get("error")) for row in rows)
+            finally:
+                pair_monitor.stop()
+            next_seed_batch += 1
+
+        unmonitored_median = statistics.median(unmonitored_durations)
+        monitored_median = statistics.median(monitored_durations)
+        monitor_overhead_percent = (
+            (monitored_median / unmonitored_median - 1.0) * 100.0
+            if unmonitored_median > 0
+            else None
+        )
         events: list[dict[str, object]] = []
         monitor = GpuMonitor(events.append, data_root / "telemetry.csv", interval=2.0)
         started = time.perf_counter()
@@ -93,7 +133,7 @@ def main() -> int:
         monitor.start()
         try:
             while time.perf_counter() - started < args.duration_seconds:
-                rows = run_batch((batches + 1) * 1000)
+                rows = run_batch((next_seed_batch + batches) * 1000)
                 games += len(rows)
                 errors += sum(bool((row.get("result") or {}).get("error")) for row in rows)
                 batches += 1
@@ -116,7 +156,10 @@ def main() -> int:
             and growth is not None
             and growth <= args.max_growth_mib
             and errors == 0
+            and overhead_errors == 0
             and monitor.summary()["critical_samples"] == 0
+            and monitor_overhead_percent is not None
+            and monitor_overhead_percent <= args.max_monitor_overhead_percent
         )
         output = {
             "stability_version": 1,
@@ -127,6 +170,20 @@ def main() -> int:
             "batches": batches,
             "errors": errors,
             "games_per_second": games / elapsed,
+            "monitor_overhead": {
+                "pairs": args.overhead_pairs,
+                "games": args.overhead_pairs * 2000,
+                "errors": overhead_errors,
+                "unmonitored_median_seconds_per_1000": unmonitored_median,
+                "monitored_median_seconds_per_1000": monitored_median,
+                "overhead_percent": monitor_overhead_percent,
+                "max_overhead_percent": args.max_monitor_overhead_percent,
+                "passed": bool(
+                    overhead_errors == 0
+                    and monitor_overhead_percent is not None
+                    and monitor_overhead_percent <= args.max_monitor_overhead_percent
+                ),
+            },
             "gpu": monitor.summary(),
             "memory_first_quartile_median_mib": first,
             "memory_last_quartile_median_mib": last,

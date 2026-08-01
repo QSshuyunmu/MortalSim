@@ -36,6 +36,8 @@
 - 三个独立进程对 `1s`、`6s` 各 1000 局得到完全相同的 trace/result SHA256。
 - 三个兼容 v4 权重各 1000 局均为 0 error。
 - `1000 + 追加1000` 与一次 2000 局对两个候选的规范化结果 SHA256 完全相同。
+- 连续 30 分钟运行 43,000 局，显存首末四分位中位数均为 489 MiB、增长 0 MiB，
+  0 error、0 critical sample；监测开/关三组配对吞吐差通过 1% 门槛。
 - 最终 Portable ZIP 为 33.205 MiB，解压 71.966 MiB；模型导入、schema v3 单局、
   no-store 历史读取与敏感文件审计均通过。
 
@@ -56,7 +58,6 @@ precision_profile: amp-static-advantage
 2. 每候选 50,000 局，配对平均局收支差 CI 完全位于 `[-100,+100]`，五类终局、
    和牌率和放铳率差不超过 0.25pp。
 3. 第二台 RTX 40 Windows 设备运行同一 Artifact，固定语料签名与主机完全相同。
-4. 连续 30 分钟显存无持续增长，GPU 监测开销不超过 1%。
 
 任一迁移阈值失败时维持 RC/alpha，不发布正式 `v0.3.0`。缺少第二台硬件证据时也只能
 发布 RC。不得手工把验证 JSON 的 `formal_release_ready` 改为 `true`。
@@ -91,4 +92,11 @@ python tools/validate_formal_lite.py `
   --runtime-dir D:\runtime `
   --runs 1000 `
   --output gate.json
+
+# 30 分钟显存与 GPU 监测开销 Gate
+python tools/validate_vram_stability.py `
+  --checkpoint D:\models\model.pth `
+  --runtime-dir D:\runtime `
+  --duration-seconds 1800 `
+  --output vram-gate.json
 ```

@@ -75,10 +75,30 @@
       "differences": 0,
       "passed": true
     },
+    "thirty_minute_vram_stability": {
+      "duration_seconds": 1824.152,
+      "games": 43000,
+      "errors": 0,
+      "games_per_second": 23.573,
+      "memory_first_quartile_median_mib": 489.0,
+      "memory_last_quartile_median_mib": 489.0,
+      "memory_growth_mib": 0.0,
+      "temperature_max_c": 85.0,
+      "critical_samples": 0,
+      "monitor_overhead": {
+        "pairs": 3,
+        "games": 6000,
+        "errors": 0,
+        "overhead_percent": -2.168,
+        "maximum_allowed_percent": 1.0,
+        "passed": true
+      },
+      "passed": true
+    },
     "portable_package": {
       "zip_mib": 33.205,
       "unpacked_mib": 71.966,
-      "zip_sha256": "69fe619d881ac1a1f905bba6b8c67488b613569ac0a07d7eb0cc2188652510f6",
+      "zip_sha256": "06abd34e6337e8a1143d809edb5ae0e2fc000b305763e930bc6ad3dd067d56a9",
       "contains_model_weights": false,
       "contains_pytorch": false
     },
@@ -96,7 +116,7 @@
     "extension_1000_plus_1000_equivalence": false,
     "three_model_1000_game_smoke": false,
     "second_rtx40_hardware_gate": true,
-    "thirty_minute_vram_stability": true,
+    "thirty_minute_vram_stability": false,
     "final_portable_package_gate": false
   },
   "policy": "This file must not be changed to formal_release_ready=true until every pending gate is false and the second RTX 40 evidence is attached."
