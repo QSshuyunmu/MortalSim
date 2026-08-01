@@ -95,23 +95,52 @@
       },
       "passed": true
     },
+    "million_decision_migration_gate": {
+      "corpus_rounds": 20000,
+      "corpus_decisions": 1102345,
+      "corpus_batches": 1963,
+      "corpus_errors": 0,
+      "corpus_manifest_sha256": "82c5032be313c621494f854ae0e2ddb5708c651564e8147eed7daf0d8e3570d4",
+      "action_mismatches": 631,
+      "action_change_rate": 0.0005724160766366246,
+      "maximum_allowed_rate": 0.001,
+      "passed": true
+    },
+    "fifty_thousand_games_per_candidate": {
+      "runs_per_candidate": 50000,
+      "candidates": {
+        "1s": {
+          "paired_point_delta": -2.222,
+          "paired_point_ci95": [-86.25031447045484, 81.80631447045485],
+          "maximum_outcome_rate_delta": 0.00034
+        },
+        "6s": {
+          "paired_point_delta": -4.868,
+          "paired_point_ci95": [-88.22578172437052, 78.48978172437053],
+          "maximum_outcome_rate_delta": 0.00026
+        }
+      },
+      "point_ci_required_within": [-100.0, 100.0],
+      "maximum_allowed_outcome_rate_delta": 0.0025,
+      "passed": true
+    },
     "portable_package": {
       "zip_mib": 33.205,
       "unpacked_mib": 71.966,
-      "zip_sha256": "06abd34e6337e8a1143d809edb5ae0e2fc000b305763e930bc6ad3dd067d56a9",
+      "zip_sha256": "ffc553076a584876166c398e87bdcc526d4cd306e7da1f6f67c127a660e6f7ce",
       "contains_model_weights": false,
       "contains_pytorch": false
     },
     "rust_selector_unit_tests": true,
     "schema_v3_contract_tests": true,
-    "python_api_tests": 62,
+    "python_api_tests": 65,
     "rust_tests": 36,
     "frontend_typecheck": true,
     "frontend_build": true
   },
   "pending": {
-    "million_decision_migration_gate": true,
-    "fifty_thousand_games_per_candidate": true,
+    "million_decision_migration_gate": false,
+    "fifty_thousand_games_per_candidate": false,
     "three_process_reproducibility": false,
     "extension_1000_plus_1000_equivalence": false,
     "three_model_1000_game_smoke": false,

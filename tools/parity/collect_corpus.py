@@ -9,7 +9,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -57,6 +57,13 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def batch_ranges(runs: int, batch_size: int) -> Iterator[tuple[int, int]]:
+    if runs < 1 or batch_size < 1:
+        raise ValueError("runs and batch_size must both be positive")
+    for offset in range(0, runs, batch_size):
+        yield offset, min(batch_size, runs - offset)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
@@ -70,6 +77,10 @@ def main() -> int:
     parser.add_argument("--rayon-threads", type=int, default=20)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
+    if args.runs < 1:
+        parser.error("--runs must be at least 1")
+    if args.batch_size < 1:
+        parser.error("--batch-size must be at least 1")
 
     if args.output.exists() and any(args.output.iterdir()) and not args.overwrite:
         raise RuntimeError("output directory is not empty; pass --overwrite explicitly")
@@ -97,22 +108,35 @@ def main() -> int:
 
     import libriichi
 
-    rows = libriichi.arena.CustomKyokuRunner().run_many(
-        engine=recorder,
-        kyoku=context["kyoku"],
-        honba=context["honba"],
-        kyotaku=context["kyotaku"],
-        bakaze=context["bakaze"],
-        oya=context["oya"],
-        scores=context["scores"],
-        dora_marker=dora,
-        main_haipai=hand,
-        first_discard=discards[0]["engine_tile"],
-        first_tsumo=first_tsumo,
-        first_riichi=discards[0]["riichi"],
-        seed_start=(seed, 0xDEAD),
-        count=runs,
-    )
+    runner = libriichi.arena.CustomKyokuRunner()
+    round_summaries: list[dict[str, Any]] = []
+    for offset, count in batch_ranges(runs, args.batch_size):
+        rows = runner.run_many(
+            engine=recorder,
+            kyoku=context["kyoku"],
+            honba=context["honba"],
+            kyotaku=context["kyotaku"],
+            bakaze=context["bakaze"],
+            oya=context["oya"],
+            scores=context["scores"],
+            dora_marker=dora,
+            main_haipai=hand,
+            first_discard=discards[0]["engine_tile"],
+            first_tsumo=first_tsumo,
+            first_riichi=discards[0]["riichi"],
+            seed_start=(seed + offset, 0xDEAD),
+            count=count,
+        )
+        round_summaries.extend(
+            {
+                "seed": row.get("seed"),
+                "trace_hash": row.get("trace_hash"),
+                "outcome": (row.get("result") or {}).get("outcome"),
+                "final_scores": (row.get("result") or {}).get("final_scores"),
+                "error": (row.get("result") or {}).get("error"),
+            }
+            for row in rows
+        )
     batches = sorted(args.output.glob("batch-*.npz"))
     manifest = {
         "corpus_version": 1,
@@ -122,20 +146,11 @@ def main() -> int:
         "batch_files": [
             {"file": path.name, "sha256": file_sha256(path)} for path in batches
         ],
-        "rounds": [
-            {
-                "seed": row.get("seed"),
-                "trace_hash": row.get("trace_hash"),
-                "outcome": (row.get("result") or {}).get("outcome"),
-                "final_scores": (row.get("result") or {}).get("final_scores"),
-                "error": (row.get("result") or {}).get("error"),
-            }
-            for row in rows
-        ],
+        "rounds": round_summaries,
     }
     manifest_path = args.output / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {manifest_path}: {len(rows)} rounds, {len(batches)} decision batches")
+    print(f"wrote {manifest_path}: {len(round_summaries)} rounds, {len(batches)} decision batches")
     return 0
 
 

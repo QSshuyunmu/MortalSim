@@ -23,5 +23,6 @@ contract and schema v3 runtime identity.
 The strict Legacy AMP reproduction gate failed and is documented in
 `docs/PARITY_ROOT_CAUSE.md`. This RC intentionally uses a new, stable contract
 instead of claiming equivalence. A final v0.3.0 release additionally requires a
-second RTX 40 machine and the large migration/stability gates recorded in
+second RTX 40 machine. The local million-decision, 50,000-round-per-candidate,
+extension-equivalence and 30-minute stability gates are recorded as passed in
 `docs/LITE_VALIDATION-v0.3.0-rc.1.json`.
