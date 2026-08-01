@@ -1,0 +1,1 @@
+"""MortalSim desktop launcher."""

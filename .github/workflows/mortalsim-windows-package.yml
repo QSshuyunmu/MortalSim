@@ -1,0 +1,43 @@
+name: MortalSim Windows Package
+
+on:
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Lite build dependencies
+        run: python -m pip install -r requirements-app.txt -r requirements-test.txt pyinstaller
+      - name: Check native Lite runtime inputs
+        shell: pwsh
+        run: |
+          $required = @('mortal_lite_runtime.dll','aoti_cuda_shims.dll','cudart64_12.dll','model.dll')
+          foreach ($name in $required) {
+            if (-not (Test-Path "packaging/lite_runtime/$name")) {
+              throw "Missing $name. The Lite AOTInductor CUDA artifacts are intentionally not stored in source; run this workflow on the release builder that supplies MORTALSIM_LITE_ARTIFACT_DIR."
+            }
+          }
+      - name: Build Lite package
+        shell: pwsh
+        run: ./packaging/build_lite_windows.ps1
+      - name: Verify Lite release asset
+        shell: pwsh
+        run: ./packaging/verify_release.ps1
+      - name: Upload archive
+        uses: actions/upload-artifact@v6
+        with:
+          name: MortalSim-Windows-x64-Lite
+          path: |
+            release/MortalSim-Windows-x64-Lite-*.zip
+            release/SHA256SUMS-Lite.txt
