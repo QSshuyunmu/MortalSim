@@ -23,7 +23,7 @@ jobs:
   migration-sm89:
     runs-on: [self-hosted, Windows, X64, mortalsim-gpu-primary, sm89]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
