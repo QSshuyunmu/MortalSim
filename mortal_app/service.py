@@ -22,6 +22,7 @@ LIBRIICHI_DIR = ROOT / "target" / "release"
 MODEL_PATH = ROOT / "models" / "model_v4_20240308_best_min.pth"
 
 OUTCOMES = ("self_win", "self_deal_in", "draw", "sideways", "other_tsumo")
+MERGE_STATE_VERSION = 2
 ENGINE_TO_PUBLIC_HONOR = {
     "E": "1z", "S": "2z", "W": "3z", "N": "4z",
     "P": "5z", "F": "6z", "C": "7z",
@@ -36,6 +37,14 @@ STAT_FIELDS = (
     "riichi_houjuu", "riichi_ryukyoku", "riichi_point", "chasing_riichi",
     "riichi_got_chased", "dama_agari", "dama_agari_jun", "dama_agari_point",
     "ryukyoku", "ryukyoku_point", "yakuman", "nagashi_mangan",
+)
+SCALAR_MERGE_FIELDS = (
+    ("win_point", "win", "average_point"),
+    ("deal_in_loss", "defense", "average_deal_in_loss"),
+    ("deal_in_turn", "defense", "average_deal_in_turn"),
+    ("riichi_turn", "riichi", "average_turn"),
+    ("call_balance", "call", "average_balance"),
+    ("draw_balance", "draw", "average_balance"),
 )
 
 # Stable public IDs. Until the Rust scoring result exposes identities, unavailable slots
@@ -675,6 +684,16 @@ def _summarize(
         "draw": {"rate": _rate(outcome_counts["draw"], completed), "average_balance": stat_sum["ryukyoku_point"] / stat_sum["ryukyoku"] if stat_sum["ryukyoku"] else None, "tenpai_count": draw_tenpai_games},
         "special": {"yakuman": int(stat_sum["yakuman"]), "nagashi_mangan": int(stat_sum["nagashi_mangan"]), "error_types": error_types},
         "yaku": [{"id": yaku_id, "count": yaku_counts[yaku_id] if has_game_metrics else None, "rate": yaku_counts[yaku_id] / wins if has_game_metrics and wins else (0.0 if has_game_metrics else None), "total_tiles": bonus_tiles[yaku_id] if has_game_metrics and yaku_id in bonus_tiles else None, "available": has_game_metrics} for yaku_id in YAKU_IDS],
+        "merge_state": {
+            "scalar_totals": {
+                "win_point": {"n": int(wins), "sum": agari_points},
+                "deal_in_loss": {"n": int(stat_sum["houjuu"]), "sum": houjuu_points},
+                "deal_in_turn": {"n": int(stat_sum["houjuu"]), "sum": stat_sum["houjuu_jun"]},
+                "riichi_turn": {"n": int(riichi_count), "sum": stat_sum["riichi_jun"]},
+                "call_balance": {"n": int(fuuro), "sum": stat_sum["fuuro_point"]},
+                "draw_balance": {"n": int(stat_sum["ryukyoku"]), "sum": stat_sum["ryukyoku_point"]},
+            },
+        },
         "samples": _sample(rows, candidate_id(discard, first_riichi), oya),
         "stability": stability,
         "replay_events": next((row.get("trace_events") for row in rows if row.get("trace_events")), None),
@@ -739,10 +758,20 @@ def _merge_rate(left: dict[str, Any] | None, right: dict[str, Any] | None) -> di
     )
 
 
-def _weighted(left: Any, left_n: int, right: Any, right_n: int) -> float | None:
-    values = [(float(value), count) for value, count in ((left, left_n), (right, right_n)) if value is not None and count > 0]
-    total = sum(count for _, count in values)
-    return sum(value * count for value, count in values) / total if total else None
+def _merge_scalar_total(left: Any, right: Any, name: str) -> dict[str, float | int]:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        raise ValueError(f"candidate merge state is missing scalar total: {name}")
+    if "n" not in left or "sum" not in left or "n" not in right or "sum" not in right:
+        raise ValueError(f"candidate merge state is incomplete for scalar total: {name}")
+    return {
+        "n": int(left["n"]) + int(right["n"]),
+        "sum": float(left["sum"]) + float(right["sum"]),
+    }
+
+
+def _scalar_average(total: dict[str, float | int]) -> float | None:
+    count = int(total["n"])
+    return float(total["sum"]) / count if count else None
 
 
 def _trim_samples(samples: list[dict[str, Any]], discard: str, metric: str) -> list[dict[str, Any]]:
@@ -774,6 +803,8 @@ def merge_results(base: dict[str, Any], extra: dict[str, Any], operation_id: str
         raise ValueError("decision contract mismatch")
     if base.get("decision_contract") != "stable_advantage_v2":
         raise ValueError("Formal Lite extensions require stable_advantage_v2")
+    if int(base.get("merge_state_version", 0)) != MERGE_STATE_VERSION or int(extra.get("merge_state_version", 0)) != MERGE_STATE_VERSION:
+        raise ValueError(f"Formal Lite extensions require merge_state_version={MERGE_STATE_VERSION}")
     identity_fields = (
         "engine_id",
         "artifact_sha256",
@@ -821,16 +852,17 @@ def merge_results(base: dict[str, Any], extra: dict[str, Any], operation_id: str
                 elif isinstance(value, dict) and "n" in value:
                     out[section][key] = _merge_mean(left[section].get(key), value)
         wins1, wins2 = left["outcome"]["self_win"]["count"], right["outcome"]["self_win"]["count"]
-        deal1, deal2 = left["outcome"]["self_deal_in"]["count"], right["outcome"]["self_deal_in"]["count"]
-        draw1, draw2 = left["outcome"]["draw"]["count"], right["outcome"]["draw"]["count"]
-        riichi1, riichi2 = left["riichi"]["rate"]["count"], right["riichi"]["rate"]["count"]
-        call1, call2 = left["call"]["rate"]["count"], right["call"]["rate"]["count"]
-        out["win"]["average_point"] = _weighted(left["win"].get("average_point"), wins1, right["win"].get("average_point"), wins2)
-        out["defense"]["average_deal_in_loss"] = _weighted(left["defense"].get("average_deal_in_loss"), deal1, right["defense"].get("average_deal_in_loss"), deal2)
-        out["defense"]["average_deal_in_turn"] = _weighted(left["defense"].get("average_deal_in_turn"), deal1, right["defense"].get("average_deal_in_turn"), deal2)
-        out["riichi"]["average_turn"] = _weighted(left["riichi"].get("average_turn"), riichi1, right["riichi"].get("average_turn"), riichi2)
-        out["call"]["average_balance"] = _weighted(left["call"].get("average_balance"), call1, right["call"].get("average_balance"), call2)
-        out["draw"]["average_balance"] = _weighted(left["draw"].get("average_balance"), draw1, right["draw"].get("average_balance"), draw2)
+        left_scalars = (left.get("merge_state") or {}).get("scalar_totals")
+        right_scalars = (right.get("merge_state") or {}).get("scalar_totals")
+        if not isinstance(left_scalars, dict) or not isinstance(right_scalars, dict):
+            raise ValueError("candidate merge state is missing scalar_totals")
+        merged_scalars = {
+            name: _merge_scalar_total(left_scalars.get(name), right_scalars.get(name), name)
+            for name, _, _ in SCALAR_MERGE_FIELDS
+        }
+        out["merge_state"] = {"scalar_totals": merged_scalars}
+        for name, section, field in SCALAR_MERGE_FIELDS:
+            out[section][field] = _scalar_average(merged_scalars[name])
         out["draw"]["tenpai_count"] = int(left["draw"].get("tenpai_count", 0) or 0) + int(right["draw"].get("tenpai_count", 0) or 0)
         left_han = left["win"].get("han_distribution")
         right_han = right["win"].get("han_distribution")
@@ -898,7 +930,7 @@ def merge_results(base: dict[str, Any], extra: dict[str, Any], operation_id: str
     merged["runs"] = int(base.get("runs", 0)) + additional
     merged["total_runs"] = merged["runs"]
     merged["elapsed"] = float(base.get("elapsed", 0)) + float(extra.get("elapsed", 0))
-    merged["merge_state_version"] = 1
+    merged["merge_state_version"] = MERGE_STATE_VERSION
     history = list(base.get("extension_history", []))
     history.append({
         "operation_id": operation_id,
@@ -995,7 +1027,7 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
         },
         "candidates": [_public(candidate) for candidate in candidates],
         "comparisons": comparisons,
-        "merge_state_version": 1,
+        "merge_state_version": MERGE_STATE_VERSION,
         "extension_history": [],
     }
 

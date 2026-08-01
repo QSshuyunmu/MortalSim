@@ -172,6 +172,8 @@ class JobManager:
             raise RuntimeError("schema v1/v2 analyses are read-only; rerun them as Formal Lite before extending")
         if int(parent.result.get("metrics_version", 0)) != 2:
             raise RuntimeError("the analysis metrics version is not extendable")
+        if int(parent.result.get("merge_state_version", 0)) != 2:
+            raise RuntimeError("该记录缺少精确扩容状态；请按正式 Lite 重新运行后再增加局数")
         if any(job.extension_of == run_id and job.status in {"queued", "running"} for job in self.jobs.values()):
             raise RuntimeError("this analysis already has an active extension")
         request = dict(parent.request)

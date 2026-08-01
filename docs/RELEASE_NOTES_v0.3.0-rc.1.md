@@ -12,6 +12,10 @@ contract and schema v3 runtime identity.
 - model, runtime artifact, build, precision, and decision identities persisted;
 - old schema v1/v2 records remain readable but are no longer extendable;
 - “rerun as Formal Lite” creates a new schema v3 record;
+- exact merge state v2 uses the Rust `houjuu` event denominator, so double-ron
+  defense averages merge identically to a one-shot run;
+- early schema-v3 RC histories without merge state v2 remain readable but must
+  be rerun before extension;
 - release archive still contains no model weights.
 
 ## RC status

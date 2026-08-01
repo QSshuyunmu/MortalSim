@@ -4,12 +4,15 @@ from copy import deepcopy
 
 import pytest
 
-from mortal_app.service import OUTCOMES, _compare, _legacy_outcome, _public, _rate, _summarize, _trim_samples, merge_results
+from mortal_app.service import MERGE_STATE_VERSION, OUTCOMES, _compare, _legacy_outcome, _public, _rate, _summarize, _trim_samples, merge_results
 
 
 class Stat:
+    def __init__(self, **values: int) -> None:
+        self.values = values
+
     def __getattr__(self, _name: str) -> int:
-        return 0
+        return self.values.get(_name, 0)
 
 
 def row(
@@ -21,6 +24,7 @@ def row(
     rank: int = 2,
     seed: int = 1,
     metrics: dict | None = None,
+    stat: Stat | None = None,
 ):
     result = {"type": outcome, "outcome": outcome}
     if method:
@@ -30,7 +34,7 @@ def row(
         "round_balance": point if round_balance is None else round_balance,
         "final_rank": rank,
     }
-    return {"seed": [seed, 0xDEAD], "trace_hash": f"hash-{seed}", "result": result, "players": [player], "metrics": metrics or {}, "stat": Stat()}
+    return {"seed": [seed, 0xDEAD], "trace_hash": f"hash-{seed}", "result": result, "players": [player], "metrics": metrics or {}, "stat": stat or Stat()}
 
 
 def test_terminal_partition_and_self_win_conservation() -> None:
@@ -218,6 +222,7 @@ def test_extension_merge_matches_one_shot_aggregate() -> None:
         "schema_version": 3,
         "metrics_version": 2,
         "decision_contract": "stable_advantage_v2",
+        "merge_state_version": MERGE_STATE_VERSION,
         "runtime": runtime,
         "model": {"sha256": "model-test"},
         "runs": 100,
@@ -232,6 +237,7 @@ def test_extension_merge_matches_one_shot_aggregate() -> None:
         "schema_version": 3,
         "metrics_version": 2,
         "decision_contract": "stable_advantage_v2",
+        "merge_state_version": MERGE_STATE_VERSION,
         "runtime": runtime,
         "model": {"sha256": "model-test"},
         "runs": 100,
@@ -256,6 +262,56 @@ def test_extension_merge_matches_one_shot_aggregate() -> None:
     assert merged["extension_history"][0]["seed_start"] == 101
 
 
+def test_extension_merge_uses_houjuu_event_count_for_double_ron_averages() -> None:
+    """A double ron is one terminal game but two Stat houjuu events."""
+    first_rows = [row(
+        "self_deal_in",
+        point=-8_000,
+        seed=1,
+        stat=Stat(houjuu=2, houjuu_point_to_ko=-8_000, houjuu_jun=20),
+    )]
+    second_rows = [row(
+        "self_deal_in",
+        point=-1_000,
+        seed=2,
+        stat=Stat(houjuu=1, houjuu_point_to_ko=-1_000, houjuu_jun=5),
+    )]
+    one_shot = _summarize(first_rows + second_rows, 0, "1s")
+    runtime = {
+        "engine_id": "aoti-cuda-sm89",
+        "artifact_sha256": "runtime-test",
+        "build_id": "build-test",
+        "compute_capability": "8.9",
+        "batch_size": 1000,
+        "batch_capacity": 1024,
+        "precision_profile": "amp-static-advantage",
+    }
+
+    def result(rows: list[dict], seed: int) -> dict:
+        return {
+            "schema_version": 3,
+            "metrics_version": 2,
+            "decision_contract": "stable_advantage_v2",
+            "merge_state_version": MERGE_STATE_VERSION,
+            "runtime": runtime,
+            "model": {"sha256": "model-test"},
+            "runs": len(rows),
+            "total_runs": len(rows),
+            "seed": seed,
+            "elapsed": 1.0,
+            "candidates": [_public(_summarize(rows, 0, "1s"))],
+            "comparisons": [],
+            "extension_history": [],
+        }
+
+    merged = merge_results(result(first_rows, 1), result(second_rows, 2), "double-ron")
+    defense = merged["candidates"][0]["defense"]
+    expected = one_shot["defense"]
+
+    assert defense["average_deal_in_loss"] == expected["average_deal_in_loss"] == -3_000
+    assert defense["average_deal_in_turn"] == expected["average_deal_in_turn"] == 25 / 3
+
+
 def test_extension_sample_pool_accepts_json_lists_and_live_tuples() -> None:
     """Older persisted runs decode seeds as lists; a live Rust run yields tuples."""
     items = _trim_samples(
@@ -271,6 +327,7 @@ def test_schema_v3_merge_rejects_runtime_or_contract_drift() -> None:
         "schema_version": 3,
         "metrics_version": 2,
         "decision_contract": "stable_advantage_v2",
+        "merge_state_version": MERGE_STATE_VERSION,
         "runtime": {
             "engine_id": "aoti-cuda-sm89",
             "artifact_sha256": "a",

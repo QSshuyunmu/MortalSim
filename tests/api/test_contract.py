@@ -367,6 +367,7 @@ def test_extension_inherits_configuration_and_uses_next_seed(monkeypatch) -> Non
                 "schema_version": 3,
                 "metrics_version": 2,
                 "decision_contract": "stable_advantage_v2",
+                "merge_state_version": 2,
                 "runtime": FORMAL_RUNTIME,
                 "model": {"sha256": "test"},
                 "seed": 42,
@@ -412,6 +413,7 @@ def test_extension_rejects_batch_change_to_preserve_amp_trace(monkeypatch) -> No
                 "schema_version": 3,
                 "metrics_version": 2,
                 "decision_contract": "stable_advantage_v2",
+                "merge_state_version": 2,
                 "runtime": FORMAL_RUNTIME,
                 "model": {"sha256": "test"},
                 "seed": 42,
@@ -435,6 +437,26 @@ def test_schema_v2_history_is_read_only_for_extensions() -> None:
         )
         manager.jobs[parent.run_id] = parent
         with pytest.raises(RuntimeError, match="read-only"):
+            manager.create_extension(parent.run_id, 100)
+
+
+def test_early_schema_v3_history_without_exact_merge_state_is_read_only() -> None:
+    with TemporaryDirectory() as directory:
+        manager = JobManager(data_dir=Path(directory))
+        parent = Job(
+            run_id=uuid4(),
+            request={"discards": ["1s"], "seed": 42, "runs": 1000},
+            status="completed",
+            result={
+                "schema_version": 3,
+                "metrics_version": 2,
+                "merge_state_version": 1,
+                "decision_contract": "stable_advantage_v2",
+                "runs": 1000,
+            },
+        )
+        manager.jobs[parent.run_id] = parent
+        with pytest.raises(RuntimeError, match="精确扩容状态"):
             manager.create_extension(parent.run_id, 100)
 
 

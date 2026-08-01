@@ -43,16 +43,48 @@
       "unchanged": true,
       "errors": 0
     },
+    "three_process_reproducibility": {
+      "processes": 3,
+      "games_per_candidate": 1000,
+      "candidates": ["1s", "6s"],
+      "errors": 0,
+      "all_signatures_identical": true,
+      "trace_result_sha256": {
+        "1s": "ca079b53f31d66f1d51b003394a50490558c111901300b304bdb3bb22060430c",
+        "6s": "dfed7652e2ab22634242c145890b3e1530950dfbdd02d727a981f9c18ffa578e"
+      },
+      "median_games_per_second": 23.468
+    },
+    "three_model_1000_game_smoke": {
+      "models": 3,
+      "games_per_model": 1000,
+      "candidate": "1s",
+      "errors": 0,
+      "model_result_sha256": {
+        "dd51dcbf0765b4f9589db66237a1466c9f3aadfa99383e3a654abdd581e2b3c8": "ca079b53f31d66f1d51b003394a50490558c111901300b304bdb3bb22060430c",
+        "e37010cc2a3e4c84c1c50ece60bc6c5a0cd3e609475a6c6f2ed0f462d781104a": "5928741cb6c1a5ae635aea17917225b15611c0c7b2d8a5572c6f3a84f215bc5b",
+        "0a88ddad649804d085491b5397d895f596b0e55f30632c549ea145bb44786563": "b1ffd601a9244767744c0b51fa26856c058b87fb0be00d38ccd17c309df867a7"
+      }
+    },
+    "extension_1000_plus_1000_equivalence": {
+      "base_runs": 1000,
+      "additional_runs": 1000,
+      "candidates": ["1s", "6s"],
+      "one_shot_sha256": "ae9f3ad288dae1559dde7398455b74760b54df2e5b82100244db641ad5a3c86d",
+      "merged_sha256": "ae9f3ad288dae1559dde7398455b74760b54df2e5b82100244db641ad5a3c86d",
+      "differences": 0,
+      "passed": true
+    },
     "portable_package": {
       "zip_mib": 33.205,
-      "unpacked_mib": 71.964,
-      "zip_sha256": "ab1ceaecb033ac4ffcabac2e6432a9ed67b11858dda6e90c8bb9ab2458674e5c",
+      "unpacked_mib": 71.966,
+      "zip_sha256": "69fe619d881ac1a1f905bba6b8c67488b613569ac0a07d7eb0cc2188652510f6",
       "contains_model_weights": false,
       "contains_pytorch": false
     },
     "rust_selector_unit_tests": true,
     "schema_v3_contract_tests": true,
-    "python_api_tests": 60,
+    "python_api_tests": 62,
     "rust_tests": 36,
     "frontend_typecheck": true,
     "frontend_build": true
@@ -60,9 +92,9 @@
   "pending": {
     "million_decision_migration_gate": true,
     "fifty_thousand_games_per_candidate": true,
-    "three_process_reproducibility": true,
-    "extension_1000_plus_1000_equivalence": true,
-    "three_model_1000_game_smoke": true,
+    "three_process_reproducibility": false,
+    "extension_1000_plus_1000_equivalence": false,
+    "three_model_1000_game_smoke": false,
     "second_rtx40_hardware_gate": true,
     "thirty_minute_vram_stability": true,
     "final_portable_package_gate": false
