@@ -75,14 +75,24 @@ function Remove-VerifiedTarget {
         # Extracted toolchains and nested Git repositories can contain read-only
         # files. The path has already passed Resolve-WorkspaceTarget, so only
         # normalize attributes inside that verified target before retrying.
-        foreach ($file in [System.IO.Directory]::EnumerateFiles($LiteralPath, "*", [System.IO.SearchOption]::AllDirectories)) {
-            [System.IO.File]::SetAttributes($file, [System.IO.FileAttributes]::Normal)
+        $extendedPath = if ($LiteralPath.StartsWith("\\")) { $LiteralPath } else { "\\?\$LiteralPath" }
+        foreach ($file in [System.IO.Directory]::EnumerateFiles($extendedPath, "*", [System.IO.SearchOption]::AllDirectories)) {
+            try {
+                [System.IO.File]::SetAttributes($file, [System.IO.FileAttributes]::Normal)
+            } catch {
+                # Directory.Delete may already have removed an ancestor before
+                # encountering the first read-only entry.
+            }
         }
-        foreach ($directory in [System.IO.Directory]::EnumerateDirectories($LiteralPath, "*", [System.IO.SearchOption]::AllDirectories)) {
-            [System.IO.File]::SetAttributes($directory, [System.IO.FileAttributes]::Normal)
+        foreach ($directory in [System.IO.Directory]::EnumerateDirectories($extendedPath, "*", [System.IO.SearchOption]::AllDirectories)) {
+            try {
+                [System.IO.File]::SetAttributes($directory, [System.IO.FileAttributes]::Directory)
+            } catch {
+                # Missing descendants are harmless during a retrying cleanup.
+            }
         }
-        [System.IO.File]::SetAttributes($LiteralPath, [System.IO.FileAttributes]::Directory)
-        [System.IO.Directory]::Delete($LiteralPath, $true)
+        [System.IO.File]::SetAttributes($extendedPath, [System.IO.FileAttributes]::Directory)
+        [System.IO.Directory]::Delete($extendedPath, $true)
     }
 }
 
