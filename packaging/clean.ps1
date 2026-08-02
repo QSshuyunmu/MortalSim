@@ -58,6 +58,34 @@ function Get-TopLevelRelativePaths {
     }
 }
 
+function Remove-VerifiedTarget {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+
+    $item = Get-Item -LiteralPath $LiteralPath -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return }
+    if (-not $item.PSIsContainer) {
+        [System.IO.File]::SetAttributes($LiteralPath, [System.IO.FileAttributes]::Normal)
+        [System.IO.File]::Delete($LiteralPath)
+        return
+    }
+
+    try {
+        [System.IO.Directory]::Delete($LiteralPath, $true)
+    } catch [System.UnauthorizedAccessException] {
+        # Extracted toolchains and nested Git repositories can contain read-only
+        # files. The path has already passed Resolve-WorkspaceTarget, so only
+        # normalize attributes inside that verified target before retrying.
+        foreach ($file in [System.IO.Directory]::EnumerateFiles($LiteralPath, "*", [System.IO.SearchOption]::AllDirectories)) {
+            [System.IO.File]::SetAttributes($file, [System.IO.FileAttributes]::Normal)
+        }
+        foreach ($directory in [System.IO.Directory]::EnumerateDirectories($LiteralPath, "*", [System.IO.SearchOption]::AllDirectories)) {
+            [System.IO.File]::SetAttributes($directory, [System.IO.FileAttributes]::Normal)
+        }
+        [System.IO.File]::SetAttributes($LiteralPath, [System.IO.FileAttributes]::Directory)
+        [System.IO.Directory]::Delete($LiteralPath, $true)
+    }
+}
+
 $cacheTargets = @(
     ".pytest_cache",
     ".playwright-cli",
@@ -162,15 +190,7 @@ foreach ($target in $targets) {
     if ($verified -ne $target.Absolute) {
         throw "Target changed during cleanup: $($target.Relative)"
     }
-    $item = Get-Item -LiteralPath $verified -Force -ErrorAction SilentlyContinue
-    if ($null -eq $item) {
-        continue
-    }
-    if ($item.PSIsContainer) {
-        [System.IO.Directory]::Delete($verified, $true)
-    } else {
-        [System.IO.File]::Delete($verified)
-    }
+    Remove-VerifiedTarget $verified
     Write-Host "Deleted $verified"
 }
 
