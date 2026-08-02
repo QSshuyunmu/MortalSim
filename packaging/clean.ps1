@@ -71,28 +71,32 @@ function Remove-VerifiedTarget {
 
     try {
         [System.IO.Directory]::Delete($LiteralPath, $true)
-    } catch [System.UnauthorizedAccessException] {
+    } catch {
         # Extracted toolchains and nested Git repositories can contain read-only
-        # files. The path has already passed Resolve-WorkspaceTarget, so only
-        # normalize attributes inside that verified target before retrying.
+        # files and paths beyond legacy MAX_PATH. The path has already passed
+        # Resolve-WorkspaceTarget, so delete its contents bottom-up using the
+        # extended path syntax before removing the verified root.
         $extendedPath = if ($LiteralPath.StartsWith("\\")) { $LiteralPath } else { "\\?\$LiteralPath" }
         foreach ($file in [System.IO.Directory]::EnumerateFiles($extendedPath, "*", [System.IO.SearchOption]::AllDirectories)) {
             try {
                 [System.IO.File]::SetAttributes($file, [System.IO.FileAttributes]::Normal)
+                [System.IO.File]::Delete($file)
             } catch {
-                # Directory.Delete may already have removed an ancestor before
-                # encountering the first read-only entry.
+                if ([System.IO.File]::Exists($file)) { throw }
             }
         }
-        foreach ($directory in [System.IO.Directory]::EnumerateDirectories($extendedPath, "*", [System.IO.SearchOption]::AllDirectories)) {
+        $directories = @([System.IO.Directory]::EnumerateDirectories($extendedPath, "*", [System.IO.SearchOption]::AllDirectories)) |
+            Sort-Object Length -Descending
+        foreach ($directory in $directories) {
             try {
                 [System.IO.File]::SetAttributes($directory, [System.IO.FileAttributes]::Directory)
+                [System.IO.Directory]::Delete($directory, $false)
             } catch {
-                # Missing descendants are harmless during a retrying cleanup.
+                if ([System.IO.Directory]::Exists($directory)) { throw }
             }
         }
         [System.IO.File]::SetAttributes($extendedPath, [System.IO.FileAttributes]::Directory)
-        [System.IO.Directory]::Delete($extendedPath, $true)
+        [System.IO.Directory]::Delete($extendedPath, $false)
     }
 }
 
