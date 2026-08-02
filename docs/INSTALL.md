@@ -19,6 +19,20 @@
 
 模型会复制到 `%LOCALAPPDATA%\MortalSim\models`，原始下载文件可以移走。运行记录写入 `%LOCALAPPDATA%\MortalSim\runs`，不会写入解压目录，也不会上传任何数据。
 
+## 私有自包含目录
+
+维护者可以把已发布的 Lite ZIP 与一份本机已有模型封装到仓库外的独立目录：
+
+```powershell
+.\packaging\build_local_bundle.ps1 `
+  -ModelPath "D:\models\model.pth" `
+  -PortableArchive ".\release-v0.3.0-rc.1\MortalSim-Windows-x64-Lite-v0.3.0-rc.1.zip" `
+  -Destination "D:\MortalSim-Local-v0.3.0-rc.1" `
+  -PythonExe "C:\Path\to\python.exe"
+```
+
+生成目录只保留应用、一个经过 Lite 校验的模型副本和独立 `data` 目录。必须通过其中的 `Start-MortalSim.cmd` 启动，历史、日志和缓存不会依赖源码仓库。这是私有本机产物，不能提交到 Git 或作为 Release 资产发布。
+
 ## GPU 检查
 
 在 PowerShell 执行 `nvidia-smi`。如果命令不存在、驱动不可用、显卡被系统禁用或计算能力不是 8.9，应用会在诊断页给出原因；Lite 不会静默回退到 CPU。`nvidia-smi` 顶部显示的“CUDA Version”是驱动可支持版本，不表示需要另装 Toolkit。Lite 包自带所需 CUDA 运行时 DLL。

@@ -32,6 +32,7 @@
 /release-v*/
 /release-final-lite-*/
 /smoke-extract-final-*/
+/MortalSim-Local-*/
 /MortalSim-Windows-*.zip
 /.mortalsim
 /.playwright-cli/

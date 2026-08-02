@@ -57,12 +57,13 @@ batch_capacity: 1024
 precision_profile: amp-static-advantage
 ```
 
-## 最终 v0.3.0 尚未完成的 Gate
+## RC 范围与未执行 Gate
 
-1. 第二台 RTX 40 Windows 设备运行同一 Artifact，固定语料签名与主机完全相同。
+项目决定本次不执行第二台 RTX 40 Windows 设备的同 Artifact 验证。因此
+`v0.3.0-rc.1` 只声明当前 RTX 4050 Laptop 上的验证结果，不声明跨设备签名一致。
 
-任一迁移阈值失败时维持 RC/alpha，不发布正式 `v0.3.0`。缺少第二台硬件证据时也只能
-发布 RC。不得手工把验证 JSON 的 `formal_release_ready` 改为 `true`。
+该选择不等同于 Gate 通过，发布状态继续保持 RC，验证 JSON 的
+`formal_release_ready` 保持 `false`。未来如发布不带 RC 标识的正式 `v0.3.0`，仍需另行定义并完成跨设备支持范围。
 
 ## 复现工具
 

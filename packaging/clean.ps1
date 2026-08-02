@@ -42,6 +42,22 @@ function Get-PathBytes {
     return [long]$measure.Sum
 }
 
+function Get-TopLevelRelativePaths {
+    param(
+        [Parameter(Mandatory)][string[]]$Patterns,
+        [switch]$FilesOnly,
+        [switch]$DirectoriesOnly
+    )
+
+    foreach ($item in Get-ChildItem -LiteralPath $root -Force) {
+        if ($FilesOnly -and $item.PSIsContainer) { continue }
+        if ($DirectoriesOnly -and -not $item.PSIsContainer) { continue }
+        if ($Patterns | Where-Object { $item.Name -like $_ }) {
+            $item.Name
+        }
+    }
+}
+
 $cacheTargets = @(
     ".pytest_cache",
     ".playwright-cli",
@@ -63,8 +79,10 @@ $buildTargets = @(
     "target",
     "apps\web\node_modules",
     "apps\web\dist",
-    "apps\web\tsconfig.tsbuildinfo"
+    "apps\web\tsconfig.tsbuildinfo",
+    "exe-wrapper"
 )
+$buildTargets += Get-TopLevelRelativePaths -Patterns @("*.obj", "*.lib", "*.exp") -FilesOnly
 
 $packageTargets = @(
     ".tmp-extension-regression",
@@ -77,12 +95,14 @@ $packageTargets = @(
     "dist-package-test2",
     "dist-score-fix"
 )
+$packageTargets += Get-TopLevelRelativePaths -Patterns @(".tmp-*")
+$packageTargets += Get-TopLevelRelativePaths -Patterns @("smoke-extract-*", "release-final-lite-*") -DirectoriesOnly
 
 if ($RemovePortable) {
-    $packageTargets += "dist"
+    $packageTargets += Get-TopLevelRelativePaths -Patterns @("dist", "dist-*") -DirectoriesOnly
 }
 if ($RemoveRelease) {
-    $packageTargets += "release"
+    $packageTargets += Get-TopLevelRelativePaths -Patterns @("release", "release-*") -DirectoriesOnly
 } elseif ($PruneRelease) {
     $checksumPath = Join-Path $root "release\SHA256SUMS.txt"
     if (-not (Test-Path -LiteralPath $checksumPath)) {

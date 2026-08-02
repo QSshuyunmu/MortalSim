@@ -32,7 +32,12 @@ def wait_for_health(port: int, timeout: float = 20.0) -> bool:
 
 
 def write_startup_error(message: str) -> None:
-    root = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "MortalSim" / "logs"
+    configured = os.environ.get("MORTALSIM_DATA_DIR")
+    root = (
+        Path(configured).expanduser().resolve() / "logs"
+        if configured
+        else Path(os.environ.get("LOCALAPPDATA", Path.home())) / "MortalSim" / "logs"
+    )
     root.mkdir(parents=True, exist_ok=True)
     (root / "launcher.log").write_text(message + "\n", encoding="utf-8")
 
