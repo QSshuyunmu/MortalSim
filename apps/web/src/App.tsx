@@ -36,9 +36,9 @@ const initial = {
 };
 type RequestCandidate = string | { tile: string; riichi?: boolean };
 const candidateKey = (candidate: Pick<Candidate,"discard"|"candidate"|"first_riichi">) => candidate.candidate || (candidate.first_riichi ? `riichi:${candidate.discard}` : candidate.discard);
-const candidateLabel = (candidate: Pick<Candidate,"discard"|"first_riichi">) => candidate.first_riichi ? `立直打 ${candidate.discard}` : `打 ${candidate.discard}`;
-const candidateIdLabel = (value: string | undefined) => value?.startsWith("riichi:") ? `立直打 ${value.slice("riichi:".length)}` : `打 ${value||""}`;
-const requestCandidateLabel = (candidate: RequestCandidate) => typeof candidate === "string" ? `打 ${candidate}` : candidate.riichi ? `立直打 ${candidate.tile}` : `打 ${candidate.tile}`;
+const candidateLabel = (candidate: Pick<Candidate,"discard"|"first_riichi">) => candidate.first_riichi ? `立直打 ${publicTile(candidate.discard)}` : `打 ${publicTile(candidate.discard)}`;
+const candidateIdLabel = (value: string | undefined) => value?.startsWith("riichi:") ? `立直打 ${publicTile(value.slice("riichi:".length))}` : `打 ${publicTile(value||"")}`;
+const requestCandidateLabel = (candidate: RequestCandidate) => typeof candidate === "string" ? `打 ${publicTile(candidate)}` : candidate.riichi ? `立直打 ${publicTile(candidate.tile)}` : `打 ${publicTile(candidate.tile)}`;
 const resultCandidateLabel = (candidate: any) => candidate?.discard ? candidateLabel(candidate) : requestCandidateLabel(candidate);
 const ROUND_OPTIONS = [
   ["E1","东一局"],["E2","东二局"],["E3","东三局"],["E4","东四局"],
