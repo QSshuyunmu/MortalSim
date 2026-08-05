@@ -27,6 +27,10 @@ ENGINE_TO_PUBLIC_HONOR = {
     "E": "1z", "S": "2z", "W": "3z", "N": "4z",
     "P": "5z", "F": "6z", "C": "7z",
 }
+ENGINE_TO_PUBLIC_TILE = {
+    **ENGINE_TO_PUBLIC_HONOR,
+    "5mr": "0m", "5pr": "0p", "5sr": "0s",
+}
 STAT_FIELDS = (
     "game", "round", "oya", "point", "rank_1", "rank_2", "rank_3", "rank_4", "tobi",
     "fuuro", "fuuro_num", "fuuro_point", "fuuro_agari", "fuuro_agari_jun",
@@ -66,6 +70,11 @@ YAKU_IDS = (
 def candidate_id(tile: str, riichi: bool = False) -> str:
     """Stable identity for a first action, including its riichi declaration."""
     return f"riichi:{tile}" if riichi else tile
+
+
+def public_tile(value: str) -> str:
+    """Convert Rust/parser tile names back to the public compact notation."""
+    return ENGINE_TO_PUBLIC_TILE.get(value, value)
 
 
 def normalize_candidate(value: Any) -> dict[str, Any]:
@@ -374,7 +383,7 @@ def _parse_inputs(request: dict[str, Any]):
         # Rust API expects its canonical honor names (``E`` here). Preserve
         # the compact form for IDs, history, and tile rendering.
         engine_tile = one_tile(candidate["tile"], "第一打")
-        candidate["tile"] = ENGINE_TO_PUBLIC_HONOR.get(engine_tile, engine_tile)
+        candidate["tile"] = public_tile(engine_tile)
         candidate["engine_tile"] = engine_tile
         candidate["candidate"] = candidate_id(candidate["tile"], candidate["riichi"])
     if len({candidate["candidate"] for candidate in discards}) != len(discards):
@@ -820,6 +829,63 @@ def merge_results(base: dict[str, Any], extra: dict[str, Any], operation_id: str
             raise ValueError(f"runtime identity mismatch: {field}")
     if (base.get("model") or {}).get("sha256") != (extra.get("model") or {}).get("sha256"):
         raise ValueError("model SHA256 mismatch")
+    extension_config = extra.get("config") or {}
+    if extension_config.get("extension_mode") == "candidates":
+        base_candidates = list(base.get("candidates", []))
+        extra_candidates = list(extra.get("candidates", []))
+        if not base_candidates or len(extra_candidates) < 2:
+            raise ValueError("candidate extension requires an original reference and at least one new candidate")
+        base_ids = [candidate_identity(item) for item in base_candidates]
+        extra_ids = [candidate_identity(item) for item in extra_candidates]
+        if len(set(extra_ids)) != len(extra_ids):
+            raise ValueError("candidate extension contains duplicate candidates")
+        reference_id = base_ids[0]
+        if extra_ids[0] != reference_id:
+            raise ValueError("candidate extension reference does not match the original first candidate")
+        if any(candidate_id in base_ids[1:] for candidate_id in extra_ids[1:]):
+            raise ValueError("candidate extension includes an already analyzed option")
+        total_runs = int(base.get("total_runs", base.get("runs", 0)))
+        if int(extra.get("runs", 0)) != total_runs or int(extra.get("seed", 0)) != int(base.get("seed", 0)):
+            raise ValueError("candidate extension must use the original seed range and run count")
+        added_ids = extra_ids[1:]
+        if not added_ids:
+            raise ValueError("candidate extension did not add a new option")
+        merged = deepcopy(base)
+        merged["candidates"] = deepcopy(base_candidates) + [
+            deepcopy(candidate) for candidate in extra_candidates[1:]
+        ]
+        existing_comparisons = list(base.get("comparisons", []))
+        known_comparisons = {
+            (item.get("reference"), item.get("candidate")) for item in existing_comparisons
+        }
+        for item in extra.get("comparisons", []):
+            key = (item.get("reference"), item.get("candidate"))
+            if item.get("reference") == reference_id and item.get("candidate") in added_ids and key not in known_comparisons:
+                existing_comparisons.append(deepcopy(item))
+                known_comparisons.add(key)
+        merged["comparisons"] = existing_comparisons
+        merged["runs"] = total_runs
+        merged["total_runs"] = total_runs
+        merged["elapsed"] = float(base.get("elapsed", 0)) + float(extra.get("elapsed", 0))
+        merged["merge_state_version"] = MERGE_STATE_VERSION
+        history = list(base.get("extension_history", []))
+        history.append({
+            "operation_id": operation_id,
+            "mode": "candidates",
+            "added_candidates": added_ids,
+            "runs": total_runs,
+            "seed_start": base.get("seed"),
+            "seed_end": int(base.get("seed", 0)) + total_runs - 1,
+            "elapsed": extra.get("elapsed"),
+            "batch_size": (extra.get("config") or {}).get("batch_size"),
+            "model_id": (extra.get("model") or {}).get("id"),
+            "model_sha256": (extra.get("model") or {}).get("sha256"),
+            "decision_contract": extra.get("decision_contract"),
+            "runtime_artifact_sha256": (extra.get("runtime") or {}).get("artifact_sha256"),
+            "runtime_build_id": (extra.get("runtime") or {}).get("build_id"),
+        })
+        merged["extension_history"] = history
+        return merged
     merged = deepcopy(base)
     extra_by_discard = {candidate_identity(item): item for item in extra.get("candidates", [])}
     candidates: list[dict[str, Any]] = []
@@ -1021,9 +1087,9 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
         "seed": seed,
         "resolved_context": context,
         "resolved_input": {
-            "main_haipai": hand,
-            "first_tsumo": first_tsumo,
-            "dora": dora,
+            "main_haipai": [public_tile(tile) for tile in hand],
+            "first_tsumo": public_tile(first_tsumo),
+            "dora": public_tile(dora),
         },
         "candidates": [_public(candidate) for candidate in candidates],
         "comparisons": comparisons,

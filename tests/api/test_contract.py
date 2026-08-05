@@ -187,6 +187,26 @@ def test_compact_honor_discard_uses_rust_honor_name_without_changing_ui_identity
     ]
 
 
+def test_red_five_discard_keeps_public_zero_notation() -> None:
+    _, _, _, discards, *_ = _parse_inputs({
+        "hand": "04567m3477p13406s",
+        "dora": "9s",
+        "discards": ["0m", {"tile": "0m", "riichi": True}],
+        "runs": 1,
+        "seed": 89,
+        "batch_size": 1,
+        "rayon_threads": 1,
+        "round": "E1",
+        "honba": 0,
+        "kyotaku": 0,
+        "scores": {"self": 25_000, "shimocha": 25_000, "toimen": 25_000},
+    })
+    assert discards == [
+        {"tile": "0m", "engine_tile": "5mr", "riichi": False, "candidate": "0m"},
+        {"tile": "0m", "engine_tile": "5mr", "riichi": True, "candidate": "riichi:0m"},
+    ]
+
+
 def test_first_discard_riichi_is_a_distinct_candidate_action() -> None:
     request = RunRequest(
         hand="4567m3477p134066s",

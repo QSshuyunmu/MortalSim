@@ -30,7 +30,6 @@ const YAKU_NAMES: Record<string, string> = { riichi:"立直", double_riichi:"两
 
 const initial = {
   hand:"", dora:"", discards:"",
-  riichi_discards:[] as string[],
   round:"E1", honba:"0", kyotaku:"0",
   scores:{self:"25000",shimocha:"25000",toimen:"25000"},
   runs:"1000", seed:"42", batch_size:"1000", rayon_threads:"20", model_id:"mortal-v4-20240308", engine:"lite", decision_contract:"stable_advantage_v2", strict_comparison:true,
@@ -40,6 +39,7 @@ const candidateKey = (candidate: Pick<Candidate,"discard"|"candidate"|"first_rii
 const candidateLabel = (candidate: Pick<Candidate,"discard"|"first_riichi">) => candidate.first_riichi ? `立直打 ${candidate.discard}` : `打 ${candidate.discard}`;
 const candidateIdLabel = (value: string | undefined) => value?.startsWith("riichi:") ? `立直打 ${value.slice("riichi:".length)}` : `打 ${value||""}`;
 const requestCandidateLabel = (candidate: RequestCandidate) => typeof candidate === "string" ? `打 ${candidate}` : candidate.riichi ? `立直打 ${candidate.tile}` : `打 ${candidate.tile}`;
+const resultCandidateLabel = (candidate: any) => candidate?.discard ? candidateLabel(candidate) : requestCandidateLabel(candidate);
 const ROUND_OPTIONS = [
   ["E1","东一局"],["E2","东二局"],["E3","东三局"],["E4","东四局"],
   ["S1","南一局"],["S2","南二局"],["S3","南三局"],["S4","南四局"],
@@ -100,7 +100,17 @@ function useDialogFocus(onEscape:()=>void, escapeDisabled=false) {
 
 function parseTiles(source: string): string[] {
   const tiles: string[] = []; let digits = "";
-  for (const char of source.trim()) { if (/\d/.test(char)) digits += char; else if (/[mpsz]/.test(char)) { for (const n of digits) tiles.push(`${n}${char}`); digits=""; } }
+  const text=source.trim().toLowerCase();
+  for (let index=0; index<text.length; index++) {
+    const char=text[index];
+    if (/\d/.test(char)) digits += char;
+    else if (/[mpsz]/.test(char)) {
+      const redSuffix=/[mps]/.test(char)&&text[index+1]==="r";
+      for (const n of digits) tiles.push(redSuffix&&n==="5"?`0${char}`:`${n}${char}`);
+      digits="";
+      if(redSuffix) index++;
+    }
+  }
   return tiles;
 }
 const TILE_ASSET_ROOT = "/tiles/";
@@ -111,13 +121,31 @@ function normalizeTileText(value: string): string {
     .replace(/白/g, "5z").replace(/發/g, "6z").replace(/中/g, "7z")
     .replace(/[\s,，、;；|/]+/g, "");
 }
-function normalizeDiscardText(value: string): string {
-  return value.normalize("NFKC").split(/[\s,，、;；|/]+/)
-    .map(part => normalizeTileText(part)).filter(Boolean).join(", ");
+const PUBLIC_HONOR: Record<string,string> = {E:"1z",S:"2z",W:"3z",N:"4z",P:"5z",F:"6z",C:"7z"};
+const publicTile = (value:string) => {
+  const honor = PUBLIC_HONOR[value];
+  if (honor) return honor;
+  const red = /^5([mps])r$/.exec(value);
+  return red ? `0${red[1]}` : value;
+};
+type InputCandidate = { tile: string; riichi: boolean };
+const inputCandidateKey = (candidate: InputCandidate) => `${candidate.riichi ? "riichi:" : ""}${candidate.tile}`;
+const inputCandidateToken = (candidate: InputCandidate) => `${candidate.tile}${candidate.riichi ? "r" : ""}`;
+function parseCandidateText(value: string): InputCandidate[] {
+  return value.normalize("NFKC").split(/[\s,，、;；|/]+/).map(part => part.trim()).filter(Boolean).map(part => {
+    const normalized = normalizeTileText(part);
+    const riichi = /r$/i.test(normalized);
+    const tile = publicTile(riichi ? normalized.slice(0, -1) : normalized);
+    return {tile, riichi};
+  }).filter(candidate => Boolean(candidate.tile));
+}
+function normalizeCandidateText(value: string): string {
+  return parseCandidateText(value).map(inputCandidateToken).join(", ");
 }
 function Tile({ value, small=false }: { value:string; small?:boolean }) {
   const [failed, setFailed] = useState(false);
-  const n=value[0], suit=value[1];
+  const displayValue=publicTile(value);
+  const n=displayValue[0], suit=displayValue[1];
   const honorFiles=["Ton","Nan","Shaa","Pei","Haku","Hatsu","Chun"];
   const honorNames=["东","南","西","北","白","发","中"];
   const suitFiles:Record<string,string>={m:"Man",p:"Pin",s:"Sou"};
@@ -128,7 +156,7 @@ function Tile({ value, small=false }: { value:string; small?:boolean }) {
   const asset=`${TILE_ASSET_ROOT}${file}${file==="Haku"?".svg":".webp"}`;
   const alt=suit==="z"?`${honorNames[Number(n)-1]}风牌`:`${n==="0"?"赤五":n}${suitNames[suit]}`;
   useEffect(()=>setFailed(false),[file]);
-  return <span className={`tile ${small?"small":""} ${failed?"tile-failed":""}`}>{!failed&&<img src={asset} alt={alt} width="150" height="200" decoding="async" onError={()=>setFailed(true)}/>}<span className="tile-fallback">{value}</span></span>;
+  return <span className={`tile ${small?"small":""} ${failed?"tile-failed":""}`}>{!failed&&<img src={asset} alt={alt} width="150" height="200" decoding="async" onError={()=>setFailed(true)}/>}<span className="tile-fallback">{displayValue}</span></span>;
 }
 function Hand({ source, small=false }: { source:string|string[]; small?:boolean }) { const tiles=Array.isArray(source)?source:parseTiles(source); return <div className="hand">{tiles.map((tile,index)=><Tile key={`${tile}-${index}`} value={tile} small={small}/>)}</div>; }
 
@@ -141,7 +169,7 @@ export default function App() {
   const [models,setModels]=useState<ModelInfo[]>([]), [tasks,setTasks]=useState<ActiveTask[]>([]), [taskDrawer,setTaskDrawer]=useState(false), [notice,setNotice]=useState("");
   const taskSources=useRef<Record<string,EventSource>>({});
   const [pendingExtend,setPendingExtend]=useState(false);
-  const candidates=useMemo(()=>normalizeDiscardText(config.discards).split(",").map(v=>v.trim()).filter(Boolean),[config.discards]);
+  const candidates=useMemo(()=>parseCandidateText(config.discards),[config.discards]);
   const refresh=()=>apiGet("/api/runs").then(r=>r.json()).then(setRuns).catch(()=>{});
   const refreshModels=()=>apiGet("/api/models").then(r=>r.json()).then(setModels).catch(()=>{});
   const refreshTasks=()=>apiGet("/api/tasks/active").then(r=>r.json()).then(setTasks).catch(()=>{});
@@ -166,8 +194,7 @@ export default function App() {
   const updateScore=(key:string,value:string)=>setConfig(old=>({...old,scores:{...old.scores,[key]:value}}));
   const start=async()=>{
     setError("");setResult(null);setStatus("starting");
-    const { riichi_discards, ...requestConfig } = config;
-    const payload={...requestConfig,hand:normalizeTileText(config.hand),dora:normalizeTileText(config.dora),discards:candidates.map(tile=>({tile,riichi:riichi_discards.includes(tile)})),runs:Number(config.runs),seed:Number(config.seed),honba:Number(config.honba),kyotaku:Number(config.kyotaku),scores:{self:Number(config.scores.self),shimocha:Number(config.scores.shimocha),toimen:Number(config.scores.toimen)},batch_size:1000,rayon_threads:Number(config.rayon_threads),engine:"lite",decision_contract:"stable_advantage_v2"};
+    const payload={...config,hand:normalizeTileText(config.hand),dora:normalizeTileText(config.dora),discards:candidates.map(candidate=>({tile:candidate.tile,riichi:candidate.riichi})),runs:Number(config.runs),seed:Number(config.seed),honba:Number(config.honba),kyotaku:Number(config.kyotaku),scores:{self:Number(config.scores.self),shimocha:Number(config.scores.shimocha),toimen:Number(config.scores.toimen)},batch_size:1000,rayon_threads:Number(config.rayon_threads),engine:"lite",decision_contract:"stable_advantage_v2"};
     const response=await fetch("/api/runs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     if(!response.ok){const failure=await response.json().catch(()=>({}));setError(apiErrorMessage(failure.detail,"无法启动"));setStatus("failed");return;}
     const data=await response.json();setRunId(data.run_id);setProgress({completed:0,total:Number(config.runs)});setStatus("running");refreshTasks();
@@ -196,24 +223,29 @@ function Workbench({config,update,updateScore,candidates,start,cancel,busy,statu
   const heldTiles=useMemo(()=>parseTiles(normalizeTileText(config.hand)),[config.hand]);
   const mainHaipai=heldTiles.slice(0,13);
   const firstTsumo=heldTiles[13];
-  const candidateOptions=useMemo(()=>Array.from(new Set(heldTiles)),[heldTiles]);
-  const riichiCandidates:string[]=config.riichi_discards||[];
-  const illegalCandidates=candidates.filter((tile:string)=>!candidateOptions.includes(tile));
+  const candidateOptions=useMemo(()=>Array.from(new Set(heldTiles.map(publicTile))),[heldTiles]);
+  const illegalCandidates=candidates.filter((candidate:InputCandidate)=>!candidateOptions.includes(candidate.tile));
   const modelReady=models.some((model:ModelInfo)=>model.id===config.model_id&&model.ready&&model.lite_compatible);
   const readyToRun=heldTiles.length===14&&candidates.length>0&&illegalCandidates.length===0&&modelReady;
+  const writeCandidates=(next:InputCandidate[])=>update("discards",next.map(inputCandidateToken).join(", "));
   const toggleCandidate=(tile:string)=>{
-    const next=candidates.includes(tile)?candidates.filter((item:string)=>item!==tile):[...candidates,tile];
-    update("discards",next.join(", "));
-    if(!next.includes(tile)) update("riichi_discards",riichiCandidates.filter((item:string)=>item!==tile));
+    const ordinary=candidates.find((candidate:InputCandidate)=>candidate.tile===tile&&!candidate.riichi);
+    writeCandidates(ordinary ? candidates.filter((candidate:InputCandidate)=>inputCandidateKey(candidate)!==inputCandidateKey(ordinary)) : [...candidates,{tile,riichi:false}]);
   };
-  const toggleRiichi=(tile:string)=>update("riichi_discards",riichiCandidates.includes(tile)?riichiCandidates.filter((item:string)=>item!==tile):[...riichiCandidates,tile]);
+  const toggleRiichi=(candidate:InputCandidate)=>{
+    const key=inputCandidateKey(candidate);
+    const toggled={...candidate,riichi:!candidate.riichi};
+    const next=candidates.map((item:InputCandidate)=>inputCandidateKey(item)===key?toggled:item);
+    const seen=new Set<string>();
+    writeCandidates(next.filter((item:InputCandidate)=>{const itemKey=inputCandidateKey(item);if(seen.has(itemKey))return false;seen.add(itemKey);return true;}));
+  };
   const semanticLocked=busy;
   return <>
     <section className="context-band"><div className="context-title"><span>局面</span><b>{roundLabel(config.round)} · 自亲</b></div><div className="context-hand"><Hand source={mainHaipai}/><span className="draw-sep"/>{firstTsumo&&<Tile value={firstTsumo}/>}</div><div className="context-dora"><span>宝牌指示</span><Tile value={config.dora} small/></div></section>
     <div className="work-grid"><form className="surface input-surface" onSubmit={event=>{event.preventDefault();start();}}><div className="surface-head"><div><span className="kicker">SIMULATION INPUT</span><h2>局面与候选</h2></div><span className="quiet">相同 seed 配对比较</span></div>
       <fieldset disabled={semanticLocked}><legend>局面</legend><div className="fields scene-fields"><label><span>局目</span><select value={config.round} onChange={e=>update("round",e.target.value)}>{ROUND_OPTIONS.map(([id,label])=><option value={id} key={id}>{label}</option>)}</select></label><Field label="本场" value={config.honba} change={(v:string)=>update("honba",v)} type="number" min={0} max={99}/><Field label="供托" value={config.kyotaku} change={(v:string)=>update("kyotaku",v)} type="number" min={0} max={99}/></div></fieldset>
       <fieldset disabled={semanticLocked}><legend>点数</legend><div className="score-grid"><ScoreField label="自家" value={config.scores.self} change={(v:string)=>updateScore("self",v)}/><ScoreField label="下家" value={config.scores.shimocha} change={(v:string)=>updateScore("shimocha",v)}/><ScoreField label="对面" value={config.scores.toimen} change={(v:string)=>updateScore("toimen",v)}/><label><span>上家（自动）</span><input readOnly aria-readonly="true" value={Number.isFinite(kamicha)?String(kamicha):""}/></label></div><div className={`score-check ${scoreValid?"valid":"invalid"}`}>{scoreValid?`校验通过：四家点数与 ${config.kyotaku} 根供托合计 100,000 点`:"点数必须为非负百点整数，且自动计算的上家点数不能为负"}</div></fieldset>
-      <fieldset disabled={semanticLocked}><legend>模拟</legend><ModelPicker models={models} modelId={config.model_id} change={(value:string)=>update("model_id",value)} refresh={refreshModels}/><label className="wide"><span>手牌（含第一摸，最后一张）</span><input value={config.hand} onChange={e=>update("hand",e.target.value)} onBlur={e=>update("hand",normalizeTileText(e.target.value))} placeholder="4567m3477p134066s"/></label><div className={`input-check ${heldTiles.length===14?"valid":heldTiles.length===0?"":"invalid"}`}>{heldTiles.length===14?`已识别 14 张，最后一张 ${firstTsumo||""} 作为第一摸。`:heldTiles.length===0?"请输入 14 张手牌，最后一张将作为第一摸。":`当前识别 ${heldTiles.length} 张，需要恰好 14 张。`}</div><div className="fields simulation-fields"><Field label="宝牌指示" value={config.dora} change={(v:string)=>update("dora",v)} normalize={normalizeTileText}/><Field label="模拟局数" value={config.runs} change={(v:string)=>update("runs",v)} type="number" min={1}/></div><label className="wide"><span>候选第一打，逗号分隔</span><input value={config.discards} onChange={e=>update("discards",e.target.value)} onBlur={e=>update("discards",normalizeDiscardText(e.target.value))} placeholder="1s, 6s"/></label><div className="discard-picker" role="group" aria-label="从当前手牌选择候选第一打">{candidateOptions.map(tile=><button key={tile} type="button" aria-pressed={candidates.includes(tile)} className={candidates.includes(tile)?"selected":""} onClick={()=>toggleCandidate(tile)}><Tile value={tile} small/><span>打 {tile}</span></button>)}</div>{illegalCandidates.length>0&&<div className="input-check invalid">候选 {illegalCandidates.join("、")} 不在当前可打牌中。</div>}<div className="candidate-tiles">{candidates.map((value:string)=><div key={value}><Tile value={value}/><span>{riichiCandidates.includes(value)?`立直打 ${value}`:`打 ${value}`}</span><button type="button" className={`riichi-toggle ${riichiCandidates.includes(value)?"enabled":""}`} aria-pressed={riichiCandidates.includes(value)} title="首打时宣告立直" onClick={()=>toggleRiichi(value)}>立</button></div>)}</div></fieldset>
+      <fieldset disabled={semanticLocked}><legend>模拟</legend><ModelPicker models={models} modelId={config.model_id} change={(value:string)=>update("model_id",value)} refresh={refreshModels}/><label className="wide"><span>手牌（含第一摸，最后一张）</span><input value={config.hand} onChange={e=>update("hand",e.target.value)} onBlur={e=>update("hand",normalizeTileText(e.target.value))} placeholder="4567m3477p134066s"/></label><div className={`input-check ${heldTiles.length===14?"valid":heldTiles.length===0?"":"invalid"}`}>{heldTiles.length===14?`已识别 14 张，最后一张 ${firstTsumo||""} 作为第一摸。`:heldTiles.length===0?"请输入 14 张手牌，最后一张将作为第一摸。":`当前识别 ${heldTiles.length} 张，需要恰好 14 张。`}</div><div className="fields simulation-fields"><Field label="宝牌指示" value={config.dora} change={(v:string)=>update("dora",v)} normalize={normalizeTileText}/><Field label="模拟局数" value={config.runs} change={(v:string)=>update("runs",v)} type="number" min={1}/></div><label className="wide"><span>候选第一打，逗号分隔</span><input value={config.discards} onChange={e=>update("discards",e.target.value)} onBlur={e=>update("discards",normalizeCandidateText(e.target.value))} placeholder="1s, 6s 或 3p, 3pr"/></label><div className="discard-picker" role="group" aria-label="从当前手牌选择候选第一打">{candidateOptions.map(tile=>{const selected=candidates.some((candidate:InputCandidate)=>candidate.tile===tile&&!candidate.riichi);return <button key={tile} type="button" aria-pressed={selected} className={selected?"selected":""} onClick={()=>toggleCandidate(tile)}><Tile value={tile} small/><span>打 {tile}</span></button>})}</div>{illegalCandidates.length>0&&<div className="input-check invalid">候选 {illegalCandidates.map(inputCandidateToken).join("、")} 不在当前可打牌中。</div>}<div className="candidate-tiles">{candidates.map((candidate:InputCandidate)=><div key={inputCandidateKey(candidate)}><Tile value={candidate.tile}/><span>{candidate.riichi?`立直打 ${candidate.tile}`:`打 ${candidate.tile}`}</span><button type="button" className={`riichi-toggle ${candidate.riichi?"enabled":""}`} aria-pressed={candidate.riichi} title="首打时宣告立直" onClick={()=>toggleRiichi(candidate)}>立</button></div>)}</div></fieldset>
       <details className="advanced"><summary>高级设置</summary><div className="fields"><Field label="Seed" value={config.seed} change={(v:string)=>update("seed",v)} type="number"/><label><span>Batch（正式契约）</span><input type="number" value="1000" readOnly aria-readonly="true"/></label><Field label="Rayon 线程" value={config.rayon_threads} change={(v:string)=>update("rayon_threads",v)} type="number" min={1}/></div><p className="model-note">正式 Lite 固定 Batch 1000，原生图容量 1024；改变 Batch 会改变决策契约。</p></details>
       <div className="actions"><label className="toggle"><input disabled={semanticLocked} type="checkbox" checked={config.strict_comparison} onChange={e=>update("strict_comparison",e.target.checked)}/><span/>固定 seed 严格比较</label><button className="secondary reset-input" type="button" disabled={semanticLocked} onClick={()=>update("discards","")}>清空候选</button><button className="primary" type="submit" disabled={busy||!cap?.formal_lite_ready||!scoreValid||!readyToRun}><Play size={16} fill="currentColor"/>开始模拟</button></div>
       {!cap?.formal_lite_ready&&<div className="input-check invalid">{cap?.cuda_error||"正式 Lite 运行时尚未通过兼容性检查，请前往设置与诊断查看。"}</div>}
@@ -300,16 +332,29 @@ function Charts({candidates,comparisons}:{candidates:Candidate[];comparisons:any
  return <section className="charts"><div className="chart-panel"><h3>五类终局分布</h3><p>每个完成局只进入一个类别</p><EChart option={outcomeOption}/></div><div className="chart-panel"><h3>终局顺位分布</h3><p>1 位至 4 位占比</p><EChart option={rankOption}/></div><div className="chart-panel wide-chart"><h3>配对平均局收支差</h3><p>同 seed 候选相对参考第一打</p>{comparisons.length?<EChart option={forest}/>:<div className="chart-empty">至少两个候选后显示</div>}</div><div className="chart-panel"><h3>样本稳定性</h3><p>累计平均局收支随样本增加的变化</p><EChart option={stability}/></div><div className="chart-panel wide-chart yaku-panel"><h3>役种频率热力图</h3><p>按本次平均出现率排序；悬浮可查看和牌局数</p>{activeYaku.length?<EChart option={yakuHeat} className="chart-canvas yaku-chart" style={{"--yaku-chart-height":`${yakuChartHeight}px`} as CSSProperties}/>:<div className="chart-empty">本次没有自家和牌役种</div>}</div></section>
 }
 function ExtensionDialog({result,close,created}:{result:RunResult;close:()=>void;created:()=>void}){
+  const [mode,setMode]=useState<"runs"|"candidates">("runs");
   const [additional,setAdditional]=useState("1000"),[status,setStatus]=useState("idle"),[message,setMessage]=useState("");
+  const [selected,setSelected]=useState<Array<{tile:string;riichi:boolean}>>([]);
   const dialogRef=useDialogFocus(close);
-  const total=result.total_runs||result.runs||0, amount=Number(additional), seedStart=(result.seed||0)+total, seedEnd=seedStart+Math.max(0,amount)-1;
+  const total=result.total_runs||result.runs||0;
+  const existingIds=new Set((result.candidates||result.summaries||[]).map((candidate:any)=>candidateKey(candidate)));
+  const inputTiles=(result.resolved_input?.main_haipai||parseTiles(String(result.config?.hand||"")).slice(0,13)).map(publicTile);
+  const availableTiles=Array.from(new Set(inputTiles)).filter(tile=>!existingIds.has(tile)||!existingIds.has(`riichi:${tile}`));
+  const amount=Number(additional);
+  const seedStart=mode==="runs"?(result.seed||0)+total:(result.seed||0);
+  const seedCount=mode==="runs"?Math.max(0,amount):total;
+  const seedEnd=seedStart+Math.max(0,seedCount)-1;
+  const toggleTile=(tile:string)=>setSelected(current=>current.some(item=>item.tile===tile)?current.filter(item=>item.tile!==tile):[...current,{tile,riichi:existingIds.has(tile)&&!existingIds.has(`riichi:${tile}`)}]);
+  const toggleRiichi=(tile:string)=>setSelected(current=>current.map(item=>{if(item.tile!==tile)return item;const riichi=!item.riichi;const id=riichi?`riichi:${tile}`:tile;return existingIds.has(id)?item:{...item,riichi};}));
   const submit=async(event:FormEvent)=>{
     event.preventDefault();setMessage("");setStatus("starting");
-    const response=await fetch(`/api/runs/${result.run_id}/extensions`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({additional_runs:amount,batch_size:Number(result.config?.batch_size||1000)})});
+    const body=mode==="runs"?{additional_runs:amount,batch_size:Number(result.config?.batch_size||1000)}:{discards:selected,batch_size:Number(result.config?.batch_size||1000)};
+    const response=await fetch(`/api/runs/${result.run_id}/extensions`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     if(!response.ok){const body=await response.json().catch(()=>({}));setMessage(apiErrorMessage(body.detail,"无法创建扩容任务"));setStatus("failed");return;}
     await response.json();created();close();
   };
-  return <div className="modal-layer"><button className="scrim" onClick={close} aria-label="关闭增加局数窗口"/><section ref={dialogRef} className="modal" role="dialog" aria-modal="true" aria-labelledby="extension-title"><header><div><span className="kicker">EXTEND ANALYSIS</span><h2 id="extension-title">增加相同模拟局数</h2></div><button className="icon-button" aria-label="关闭" onClick={close}><X size={18}/></button></header><form onSubmit={submit}><div className="extension-summary"><span>当前局数<b>{total.toLocaleString()}</b></span><span>新增局数<b>{Number.isFinite(amount)?amount.toLocaleString():"—"}</b></span><span>目标总数<b>{Number.isFinite(amount)?(total+amount).toLocaleString():"—"}</b></span></div><label className="wide"><span>Batch（正式契约）</span><input type="number" value="1000" readOnly aria-readonly="true"/></label><p className="seed-preview">扩容严格继承模型 SHA、stable_advantage_v2、运行时 artifact SHA、Batch 1000 和全部规则。任一身份不一致都会拒绝合并。</p><label className="wide"><span>新增局数</span><input type="number" min="1" max="100000" step="1" value={additional} onChange={e=>setAdditional(e.target.value)}/></label><p className="seed-preview">将使用 seed {seedStart.toLocaleString()} 至 {seedEnd.toLocaleString()}。提交后任务转入后台，取消或失败不会修改原结果。</p>{message&&<div className="alert">{message}</div>}<div className="modal-actions"><button type="button" className="secondary" onClick={close}>暂不增加</button><button className="primary" type="submit" disabled={!Number.isInteger(amount)||amount<1||amount>100000}><Plus size={16}/>开始后台追加</button></div></form></section></div>;
+  const valid=mode==="runs"?Number.isInteger(amount)&&amount>=1&&amount<=100000:selected.length>0;
+  return <div className="modal-layer"><button className="scrim" onClick={close} aria-label="关闭扩容窗口"/><section ref={dialogRef} className="modal" role="dialog" aria-modal="true" aria-labelledby="extension-title"><header><div><span className="kicker">EXTEND ANALYSIS</span><h2 id="extension-title">扩展当前分析</h2></div><button className="icon-button" aria-label="关闭" onClick={close}><X size={18}/></button></header><div className="mode-tabs" role="tablist" aria-label="扩展类型"><button type="button" role="tab" aria-selected={mode==="runs"} className={mode==="runs"?"active":""} onClick={()=>{setMode("runs");setMessage("")}}>增加相同局数</button><button type="button" role="tab" aria-selected={mode==="candidates"} className={mode==="candidates"?"active":""} onClick={()=>{setMode("candidates");setMessage("")}}>增加打牌选项</button></div><form onSubmit={submit}><div className="extension-summary">{mode==="runs"?<><span>当前局数<b>{total.toLocaleString()}</b></span><span>新增局数<b>{Number.isFinite(amount)?amount.toLocaleString():"—"}</b></span><span>目标总数<b>{Number.isFinite(amount)?(total+amount).toLocaleString():"—"}</b></span></>:<><span>当前候选<b>{existingIds.size}</b></span><span>新增候选<b>{selected.length}</b></span><span>完成后候选<b>{existingIds.size+selected.length}</b></span></>}</div><label className="wide"><span>Batch（正式契约）</span><input type="number" value="1000" readOnly aria-readonly="true"/></label>{mode==="runs"?<><p className="seed-preview">扩容严格继承模型、stable_advantage_v2、运行时 artifact SHA、Batch 1000 和全部规则。</p><label className="wide"><span>新增局数</span><input type="number" min="1" max="100000" step="1" value={additional} onChange={e=>setAdditional(e.target.value)}/></label><p className="seed-preview">将使用 seed {seedStart.toLocaleString()} 至 {seedEnd.toLocaleString()}。提交后任务转入后台，取消或失败不会修改原结果。</p></>:<><p className="seed-preview">新选项会使用与当前分析完全相同的 {total.toLocaleString()} 个 seed，并重新计算相对第一打的配对差值。原有候选不会重复合并。</p><div className="extension-candidates" role="group" aria-label="选择新增打牌选项">{availableTiles.map(tile=>{const item=selected.find(candidate=>candidate.tile===tile);return <div className={`extension-candidate ${item?"selected":""}`} key={tile}><button type="button" className="tile-choice" aria-pressed={Boolean(item)} onClick={()=>toggleTile(tile)}><Tile value={tile} small/><span>打 {tile}</span></button>{item&&<button type="button" className={`riichi-toggle ${item.riichi?"enabled":""}`} aria-pressed={item.riichi} title="首打时宣告立直" onClick={()=>toggleRiichi(tile)}>立</button>}</div>})}</div>{!availableTiles.length&&<p className="seed-preview">当前手牌的普通打牌选项都已分析。</p>}<p className="seed-preview">将使用 seed {seedStart.toLocaleString()} 至 {seedEnd.toLocaleString()}。</p></>}</form>{message&&<div className="alert">{message}</div>}<div className="modal-actions"><button type="button" className="secondary" onClick={close}>暂不增加</button><button className="primary" type="button" disabled={!valid||status==="starting"} onClick={(event)=>submit(event as unknown as FormEvent)}><Plus size={16}/>开始后台追加</button></div></section></div>;
 }
 
 function SampleDrawer({runId,candidate,metric,close,showPoint}:{runId:string;candidate:Candidate;metric:string;close:()=>void;showPoint:boolean}){
@@ -326,6 +371,6 @@ function TaskDrawer({tasks,close,refresh}:{tasks:ActiveTask[];close:()=>void;ref
 
 function History({runs,activeTasks,open,extend,rerun,refresh}:{runs:RunRecord[];activeTasks:ActiveTask[];open:(run:RunRecord)=>void;extend:(run:RunRecord)=>void;rerun:(id:string)=>void;refresh:()=>void}){
   const remove=async(id:string)=>{if(!window.confirm("确定删除这条历史分析？此操作无法撤销。"))return;await fetch(`/api/runs/${id}`,{method:"DELETE"});refresh();};
-  return <section className="surface history"><div className="surface-head"><div><span className="kicker">RUN ARCHIVE</span><h2>本机历史结果</h2></div><span className="quiet">{runs.length} 条记录</span></div><div className="history-head"><span>运行时间 / 候选</span><span>状态</span><span>版本</span><span>操作</span></div>{runs.map(run=>{const extending=activeTasks.some(task=>task.extension_of===run.run_id);const formal=run.result?.schema_version===3&&run.result?.decision_contract==="stable_advantage_v2";const exactMerge=formal&&run.result?.merge_state_version===2;const canExtend=run.status==="completed"&&exactMerge&&run.result?.metrics_version===2&&!extending;const canRerun=run.status==="completed"&&!exactMerge;return <div className="history-row" key={run.run_id}><button className="history-open" onClick={()=>open(run)}><span><b>{run.request.discards?.map(requestCandidateLabel).join(" / ")}</b><small>{new Date(run.created_at).toLocaleString()} · {(run.result?.total_runs||run.result?.runs||run.request.runs||0).toLocaleString()} 局 · {run.result?.model?.label||run.request.model_id||"Mortal v4"}</small></span><span className={`run-badge ${extending?"live":""}`}>{extending?"扩容中":run.status}</span><code>{exactMerge?"Formal Lite v2 · merge v2":formal?"Formal Lite v2 · 早期合并":`schema v${run.result?.schema_version||1} · 旧语义`}</code></button><div className="history-actions">{canRerun&&<button className="icon-button" aria-label="按正式 Lite 重跑" title="复制局面与 seed，创建当前正式 Lite 新记录" onClick={()=>rerun(run.run_id)}><RotateCcw size={16}/></button>}<button className="icon-button" aria-label="增加局数" title={extending?"该分析正在扩容":canExtend?"增加局数":"缺少当前正式 Lite 的精确合并状态"} disabled={!canExtend} onClick={()=>extend(run)}><Plus size={16}/></button><button className="icon-button" aria-label="删除" title="删除" onClick={()=>remove(run.run_id)}><X size={16}/></button></div></div>})}{!runs.length&&<div className="empty-state"><Archive size={30}/><b>还没有历史运行</b><span>完成一次分析后，结果会自动保存在本机。</span></div>}</section>;
+  return <section className="surface history"><div className="surface-head"><div><span className="kicker">RUN ARCHIVE</span><h2>本机历史结果</h2></div><span className="quiet">{runs.length} 条记录</span></div><div className="history-head"><span>运行时间 / 候选</span><span>状态</span><span>版本</span><span>操作</span></div>{runs.map(run=>{const extending=activeTasks.some(task=>task.extension_of===run.run_id);const formal=run.result?.schema_version===3&&run.result?.decision_contract==="stable_advantage_v2";const exactMerge=formal&&run.result?.merge_state_version===2;const canExtend=run.status==="completed"&&exactMerge&&run.result?.metrics_version===2&&!extending;const canRerun=run.status==="completed"&&!exactMerge;const labels=(run.result?.candidates||run.request.discards||[]).map(resultCandidateLabel).join(" / ");return <div className="history-row" key={run.run_id}><button className="history-open" onClick={()=>open(run)}><span><b>{labels}</b><small>{new Date(run.created_at).toLocaleString()} · {(run.result?.total_runs||run.result?.runs||run.request.runs||0).toLocaleString()} 局 · {run.result?.model?.label||run.request.model_id||"Mortal v4"}</small></span><span className={`run-badge ${extending?"live":""}`}>{extending?"扩容中":run.status}</span><code>{exactMerge?"Formal Lite v2 · merge v2":formal?"Formal Lite v2 · 早期合并":`schema v${run.result?.schema_version||1} · 旧语义`}</code></button><div className="history-actions">{canRerun&&<button className="icon-button" aria-label="按正式 Lite 重跑" title="复制局面与 seed，创建当前正式 Lite 新记录" onClick={()=>rerun(run.run_id)}><RotateCcw size={16}/></button>}<button className="icon-button" aria-label="增加局数" title={extending?"该分析正在扩容":canExtend?"增加局数":"缺少当前正式 Lite 的精确合并状态"} disabled={!canExtend} onClick={()=>extend(run)}><Plus size={16}/></button><button className="icon-button" aria-label="删除" title="删除" onClick={()=>remove(run.run_id)}><X size={16}/></button></div></div>})}{!runs.length&&<div className="empty-state"><Archive size={30}/><b>还没有历史运行</b><span>完成一次分析后，结果会自动保存在本机。</span></div>}</section>;
 }
 function Diagnostics({cap,models,refreshModels}:{cap:any;models:ModelInfo[];refreshModels:()=>void}){const readyModels=models.filter(model=>model.ready&&model.lite_compatible);return <div className="diagnostics"><section className="surface"><span className="kicker">FORMAL LITE RUNTIME</span><h2>运行能力</h2>{[["状态",cap?.formal_lite_ready?"正式 Lite 就绪":"不兼容"],["GPU",cap?.gpu_name],["Compute Capability",cap?.compute_capability],["决策契约","stable_advantage_v2"],["运行时 Build",cap?.runtime_build_id],["Artifact SHA",cap?.runtime_artifact_sha256?.slice(0,20)],["模型",readyModels.length?`${readyModels.length} 个兼容`:"未导入"],["数据目录",cap?.data_dir]].map(([k,v])=><div className="diagnostic-row" key={k}><span>{k}</span><code>{v||"不可用"}</code></div>)}{cap?.cuda_error&&<div className="input-check invalid">{cap.cuda_error}</div>}</section><section className="surface about"><span className="kicker">ABOUT</span><h2>MortalSim</h2><Brand/><p>本地运行的日麻第一打模拟与候选比较工具。正式推理使用面向 NVIDIA SM89 的无 PyTorch AOTInductor CUDA 图，稳定动作选择由 Rust 完成。</p><p>应用默认仅监听 127.0.0.1，不上传手牌、seed、结果或日志。权重由用户自行导入，不包含在应用或 Release 中。</p></section><section className="surface model-library"><div className="surface-head"><div><span className="kicker">LOCAL MODEL LIBRARY</span><h2>本机模型</h2></div><button className="icon-button" title="刷新模型库" aria-label="刷新模型库" onClick={refreshModels}><RotateCcw size={16}/></button></div>{models.map(model=><div className="model-row" key={model.id}><b>{model.label}</b><span>v{model.version} · {model.conv_channels}ch / {model.num_blocks} blocks · {model.ready&&model.lite_compatible?"正式 Lite 可用":model.incompatibility_reason||"不可用"}</span><code>{model.sha256?.slice(0,16)||"未校验"}</code></div>)}</section></div>}
