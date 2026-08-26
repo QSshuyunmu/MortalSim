@@ -5,6 +5,8 @@ mod mortal_onnx;
 mod one_vs_three;
 mod result;
 mod two_vs_two;
+pub(crate) mod prefix;
+pub(crate) mod weighted;
 
 pub use board::Board;
 pub use result::GameResult;

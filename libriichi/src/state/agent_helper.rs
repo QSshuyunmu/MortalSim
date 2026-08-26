@@ -1,5 +1,5 @@
 use super::{PlayerState, SinglePlayerTables};
-use crate::algo::agari::AgariCalculator;
+use crate::algo::agari::{Agari, AgariCalculator, YakuId};
 use crate::algo::point::Point;
 use crate::algo::shanten;
 use crate::algo::sp::{InitState, SPCalculator, SPWorkspace};
@@ -459,6 +459,164 @@ impl PlayerState {
             .context("not a hora hand")?;
 
         Ok(agari.point(self.oya == 0))
+    }
+
+    /// Capture scoring metadata while the hora action is still pending. This is
+    /// intentionally separate from `agari_points` so existing point semantics
+    /// remain untouched.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn pending_agari_metrics(
+        &self,
+        is_ron: bool,
+    ) -> Result<(
+        Agari,
+        Vec<&'static str>,
+        Vec<&'static str>,
+        u8,
+        u8,
+        [u8; 34],
+    )> {
+        ensure!(
+            is_ron && self.last_cans.can_ron_agari || self.last_cans.can_tsumo_agari,
+            "cannot agari"
+        );
+        if !is_ron && self.can_w_riichi {
+            return Ok((
+                Agari::Yakuman(1),
+                Vec::new(),
+                vec![if self.oya == 0 { "tenhou" } else { "chiihou" }],
+                0,
+                0,
+                self.tehai,
+            ));
+        }
+
+        let winning_tile = if is_ron {
+            self.last_kawa_tile
+        } else {
+            self.last_self_tsumo
+        }
+        .context("cannot find the winning tile")?;
+        let mut situational = Vec::new();
+        if self.is_w_riichi {
+            situational.push("double_riichi");
+        } else if self.riichi_accepted[0] {
+            situational.push("riichi");
+        }
+        if self.at_ippatsu {
+            situational.push("ippatsu");
+        }
+        if is_ron {
+            if self.tiles_left == 0 {
+                situational.push("houtei");
+            }
+            if self.chankan_chance.is_some() {
+                situational.push("chankan");
+            }
+        } else {
+            if self.is_menzen {
+                situational.push("menzen_tsumo");
+            }
+            if self.at_rinshan {
+                situational.push("rinshan");
+            } else if self.tiles_left == 0 {
+                situational.push("haitei");
+            }
+        }
+
+        let mut tehai = self.tehai;
+        let mut total_dora = self.doras_owned[0];
+        let mut aka_dora = self.akas_in_hand.iter().filter(|&&aka| aka).count() as u8;
+        aka_dora += self.fuuro_overview[0]
+            .iter()
+            .flatten()
+            .filter(|tile| tile.is_aka())
+            .count() as u8;
+        if is_ron {
+            let tile_id = winning_tile.deaka().as_usize();
+            tehai[tile_id] += 1;
+            total_dora += self.dora_factor[tile_id];
+            if winning_tile.is_aka() {
+                total_dora += 1;
+                aka_dora += 1;
+            }
+        }
+        let regular_dora = total_dora.saturating_sub(aka_dora);
+        let mut ura_tile_counts = tehai;
+        for &tile in &self.ankan_overview[0] {
+            ura_tile_counts[tile.as_usize()] += 4;
+        }
+        let calculator = AgariCalculator {
+            tehai: &tehai,
+            is_menzen: self.is_menzen,
+            chis: &self.chis,
+            pons: &self.pons,
+            minkans: &self.minkans,
+            ankans: &self.ankans,
+            bakaze: self.bakaze.as_u8(),
+            jikaze: self.jikaze.as_u8(),
+            winning_tile: winning_tile.deaka().as_u8(),
+            is_ron,
+        };
+        let pattern_yakus = calculator
+            .search_yaku_breakdown()
+            .map(|breakdown| {
+                breakdown
+                    .yakus
+                    .into_iter()
+                    .map(|yaku| match yaku {
+                        YakuId::SeatWind => match self.jikaze.as_u8() {
+                            tu8!(E) => "seat_wind_east",
+                            tu8!(S) => "seat_wind_south",
+                            tu8!(W) => "seat_wind_west",
+                            _ => "seat_wind_north",
+                        },
+                        YakuId::RoundWind => match self.bakaze.as_u8() {
+                            tu8!(E) => "round_wind_east",
+                            tu8!(S) => "round_wind_south",
+                            tu8!(W) => "round_wind_west",
+                            _ => "round_wind_north",
+                        },
+                        _ => yaku.as_str(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let additional_hans = if is_ron {
+            [
+                self.riichi_accepted[0],
+                self.is_w_riichi,
+                self.at_ippatsu,
+                self.tiles_left == 0,
+                self.chankan_chance.is_some(),
+            ]
+            .iter()
+            .filter(|&&active| active)
+            .count() as u8
+        } else {
+            [
+                self.riichi_accepted[0],
+                self.is_w_riichi,
+                self.at_ippatsu,
+                self.is_menzen,
+                self.tiles_left == 0 && !self.at_rinshan,
+                self.at_rinshan,
+            ]
+            .iter()
+            .filter(|&&active| active)
+            .count() as u8
+        };
+        let agari = calculator
+            .agari(additional_hans, total_dora)
+            .context("not a hora hand")?;
+        Ok((
+            agari,
+            pattern_yakus,
+            situational,
+            regular_dora,
+            aka_dora,
+            ura_tile_counts,
+        ))
     }
 
     /// Calculate the actual shanten at this point. Unlike `self.shanten`, this

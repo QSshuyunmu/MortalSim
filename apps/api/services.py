@@ -29,16 +29,38 @@ class StatisticsService:
         raw_result: dict[str, Any],
         gpu_telemetry: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        warnings: list[str] = []
+        expected = config.get("expected_trace_hash")
+        actual = None
+        candidates = raw_result.get("candidates", [])
+        if candidates and expected:
+            samples = candidates[0].get("samples", {})
+            for items in samples.values():
+                if items:
+                    actual = items[0].get("trace_hash")
+                    break
+            if actual != expected:
+                warnings.append("replay_mismatch: 复跑 trace hash 与原样本不一致")
         return {
             **raw_result,
-            "schema_version": 1,
+            "schema_version": 3,
+            "metrics_version": raw_result.get("metrics_version", 3),
+            "decision_contract": raw_result.get("decision_contract")
+            or config.get("decision_contract", "stable_advantage_v2"),
+            "runtime": raw_result.get("runtime") or {},
             "run_id": str(run_id),
             "created_at": created_at.isoformat(),
             "config": config,
-            "engine": {"name": config.get("engine", "python"), "amp": True},
-            "model": {"id": "mortal-v4-20240308"},
+            "engine": {
+                "name": config.get("engine", "lite"),
+                "amp": config.get("engine", "lite") == "python",
+                "decision_contract": raw_result.get("decision_contract")
+                or config.get("decision_contract", "stable_advantage_v2"),
+            },
+            "model": raw_result.get("model") or {"id": config.get("model_id", "mortal-v4-20240308")},
             "hardware": {"device": raw_result.get("device")},
-            "candidates": raw_result.get("summaries", []),
+            "candidates": candidates,
             "gpu_telemetry": gpu_telemetry,
-            "warnings": [],
+            "replay": {"expected_trace_hash": expected, "actual_trace_hash": actual, "mismatch": bool(expected and expected != actual)} if config.get("replay_of") else None,
+            "warnings": warnings,
         }

@@ -1,11 +1,15 @@
-# Model License and Redistribution Review
+# Model Distribution Policy
 
-The bundled Mortal v4 weight is identified by `models/MODEL_MANIFEST.json`.
-Its SHA256 is recorded for integrity checks, but redistribution is not
-assumed. Before publishing a ZIP that contains the weight, confirm the
-upstream model license explicitly and record the source, permission and any
-notice requirements here.
+MortalSim does not distribute, host, download, mirror, or bundle model
+checkpoints. This applies to the source repository, GitHub Release assets,
+and the application itself.
 
-Until that review is complete, a public build must either omit the weight or
-download it from an authorized source on first run. The application should
-show the model version and checksum in diagnostics and exported results.
+Users provide a local `.pth` file through **Settings and Diagnostics**. The
+application stores an immutable local copy under the user's data directory,
+validates its architecture and CUDA inference compatibility, and records its
+SHA-256 in the run result. The checkpoint never leaves the user's machine.
+
+Model files have their own terms and are outside this repository's
+AGPL-3.0-or-later code licence. A checkpoint must not be added to a release
+without a separately reviewed distribution policy and a deliberate project
+policy change.

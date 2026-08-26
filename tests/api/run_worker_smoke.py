@@ -26,7 +26,10 @@ def main() -> int:
         discards=["1s"],
         runs=1,
         seed=42,
-        oya=0,
+        round="E1",
+        honba=0,
+        kyotaku=0,
+        scores={"self": 25000, "shimocha": 25000, "toimen": 25000},
         batch_size=1,
         rayon_threads=1,
     )

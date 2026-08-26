@@ -9,8 +9,8 @@ labels: bug
 
 - MortalSim version:
 - Windows version:
-- Package: CPU / CUDA
-- GPU and driver (if applicable):
+- Package filename:
+- NVIDIA GPU and driver:
 
 ## Reproduction
 

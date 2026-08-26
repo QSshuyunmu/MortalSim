@@ -1,15 +1,60 @@
 # Third-Party Licenses
 
-The public MortalSim application repository must ship a complete inventory
-of redistributed dependencies before a release is published. At minimum,
-the release review must cover:
+This file records the principal redistributed components. The release archive
+also includes `SBOM.cdx.json`, generated from the packaged Python runtime,
+`package-lock.json`, and `Cargo.lock`, as the versioned transitive inventory.
+Copyright and license notices supplied inside dependency distributions remain
+the property of their respective authors.
 
-- Python runtime and PyTorch/CUDA runtime
-- FastAPI, Uvicorn, Pydantic and their transitive dependencies
-- React, React DOM, Vite and TypeScript
-- Rust crates used by `libriichi`
-- NVIDIA CUDA runtime components, when included in the CUDA archive
+## Riichi Mahjong Tiles (Regular)
 
-This working tree contains the inventory placeholder only. The release job
-must generate an SBOM and copy the license texts into this file or an
-accompanying `licenses/` directory.
+- Project: FluffyStuff/riichi-mahjong-tiles
+- Source: https://github.com/FluffyStuff/riichi-mahjong-tiles
+- License: CC0 1.0 Universal / public domain dedication
+- Usage: the 34 standard Japanese mahjong tile faces and three red-five
+  variants are distributed as lossless WebP files under
+  `apps/web/public/tiles/`.
+- License copy: `apps/web/public/tiles/LICENSE-FluffyStuff.md`
+
+## Python and application runtime
+
+- Python: PSF License Version 2
+- PyTorch AOTInductor generated runtime: BSD-3-Clause (the full PyTorch Python package is not redistributed in Lite)
+- ExecuTorch CUDA shim: BSD-3-Clause
+- FastAPI: MIT
+- Uvicorn: BSD-3-Clause
+- Pydantic: MIT
+- OpenPyXL: MIT
+- PyInstaller: GPL-2.0-or-later with the PyInstaller bootloader exception
+
+Pinned application versions are declared in `requirements-app.txt`,
+`requirements-cuda.txt`, and `pyproject.toml`. The native graph build identity
+is recorded in `tools/lite-toolchain.lock.json` and `runtime_manifest.json`.
+
+## Web application
+
+- React and React DOM: MIT
+- Apache ECharts: Apache-2.0
+- Lucide React: ISC
+- Vite: MIT
+- TypeScript: Apache-2.0
+
+Exact versions and transitive JavaScript packages are locked in
+`apps/web/package-lock.json`.
+
+## Rust core
+
+The Rust dependency graph is locked in `Cargo.lock`. Its license expressions
+are predominantly `MIT OR Apache-2.0`, with additional permissive
+BSD-2-Clause, ISC, Zlib, BSL-1.0, Unicode-3.0, CC0-1.0, Unlicense, and
+LLVM-exception combinations. The generated release SBOM lists every crate and
+version. `libriichi` and MortalSim-owned Rust code remain
+AGPL-3.0-or-later.
+
+## NVIDIA CUDA runtime
+
+The Lite release contains the CUDA runtime selected by the pinned native build
+environment. Those binaries are governed by the
+NVIDIA CUDA Toolkit End User License Agreement and NVIDIA third-party notices,
+not by MortalSim's AGPL license. Users must review NVIDIA's terms before using
+the CUDA package.

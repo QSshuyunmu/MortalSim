@@ -1,23 +1,207 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import os
+import shutil
+import subprocess
 import sys
 import time
 import traceback
+from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
+
+from .model_registry import DEFAULT_MODEL_ID, ModelRegistry
 
 
 ROOT = Path(__file__).resolve().parents[1]
-AKAGI_DIR = ROOT / "Akagi"
+SIMULATOR_DIR = ROOT / "simulator"
 MORTAL_DIR = ROOT / "mortal"
 LIBRIICHI_DIR = ROOT / "target" / "release"
-MODEL_PATH = AKAGI_DIR / "model_v4_20240308_best_min.pth"
+MODEL_PATH = ROOT / "models" / "model_v4_20240308_best_min.pth"
+HANCHAN_MODEL_DIR = ROOT / "models" / "hanchan_rank"
 
+OUTCOMES = ("self_win", "self_deal_in", "draw", "sideways", "other_tsumo")
+MERGE_STATE_VERSION = 3
+HANCHAN_METRICS_VERSION = 3
+HANCHAN_PT_TABLES = {
+    "houou_7": [90, 45, 0, -135],
+    "houou_8": [90, 45, 0, -150],
+    "houou_9": [90, 45, 0, -165],
+    "houou_10": [90, 45, 0, -180],
+}
+ENGINE_TO_PUBLIC_HONOR = {
+    "E": "1z", "S": "2z", "W": "3z", "N": "4z",
+    "P": "5z", "F": "6z", "C": "7z",
+}
+ENGINE_TO_PUBLIC_TILE = {
+    **ENGINE_TO_PUBLIC_HONOR,
+    "5mr": "0m", "5pr": "0p", "5sr": "0s",
+}
 STAT_FIELDS = (
-    "round", "agari", "houjuu", "riichi", "fuuro", "ryukyoku", "point",
+    "game", "round", "oya", "point", "rank_1", "rank_2", "rank_3", "rank_4", "tobi",
+    "fuuro", "fuuro_num", "fuuro_point", "fuuro_agari", "fuuro_agari_jun",
+    "fuuro_agari_point", "fuuro_houjuu", "agari", "agari_as_oya", "agari_jun",
+    "agari_point_oya", "agari_point_ko", "houjuu", "houjuu_jun", "houjuu_to_oya",
+    "houjuu_point_to_oya", "houjuu_point_to_ko", "riichi", "riichi_as_oya",
+    "riichi_jun", "riichi_agari", "riichi_agari_point", "riichi_agari_jun",
+    "riichi_houjuu", "riichi_ryukyoku", "riichi_point", "chasing_riichi",
+    "riichi_got_chased", "dama_agari", "dama_agari_jun", "dama_agari_point",
+    "ryukyoku", "ryukyoku_point", "yakuman", "nagashi_mangan",
 )
+SCALAR_MERGE_FIELDS = (
+    ("win_point", "win", "average_point"),
+    ("deal_in_loss", "defense", "average_deal_in_loss"),
+    ("deal_in_turn", "defense", "average_deal_in_turn"),
+    ("riichi_turn", "riichi", "average_turn"),
+    ("call_balance", "call", "average_balance"),
+    ("draw_balance", "draw", "average_balance"),
+)
+
+# Stable public IDs. Until the Rust scoring result exposes identities, unavailable slots
+# remain null rather than being reported as false zeroes.
+YAKU_IDS = (
+    "riichi", "double_riichi", "ippatsu", "menzen_tsumo", "tanyao", "pinfu",
+    "iipeikou", "seat_wind_east", "seat_wind_south", "seat_wind_west", "seat_wind_north",
+    "round_wind_east", "round_wind_south", "round_wind_west", "round_wind_north",
+    "haku", "hatsu", "chun", "rinshan", "chankan", "haitei", "houtei",
+    "sanshoku_doujun", "ikkitsuukan", "chanta", "chiitoitsu", "toitoi", "sanankou",
+    "honroutou", "sanshoku_doukou", "sankantsu", "shousangen", "honitsu", "junchan",
+    "ryanpeikou", "chinitsu", "kokushi", "suuankou", "daisangen", "shousuushii",
+    "daisuushii", "tsuuiisou", "chinroutou", "ryuuiisou", "chuuren", "suukantsu",
+    "tenhou", "chiihou", "renhou", "nagashi_mangan", "dora", "ura_dora", "aka_dora",
+    "kita", "double_yakuman",
+)
+
+
+def candidate_id(
+    tile: str,
+    riichi: bool = False,
+    kan: bool = False,
+    kyushu: bool = False,
+    first_tsumo: bool = False,
+    first_ron: bool = False,
+    first_pass: bool = False,
+    first_chi: list[str] | None = None,
+    first_pon: bool = False,
+    first_daiminkan: bool = False,
+    first_follow_up_discard: str | None = None,
+) -> str:
+    """Stable identity for a first action, including riichi/ankan/kyushu declaration and snapshot actions."""
+    if first_tsumo or tile.lower() in ("tsumo", "自摸"):
+        return "tsumo"
+    if first_ron or tile.lower() in ("ron", "荣和"):
+        return "ron"
+    if first_pass or tile.lower() in ("pass", "见逃"):
+        return "pass"
+    if first_chi:
+        fu = f">{first_follow_up_discard}" if first_follow_up_discard else ""
+        return f"chi:{''.join(first_chi)}{fu}"
+    if first_pon:
+        fu = f">{first_follow_up_discard}" if first_follow_up_discard else ""
+        return f"pon{fu}"
+    if first_daiminkan:
+        return "daiminkan"
+    if kyushu:
+        return "kyushu:kk"
+    if kan:
+        return f"kan:{tile}"
+    return f"riichi:{tile}" if riichi else tile
+
+
+def public_tile(value: str) -> str:
+    """Convert Rust/parser tile names back to the public compact notation."""
+    return ENGINE_TO_PUBLIC_TILE.get(value, value)
+
+
+def normalize_candidate(value: Any) -> dict[str, Any]:
+    """Accept legacy tile strings and the schema-v2 action object form."""
+    if isinstance(value, str):
+        raw = value.strip()
+        low = raw.lower()
+        if low in ("tsumo", "自摸", "tm"):
+            return {"tile": "tsumo", "riichi": False, "kan": False, "kyushu": False, "tsumo": True, "ron": False, "pass": False, "candidate": "tsumo"}
+        if low in ("ron", "荣和", "胡", "和"):
+            return {"tile": "ron", "riichi": False, "kan": False, "kyushu": False, "tsumo": False, "ron": True, "pass": False, "candidate": "ron"}
+        if low in ("pass", "见逃", "过", "不鸣"):
+            return {"tile": "pass", "riichi": False, "kan": False, "kyushu": False, "tsumo": False, "ron": False, "pass": True, "candidate": "pass"}
+        if low == "kk":
+            return {"tile": "kk", "riichi": False, "kan": False, "kyushu": True, "candidate": "kyushu:kk"}
+        tile, riichi, kan, kyushu = raw, False, False, False
+        if tile.endswith("k"):
+            kan = True
+            tile = tile[:-1]
+        elif tile.endswith("r"):
+            riichi = True
+            tile = tile[:-1]
+        return {"tile": tile, "riichi": riichi, "kan": kan, "kyushu": False, "candidate": candidate_id(tile, riichi, kan)}
+    elif isinstance(value, dict):
+        if bool(value.get("tsumo", False)) or str(value.get("tile", "")).lower() in ("tsumo", "自摸"):
+            return {"tile": "tsumo", "riichi": False, "kan": False, "kyushu": False, "tsumo": True, "ron": False, "pass": False, "candidate": "tsumo"}
+        if bool(value.get("ron", False)) or str(value.get("tile", "")).lower() in ("ron", "荣和"):
+            return {"tile": "ron", "riichi": False, "kan": False, "kyushu": False, "tsumo": False, "ron": True, "pass": False, "candidate": "ron"}
+        if bool(value.get("pass", False)) or bool(value.get("pass_action", False)) or str(value.get("tile", "")).lower() in ("pass", "见逃"):
+            return {"tile": "pass", "riichi": False, "kan": False, "kyushu": False, "tsumo": False, "ron": False, "pass": True, "candidate": "pass"}
+        if bool(value.get("kyushu", False)):
+            return {"tile": "kk", "riichi": False, "kan": False, "kyushu": True, "candidate": "kyushu:kk"}
+        tile = str(value.get("tile", "")).strip()
+        riichi = bool(value.get("riichi", False))
+        kan = bool(value.get("kan", False))
+        kyushu = False
+        chi_val = value.get("chi")
+        pon_val = bool(value.get("pon", False))
+        minkan_val = bool(value.get("daiminkan", False))
+        fu_val = value.get("follow_up_discard")
+        c_id = None
+        if chi_val:
+            fu_str = f">{fu_val}" if fu_val else ""
+            c_id = f"chi:{''.join(chi_val)}{fu_str}"
+        elif pon_val:
+            fu_str = f">{fu_val}" if fu_val else ""
+            c_id = f"pon{fu_str}"
+        elif minkan_val:
+            c_id = "daiminkan"
+        else:
+            c_id = candidate_id(tile, riichi, kan, kyushu)
+
+        return {
+            "tile": tile,
+            "riichi": riichi,
+            "kan": kan,
+            "kyushu": False,
+            "tsumo": False,
+            "ron": False,
+            "pass": False,
+            "chi": chi_val,
+            "pon": pon_val,
+            "daiminkan": minkan_val,
+            "follow_up_discard": fu_val,
+            "candidate": c_id,
+        }
+    raise ValueError("first discard candidate must be a tile string or object")
+
+
+def candidate_identity(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        if value.get("candidate"):
+            return str(value["candidate"])
+        if value.get("chi"):
+            fu = f">{value.get('follow_up_discard')}" if value.get("follow_up_discard") else ""
+            return f"chi:{''.join(value['chi'])}{fu}"
+        if value.get("pon"):
+            fu = f">{value.get('follow_up_discard')}" if value.get("follow_up_discard") else ""
+            return f"pon{fu}"
+        if value.get("daiminkan"):
+            return "daiminkan"
+        if value.get("discard"):
+            d = str(value["discard"])
+            if d.startswith("chi:") or d.startswith("pon") or d in ("tsumo", "ron", "pass", "daiminkan"):
+                return d
+            return candidate_id(d, bool(value.get("first_riichi", False)))
+    return normalize_candidate(value)["candidate"]
 
 
 def _emit(emit: Callable[[dict[str, Any]], None], kind: str, **payload: Any) -> None:
@@ -26,28 +210,50 @@ def _emit(emit: Callable[[dict[str, Any]], None], kind: str, **payload: Any) -> 
 
 def _prepare_imports(rayon_threads: int) -> None:
     os.environ["RAYON_NUM_THREADS"] = str(rayon_threads)
-    sys.path.insert(0, str(MORTAL_DIR))
-    sys.path.insert(0, str(LIBRIICHI_DIR))
-    sys.path.insert(0, str(AKAGI_DIR))
+    for path in (MORTAL_DIR, LIBRIICHI_DIR, SIMULATOR_DIR):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
 
 
-def cuda_diagnostics() -> dict[str, Any]:
-    """Report CUDA state; the GPU edition never silently falls back to CPU."""
+def cuda_diagnostics(engine_name: str = "python") -> dict[str, Any]:
     result: dict[str, Any] = {
         "available": False,
         "torch_version": None,
         "cuda_version": None,
         "gpu_name": None,
+        "compute_capability": None,
         "error": None,
     }
+    if engine_name == "lite":
+        try:
+            executable = shutil.which("nvidia-smi")
+            if executable:
+                probe = subprocess.run(
+                    [executable, "--query-gpu=name,compute_cap", "--format=csv,noheader,nounits"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if probe.returncode == 0 and probe.stdout.strip():
+                    fields = [field.strip() for field in probe.stdout.strip().splitlines()[0].split(",")]
+                    result.update(
+                        available=True,
+                        gpu_name=fields[0],
+                        compute_capability=fields[1] if len(fields) > 1 else None,
+                    )
+                    return result
+        except (OSError, subprocess.SubprocessError) as exc:
+            result["error"] = f"{type(exc).__name__}: {exc}"
+        result["error"] = result["error"] or "NVIDIA driver or nvidia-smi is unavailable"
+        return result
     try:
         import torch
-
-        result["torch_version"] = torch.__version__
-        result["cuda_version"] = torch.version.cuda
-        result["available"] = bool(torch.cuda.is_available())
+        result.update(torch_version=torch.__version__, cuda_version=torch.version.cuda, available=bool(torch.cuda.is_available()))
         if result["available"]:
             result["gpu_name"] = torch.cuda.get_device_name(0)
+            major, minor = torch.cuda.get_device_capability(0)
+            result["compute_capability"] = f"{major}.{minor}"
         elif torch.version.cuda is None:
             result["error"] = "CPU-only PyTorch is installed"
         else:
@@ -57,35 +263,115 @@ def cuda_diagnostics() -> dict[str, Any]:
     return result
 
 
-def require_cuda() -> dict[str, Any]:
+def require_cuda(engine_name: str = "python") -> dict[str, Any]:
+    if engine_name == "lite":
+        # The Lite build deliberately does not bundle PyTorch.  A driver-level
+        # query is enough to provide an early, readable diagnostic; the native
+        # runtime performs the definitive CUDA initialization check next.
+        try:
+            executable = shutil.which("nvidia-smi")
+            if executable:
+                probe = subprocess.run(
+                    [executable, "--query-gpu=name,compute_cap", "--format=csv,noheader,nounits"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if probe.returncode == 0 and probe.stdout.strip():
+                    fields = [field.strip() for field in probe.stdout.strip().splitlines()[0].split(",")]
+                    return {
+                        "available": True,
+                        "torch_version": None,
+                        "cuda_version": None,
+                        "gpu_name": fields[0],
+                        "compute_capability": fields[1] if len(fields) > 1 else None,
+                        "error": None,
+                    }
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise RuntimeError("MortalSim Lite requires an NVIDIA driver; nvidia-smi found no usable GPU")
     status = cuda_diagnostics()
     if not status["available"]:
-        detail = status["error"] or "CUDA is unavailable"
-        raise RuntimeError(
-            "MortalSim GPU edition requires an NVIDIA GPU with CUDA support; "
-            f"CPU fallback is disabled ({detail})."
-        )
+        raise RuntimeError(f"MortalSim GPU edition requires CUDA; CPU fallback is disabled ({status['error'] or 'CUDA unavailable'}).")
     return status
 
 
-def _load_engine():
+def _load_engine(
+    model_id: str | None = None,
+    engine_name: str = "python",
+    decision_contract: str = "stable_advantage_v2",
+):
+    model = ModelRegistry().get(model_id)
+    model_path = Path(model["path"])
+    if engine_name == "lite":
+        if decision_contract != "stable_advantage_v2":
+            raise RuntimeError("Formal Lite supports only stable_advantage_v2")
+        try:
+            from mortal.lite_engine import MortalLiteEngine
+        except ImportError:
+            from lite_engine import MortalLiteEngine
+
+        runtime_dir = Path(
+            model.get("lite_runtime_dir")
+            or os.environ.get("MORTALSIM_LITE_RUNTIME_DIR", ROOT / "packaging" / "lite_runtime")
+        )
+        runtime_path = Path(
+            model.get("lite_runtime_path")
+            or os.environ.get("MORTALSIM_LITE_RUNTIME", runtime_dir / "mortal_lite_runtime.dll")
+        )
+        configured_model = model.get("lite_model_path") or os.environ.get("MORTALSIM_LITE_MODEL", "")
+        if configured_model:
+            lite_model = Path(configured_model)
+        else:
+            # Portable builds have used both the AOTInductor suffix and the
+            # simpler model.dll name.  Resolve either without requiring a
+            # per-machine config file.
+            candidates = (
+                runtime_dir / "mortal-v4-amp-advantage-b1024.wrapper.pyd",
+                runtime_dir / "mortal-v4-amp-b1024.wrapper.pyd",
+                runtime_dir / "mortal-v4-fp32-b256.wrapper.pyd",
+                runtime_dir / "model.dll",
+            )
+            lite_model = next((path for path in candidates if path.is_file()), candidates[0])
+        configured_weights = model.get("lite_weights_path") or os.environ.get("MORTALSIM_LITE_WEIGHTS", "")
+        lite_weights = Path(configured_weights) if configured_weights else None
+        if not all(path.is_file() for path in (runtime_path, lite_model)):
+            raise RuntimeError(
+                "Mortal Lite runtime is not installed. Set MORTALSIM_LITE_RUNTIME, "
+                "MORTALSIM_LITE_MODEL to the portable GPU files."
+            )
+        checkpoint_path = model_path if lite_weights is None or lite_weights.suffix.lower() == ".pth" else None
+        if lite_weights is not None and not lite_weights.is_file():
+            raise RuntimeError(f"Mortal Lite weight blob is missing: {lite_weights}")
+        require_cuda("lite")
+        capacity = int(model.get("lite_batch_capacity") or os.environ.get("MORTALSIM_LITE_BATCH_CAPACITY", "1024"))
+        for marker, marker_capacity in (("-b256", 256), ("-b512", 512), ("-b1024", 1024)):
+            if marker in lite_model.name.lower() and not model.get("lite_batch_capacity") and not os.environ.get("MORTALSIM_LITE_BATCH_CAPACITY"):
+                capacity = marker_capacity
+                break
+        engine = MortalLiteEngine(
+            runtime_path,
+            lite_model,
+            lite_weights if checkpoint_path is None else None,
+            checkpoint_path=checkpoint_path,
+            capacity=capacity,
+            name="Mortal Lite",
+        )
+        return engine, "cuda:0", {**model, "engine": "mortal-lite"}
+
+    if decision_contract != "legacy_amp_v1":
+        raise RuntimeError("The Python development engine supports only legacy_amp_v1")
+
     import torch
     from engine import MortalEngine
     from model import Brain, DQN
-
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(f"模型文件不存在: {MODEL_PATH}")
-
     require_cuda()
-    state = torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
+    state = torch.load(model_path, map_location="cpu", weights_only=True)
     cfg = state["config"]
     version = cfg["control"]["version"]
     device = torch.device("cuda")
-    brain = Brain(
-        version=version,
-        conv_channels=cfg["resnet"]["conv_channels"],
-        num_blocks=cfg["resnet"]["num_blocks"],
-    ).eval().to(device)
+    brain = Brain(version=version, conv_channels=cfg["resnet"]["conv_channels"], num_blocks=cfg["resnet"]["num_blocks"]).eval().to(device)
     dqn = DQN(version=version).eval().to(device)
     brain.load_state_dict(state["mortal"])
     dqn.load_state_dict(state["current_dqn"])
@@ -95,50 +381,241 @@ def _load_engine():
         is_oracle=False,
         version=version,
         device=device,
-        enable_amp=device.type == "cuda",
+        enable_amp=True,
         name="MortalApp",
         enable_rule_based_agari_guard=True,
     )
-    return engine, device
+    engine.decision_contract = "legacy_amp_v1"
+    engine.runtime_metadata = {
+        "engine_id": "pytorch-cuda-amp",
+        "artifact_sha256": None,
+        "build_id": f"torch-{torch.__version__}",
+        "compute_capability": ".".join(map(str, torch.cuda.get_device_capability(0))),
+        "batch_size": None,
+        "batch_capacity": None,
+        "precision_profile": "torch-autocast-cuda",
+    }
+    return engine, device, {**model, "engine": "python-amp"}
+
+
+def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
+    """Resolve public relative-seat inputs to libriichi's absolute seats."""
+    if "round" not in request:
+        # Historical schema-v2 requests used an explicit dealer seat while
+        # always simulating an East round. Preserve that replay behavior.
+        oya = int(request.get("oya", 0))
+        return {
+            "round": f"E{oya + 1}",
+            "kyoku": 1,
+            "bakaze": "E",
+            "oya": oya,
+            "honba": int(request.get("honba", 0)),
+            "kyotaku": int(request.get("kyotaku", 0)),
+            "scores": [int(value) for value in request.get("absolute_scores", [25_000] * 4)],
+        }
+
+    round_id = str(request["round"]).upper()
+    if len(round_id) != 2 or round_id[0] not in "ESW" or round_id[1] not in "1234":
+        raise ValueError(f"invalid round: {round_id}")
+    wind_index = "ESW".index(round_id[0])
+    round_number = int(round_id[1])
+    kyoku = wind_index * 4 + round_number
+    # In single-kyoku simulations with absolute seats (0=East, 1=South, 2=West, 3=North),
+    # the dealer (oya) is always seat 0 (East).
+    oya = 0
+    honba = int(request.get("honba", 0))
+    kyotaku = int(request.get("kyotaku", 0))
+    relative = request.get("scores") or {}
+    values = (
+        int(relative.get("self", 25_000)),
+        int(relative.get("shimocha", 25_000)),
+        int(relative.get("toimen", 25_000)),
+    )
+    kamicha = 100_000 - kyotaku * 1_000 - sum(values)
+    all_relative = (*values, kamicha)
+    if not 0 <= honba <= 99 or not 0 <= kyotaku <= 99:
+        raise ValueError("honba and kyotaku must be between 0 and 99")
+    if any(value < 0 or value % 100 for value in all_relative):
+        raise ValueError("all scores must be non-negative multiples of 100")
+    scores = [0] * 4
+    for offset, value in enumerate(all_relative):
+        scores[(oya + offset) % 4] = value
+    return {
+        "round": round_id,
+        "kyoku": kyoku,
+        "bakaze": round_id[0],
+        "oya": oya,
+        "honba": honba,
+        "kyotaku": kyotaku,
+        "scores": scores,
+        "relative_scores": {
+            "self": values[0],
+            "shimocha": values[1],
+            "toimen": values[2],
+            "kamicha": kamicha,
+        },
+    }
 
 
 def _parse_inputs(request: dict[str, Any]):
     _prepare_imports(int(request.get("rayon_threads", 20)))
     from kyoku_sim_win import parse_hand
-
-    hand = parse_hand(request["hand"])
-    if len(hand) != 13:
-        raise ValueError(f"手牌必须正好 13 张，当前为 {len(hand)} 张")
+    complete_hand = parse_hand(request["hand"])
 
     def one_tile(value: str, label: str):
         tiles = parse_hand(value.strip())
         if len(tiles) != 1:
-            raise ValueError(f"{label} 必须是单张牌: {value}")
+            raise ValueError(f"{label}必须是单张牌: {value}")
         return tiles[0]
 
-    first_tsumo = one_tile(request["first_tsumo"], "第一摸牌")
+    legacy_first_tsumo = request.get("first_tsumo")
+    if legacy_first_tsumo is None:
+        if len(complete_hand) % 3 == 2: # 14, 11, 8, 5, 2 tiles (drawn state)
+            hand, first_tsumo = complete_hand[:-1], complete_hand[-1]
+        elif len(complete_hand) % 3 == 1: # 13, 10, 7, 4, 1 tiles (reaction/wait state)
+            hand, first_tsumo = complete_hand, None
+        else:
+            hand, first_tsumo = complete_hand, None
+    else:
+        if len(complete_hand) != 13:
+            raise ValueError(f"旧版手牌必须正好 13 张，当前为 {len(complete_hand)} 张")
+        hand, first_tsumo = complete_hand, one_tile(str(legacy_first_tsumo), "第一摸牌")
     dora = one_tile(request["dora"], "宝牌指示牌")
     raw_discards = request["discards"]
     if isinstance(raw_discards, str):
         raw_discards = raw_discards.split(",")
-    discards = [str(v).strip() for v in raw_discards if str(v).strip()]
+    discards = [normalize_candidate(value) for value in raw_discards]
     if not discards:
         raise ValueError("至少需要一个第一打候选")
-    for discard in discards:
-        one_tile(discard, "第一打")
+    for candidate in discards:
+        if candidate.get("tsumo") or candidate.get("candidate") == "tsumo":
+            candidate["tile"] = "tsumo"
+            candidate["engine_tile"] = "1m"
+            candidate["candidate"] = "tsumo"
+            continue
+        if candidate.get("ron") or candidate.get("candidate") == "ron":
+            candidate["tile"] = "ron"
+            candidate["engine_tile"] = "1m"
+            candidate["candidate"] = "ron"
+            continue
+        if candidate.get("pass") or candidate.get("candidate") == "pass":
+            candidate["tile"] = "pass"
+            candidate["engine_tile"] = "1m"
+            candidate["candidate"] = "pass"
+            continue
+        if candidate.get("chi") or str(candidate.get("candidate", "")).startswith("chi:"):
+            candidate["tile"] = "chi"
+            candidate["engine_tile"] = "1m"
+            c_chi = candidate.get("chi") or []
+            c_fu = candidate.get("follow_up_discard")
+            fu_str = f">{c_fu}" if c_fu else ""
+            candidate["candidate"] = candidate.get("candidate") or f"chi:{''.join(c_chi)}{fu_str}"
+            continue
+        if candidate.get("pon") or str(candidate.get("candidate", "")).startswith("pon"):
+            candidate["tile"] = "pon"
+            candidate["engine_tile"] = "1m"
+            c_fu = candidate.get("follow_up_discard")
+            fu_str = f">{c_fu}" if c_fu else ""
+            candidate["candidate"] = candidate.get("candidate") or f"pon{fu_str}"
+            continue
+        if candidate.get("daiminkan") or str(candidate.get("candidate", "")) == "daiminkan":
+            candidate["tile"] = "daiminkan"
+            candidate["engine_tile"] = "1m"
+            candidate["candidate"] = "daiminkan"
+            continue
+        if candidate.get("kyushu"):
+            candidate["tile"] = "kk"
+            candidate["engine_tile"] = "1m"  # placeholder; unused when first_kyushu
+            candidate["candidate"] = candidate_id("kk", False, False, True)
+            continue
+        # Compact notation such as ``1z`` is the public/UI form, while the
+        # Rust API expects its canonical honor names (``E`` here). Preserve
+        # the compact form for IDs, history, and tile rendering.
+        engine_tile = one_tile(candidate["tile"], "第一打")
+        candidate["tile"] = public_tile(engine_tile)
+        candidate["engine_tile"] = engine_tile
+        candidate["candidate"] = candidate_id(
+            candidate["tile"],
+            candidate["riichi"],
+            candidate.get("kan", False),
+            candidate.get("kyushu", False),
+            candidate.get("tsumo", False),
+            candidate.get("ron", False),
+            candidate.get("pass", False),
+            candidate.get("chi"),
+            candidate.get("pon", False),
+            candidate.get("daiminkan", False),
+            candidate.get("follow_up_discard"),
+        )
+    if len({candidate["candidate"] for candidate in discards}) != len(discards):
+        raise ValueError("第一打候选不能重复")
+    runs, seed = int(request["runs"]), int(request["seed"])
+    batch_size, rayon_threads = int(request["batch_size"]), int(request["rayon_threads"])
+    context = resolve_simulation_context(request)
+    if not 1 <= runs <= 100_000 or batch_size < 1 or rayon_threads < 1:
+        raise ValueError("模拟参数超出允许范围")
 
-    runs = int(request["runs"])
-    seed = int(request["seed"])
-    oya = int(request["oya"])
-    batch_size = int(request["batch_size"])
-    rayon_threads = int(request["rayon_threads"])
-    if not 1 <= runs <= 100_000:
-        raise ValueError("模拟局数必须在 1 到 100000 之间")
-    if not 0 <= oya <= 3:
-        raise ValueError("亲家座位必须是 0 到 3")
-    if batch_size < 1 or rayon_threads < 1:
-        raise ValueError("batch size 和 Rayon 线程数必须大于 0")
-    return hand, first_tsumo, dora, discards, runs, seed, oya, batch_size, rayon_threads
+    target_seat = request.get("target_seat")
+    if target_seat is not None:
+        target_seat = int(target_seat)
+        if not 0 <= target_seat <= 3:
+            raise ValueError(f"target_seat 必须在 0..3 范围内，当前为 {target_seat}")
+
+    x = int(request.get("x", 1))
+    if not 1 <= x <= 18:
+        raise ValueError(f"x 必须在 1..4 范围内，当前为 {x}")
+
+    def _parse_spec_item(item: Any, label: str) -> tuple[str, bool, bool]:
+        if isinstance(item, (list, tuple)):
+            tile_s = str(item[0])
+            ts = bool(item[1]) if len(item) > 1 else False
+            is_r = bool(item[2]) if len(item) > 2 else False
+        elif isinstance(item, dict):
+            tile_s = str(item.get("tile", "1m"))
+            ts = bool(item.get("tsumogiri", False))
+            is_r = bool(item.get("is_riichi", False)) or bool(item.get("riichi", False))
+        else:
+            tile_s, ts, is_r = str(item), False, False
+        # Strip trailing riichi/tsumo flags if still present in string
+        t_clean = tile_s.strip()
+        while len(t_clean) > 2 and t_clean[-1].lower() in ('r', 't', '^', '立', '摸'):
+            if t_clean[-1].lower() in ('r', '立'):
+                is_r = True
+            elif t_clean[-1].lower() in ('t', '^', '摸'):
+                ts = True
+            t_clean = t_clean[:-1]
+        return (one_tile(t_clean, label), ts, is_r)
+
+    raw_target_past = request.get("target_past_discards")
+    target_past_discards = None
+    if raw_target_past:
+        target_past_discards = [_parse_spec_item(item, "目标历史舍牌") for item in raw_target_past]
+
+    raw_opp_rivers = request.get("opponent_rivers")
+    opponent_rivers = None
+    if raw_opp_rivers:
+        opponent_rivers = [[], [], [], []]
+        for p_idx, p_river in enumerate(raw_opp_rivers):
+            if p_river:
+                for item in p_river:
+                    opponent_rivers[p_idx].append(_parse_spec_item(item, f"对手 {p_idx} 舍牌"))
+
+    tau = float(request.get("tau", 1.0))
+    if tau <= 0 or not math.isfinite(tau):
+        raise ValueError(f"tau 必须为正数，当前为 {tau}")
+    weighted = bool(request.get("weighted", False) or opponent_rivers is not None)
+
+    prefix_config = {
+        "target_seat": target_seat,
+        "x": x,
+        "target_past_discards": target_past_discards,
+        "opponent_rivers": opponent_rivers,
+        "prefix_melds": request.get("prefix_melds"),
+        "tau": tau,
+        "weighted": weighted,
+    }
+
+    return hand, first_tsumo, dora, discards, runs, seed, context, batch_size, rayon_threads, prefix_config
 
 
 def _number(value: Any) -> float:
@@ -148,147 +625,1019 @@ def _number(value: Any) -> float:
         return 0.0
 
 
-def _summarize(rows: list[dict[str, Any]], oya: int, discard: str) -> dict[str, Any]:
-    counts = {"hora": 0, "tsumo": 0, "ryukyoku": 0, "error": 0}
+def _t_critical(df: int) -> float:
+    table = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 12: 2.179, 15: 2.131, 20: 2.086, 30: 2.042, 60: 2.000}
+    return next((table[k] for k in sorted(table) if df <= k), 1.96)
+
+
+def _mean(values: Iterable[float]) -> dict[str, Any]:
+    data = [float(value) for value in values]
+    total = math.fsum(data)
+    total_sq = math.fsum(value * value for value in data)
+    if not data:
+        return {"value": None, "stddev": None, "ci95": None, "n": 0, "sum": 0.0, "sum_sq": 0.0}
+    value = total / len(data)
+    if len(data) < 2:
+        return {"value": value, "stddev": None, "ci95": None, "n": len(data), "sum": total, "sum_sq": total_sq}
+    variance = max(0.0, (total_sq - total * total / len(data)) / (len(data) - 1))
+    stddev = math.sqrt(variance)
+    margin = _t_critical(len(data) - 1) * stddev / math.sqrt(len(data))
+    return {"value": value, "stddev": stddev, "ci95": [value - margin, value + margin], "n": len(data), "sum": total, "sum_sq": total_sq}
+
+
+def _rate(count: int, total: int) -> dict[str, Any]:
+    if total <= 0:
+        return {"count": count, "total": total, "rate": None, "ci95": None}
+    p, z, z2 = count / total, 1.959963984540054, 1.959963984540054**2
+    center = (p + z2 / (2 * total)) / (1 + z2 / total)
+    margin = z * math.sqrt((p * (1 - p) + z2 / (4 * total)) / total) / (1 + z2 / total)
+    return {"count": count, "total": total, "rate": p, "ci95": [max(0.0, center - margin), min(1.0, center + margin)]}
+
+
+def _ratio(count: float, total: float) -> dict[str, Any]:
+    return _rate(int(count), int(total))
+
+
+def _legacy_outcome(result: dict[str, Any], target_seat: int) -> tuple[str, str | None]:
+    outcome = result.get("outcome") or result.get("type")
+    if outcome in OUTCOMES or outcome == "error":
+        return outcome, result.get("win_method")
+    actor, target = result.get("agari_actor"), result.get("agari_target")
+    if outcome == "tsumo":
+        return ("self_win", "tsumo") if actor == target_seat else ("other_tsumo", None)
+    if outcome == "hora":
+        if actor == target_seat:
+            return "self_win", "ron"
+        if target == target_seat:
+            return "self_deal_in", None
+        return "sideways", None
+    if outcome == "ryukyoku":
+        return "draw", None
+    return "error", None
+
+
+def _target_player(row: dict[str, Any], target_seat: int) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate target settlement balance and exact end-minus-start score delta."""
+    players = row.get("players")
+    if not isinstance(players, list) or len(players) <= target_seat:
+        return None, "missing_target_score_delta"
+    player = players[target_seat]
+    if not isinstance(player, dict) or "score_delta" not in player:
+        return None, "missing_target_score_delta"
+    try:
+        score_delta = float(player["score_delta"])
+    except (TypeError, ValueError):
+        return None, "invalid_target_score_delta"
+    if not math.isfinite(score_delta):
+        return None, "invalid_target_score_delta"
+
+    if "round_balance" not in player:
+        return None, "missing_round_balance"
+    try:
+        round_balance = float(player["round_balance"])
+    except (TypeError, ValueError):
+        return None, "invalid_round_balance"
+    if not math.isfinite(round_balance):
+        return None, "invalid_round_balance"
+
+    # New runner rows include both score snapshots and the terminal settlement
+    # vector used by NAGA's round-balance convention. The latter excludes the
+    # 1,000-point payment made when the target's riichi is accepted.
+    result = row.get("result")
+    if isinstance(result, dict) and "initial_scores" in result:
+        try:
+            initial = [float(value) for value in result["initial_scores"]]
+            final = [float(value) for value in result["final_scores"]]
+            deltas = [float(value) for value in result["score_deltas"]]
+        except (KeyError, TypeError, ValueError):
+            return None, "invalid_score_snapshot"
+        if len(initial) != 4 or len(final) != 4 or len(deltas) != 4:
+            return None, "invalid_score_snapshot"
+        if not all(math.isfinite(value) for value in (*initial, *final, *deltas)):
+            return None, "invalid_score_snapshot"
+        if final[target_seat] - initial[target_seat] != score_delta or deltas[target_seat] != score_delta:
+            return None, "inconsistent_target_score_delta"
+        if any(final[index] - initial[index] != deltas[index] for index in range(4)):
+            return None, "inconsistent_score_deltas"
+        if "kyotaku_start" in result and "kyotaku_remaining" in result:
+            try:
+                expected_total = 1_000 * (int(result["kyotaku_start"]) - int(result["kyotaku_remaining"]))
+            except (TypeError, ValueError):
+                return None, "invalid_kyotaku_snapshot"
+            if sum(deltas) != expected_total:
+                return None, "inconsistent_kyotaku_balance"
+        if "round_balances" in result:
+            try:
+                round_balances = [float(value) for value in result["round_balances"]]
+                round_balance = float(player["round_balance"])
+            except (KeyError, TypeError, ValueError):
+                return None, "invalid_round_balance"
+            if len(round_balances) != 4 or not all(math.isfinite(value) for value in round_balances):
+                return None, "invalid_round_balance"
+            if round_balances[target_seat] != round_balance:
+                return None, "inconsistent_round_balance"
+            accepted = bool(player.get("riichi_accepted", False))
+            if round_balance - score_delta != (1_000 if accepted else 0):
+                return None, "inconsistent_riichi_balance"
+
+    validated = dict(player)
+    validated["score_delta"] = score_delta
+    validated["round_balance"] = round_balance
+    return validated, None
+
+
+def _sample(rows: list[dict[str, Any]], discard: str, target_seat: int) -> dict[str, list[dict[str, Any]]]:
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        outcome, method = _legacy_outcome(row.get("result", {}), target_seat)
+        player, player_error = _target_player(row, target_seat)
+        if outcome != "error" and player_error:
+            outcome, method = "error", None
+        player = player or {}
+        item = {
+            "seed": row.get("seed"),
+            "trace_hash": row.get("trace_hash"),
+            "point": player.get("round_balance"),
+            "rank": player.get("final_rank"),
+            "outcome": outcome,
+            "win_method": method,
+            "candidate": discard,
+        }
+        metric_names: list[str | None] = [
+            f"outcome.{outcome}",
+            f"win_method.{method}" if method else None,
+        ]
+        metrics = row.get("metrics", {})
+        metric_names.extend(f"yaku.{yaku_id}" for yaku_id in metrics.get("yaku_ids", []))
+        metric_names.extend(
+            f"yaku.{bonus_id}"
+            for bonus_id in ("dora", "ura_dora", "aka_dora")
+            if int(metrics.get(bonus_id, 0) or 0) > 0
+        )
+        for metric in metric_names:
+            if metric:
+                buckets.setdefault(metric, []).append(item)
+    for metric, items in list(buckets.items()):
+        buckets[metric] = _trim_samples(items, discard, metric)
+    return buckets
+
+
+def _row_seed_key(row: dict[str, Any]) -> tuple[int, ...]:
+    """Return a sortable seed key from a runner row.
+
+    Rust returns live tuples, persisted JSON decodes them as lists, and some
+    legacy callers use plain integers.  Normalize all three to a tuple so
+    rows can be ordered by seed before cumulative/paired statistics.
+    """
+    seed = row.get("seed")
+    if isinstance(seed, (list, tuple)):
+        return tuple(int(part) for part in seed)
+    return (int(seed),)
+
+
+def _first_seat_by_score(scores: list[int]) -> int:
+    """Tenhou same-score tie: the earliest absolute seat ranks higher."""
+    best = max(scores)
+    return min(index for index, score in enumerate(scores) if score == best)
+
+
+def _final_rank_distribution(scores: list[int], seat: int) -> list[float]:
+    ordered = sorted(range(4), key=lambda index: (-scores[index], index))
+    rank = ordered.index(seat) + 1
+    probs = [0.0, 0.0, 0.0, 0.0]
+    probs[rank - 1] = 1.0
+    return probs
+
+
+def _resolve_next_hanchan_state(
+    context: dict[str, Any],
+    result: dict[str, Any],
+    metrics: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Derive the next start_kyoku state after one simulated kyoku.
+
+    Returns None when the hanchan ends after this kyoku (tobi, all-last
+    sudden death, or maximum W4 reached).  The transition rules and end
+    predicates were validated against real Tenhou mjai logs.
+    """
+    scores = result.get("final_scores")
+    if not isinstance(scores, list) or len(scores) != 4:
+        return None
+    try:
+        scores = [int(value) for value in scores]
+    except (TypeError, ValueError):
+        return None
+
+    outcome = result.get("outcome") or result.get("type")
+    bakaze = str(context.get("bakaze", "E"))
+    kyoku_global = int(context.get("kyoku", 1))
+    oya = int(context.get("oya", 0))
+    honba = int(context.get("honba", 0))
+    kyotaku_next = int(result.get("kyotaku_remaining", 0))
+    dealer_tenpai = bool((metrics or {}).get("final_tenpai"))
+
+    renchan = outcome == "self_win" or (outcome == "draw" and dealer_tenpai)
+
+    # Game-end predicates validated against real Tenhou data.
+    if any(score < 0 for score in scores):
+        return None  # tobi
+    if bakaze == "W":
+        if kyoku_global == 12 or max(scores) >= 30000:
+            return None
+    elif bakaze == "S" and kyoku_global == 8:
+        if renchan:
+            if _first_seat_by_score(scores) == oya and max(scores) >= 30000:
+                return None
+        elif max(scores) >= 30000:
+            return None
+
+    if renchan:
+        next_oya = oya
+        next_honba = honba + 1
+        next_kyoku_global = kyoku_global
+    else:
+        next_oya = (oya + 1) % 4
+        # Tenhou data: every exhaustive draw adds one honba, even when the
+        # dealer rotates.  A win that rotates the dealer resets honba.
+        next_honba = honba + 1 if outcome == "draw" else 0
+        if kyoku_global % 4 != 0:
+            next_kyoku_global = kyoku_global + 1
+        else:
+            if bakaze == "E":
+                next_kyoku_global = kyoku_global + 1  # E4 -> S1
+            elif bakaze == "S":
+                next_kyoku_global = kyoku_global + 1  # S4 -> W1
+            else:
+                return None  # W4 handled above
+
+    if next_kyoku_global <= 4:
+        next_bakaze, next_kyoku_num = "E", next_kyoku_global
+    elif next_kyoku_global <= 8:
+        next_bakaze, next_kyoku_num = "S", next_kyoku_global - 4
+    else:
+        next_bakaze, next_kyoku_num = "W", next_kyoku_global - 8
+
+    return {
+        "scores": scores,
+        "bakaze": next_bakaze,
+        "kyoku_num": next_kyoku_num,
+        "honba": next_honba,
+        "kyotaku": kyotaku_next,
+        "oya": next_oya,
+        "renchan": renchan,
+    }
+
+
+def _load_hanchan_model():
+    """Load the statistical hanchan-rank model once per worker."""
+    try:
+        from .hanchan_model import HanchanRankModel
+    except ImportError:
+        from hanchan_model import HanchanRankModel
+
+    model_dir = Path(os.environ.get("MORTALSIM_HANCHAN_MODEL_DIR", HANCHAN_MODEL_DIR))
+    try:
+        return HanchanRankModel(model_dir)
+    except ImportError as exc:
+        raise RuntimeError(
+            "MortalSim hanchan-rank model requires the lightgbm package"
+        ) from exc
+
+
+def _summarize_hanchan(
+    rows: list[dict[str, Any]],
+    context: dict[str, Any],
+    model: Any,
+    target_seat: int | None = None,
+) -> dict[str, Any]:
+    """Aggregate NAGA-style final-hanchan expectations from simulated rows."""
+    rows = sorted(rows, key=_row_seed_key)
+    target_seat = int(target_seat if target_seat is not None else context.get("target_seat", context["oya"]))
+
+    expected_ranks: list[float] = []
+    rank_prob_sums = [0.0, 0.0, 0.0, 0.0]
+    pt_rows = {name: [] for name in HANCHAN_PT_TABLES}
+
+    for row in rows:
+        result = row.get("result") or {}
+        metrics = row.get("metrics") or {}
+        if result.get("outcome") == "error" or result.get("error"):
+            continue
+        state = _resolve_next_hanchan_state(context, result, metrics)
+        if state is None:
+            scores = result.get("final_scores")
+            if not isinstance(scores, list) or len(scores) != 4:
+                continue
+            probs = _final_rank_distribution([int(value) for value in scores], target_seat)
+        else:
+            probs = model.predict_seat(
+                state["scores"],
+                state["bakaze"],
+                state["kyoku_num"],
+                state["honba"],
+                state["kyotaku"],
+                state["oya"],
+                target_seat,
+            )
+        probs = [float(value) for value in probs]
+        expected_ranks.append(sum((rank + 1) * probs[rank] for rank in range(4)))
+        for rank in range(4):
+            rank_prob_sums[rank] += probs[rank]
+        for name, table in HANCHAN_PT_TABLES.items():
+            pt_rows[name].append(sum(probs[rank] * table[rank] for rank in range(4)))
+
+    n = len(expected_ranks)
+    rank_rates = [
+        {"rank": rank + 1, **_rate(rank_prob_sums[rank], n)}
+        for rank in range(4)
+    ]
+    dan_pt_ev = {name: _mean(pt_rows[name]) for name in HANCHAN_PT_TABLES}
+    expected_rank = _mean(expected_ranks)
+
+    return {
+        "expected_rank": expected_rank,
+        "rank_rates": rank_rates,
+        "dan_pt_ev": dan_pt_ev,
+        "merge_state": {
+            "expected_rank": expected_rank,
+            "rank_rates": rank_rates,
+            "dan_pt_ev": dan_pt_ev,
+        },
+        "sample": {"games": n, "completed_games": n, "errors": 0},
+    }
+
+
+def _summarize(
+    rows: list[dict[str, Any]],
+    target_seat: int,
+    discard: str,
+    elapsed: float = 0.0,
+    *,
+    first_riichi: bool = False,
+    first_kan: bool = False,
+    first_kyushu: bool = False,
+    weighted: bool = False,
+    tau: float = 1.0,
+) -> dict[str, Any]:
+    # The Rust runner returns completed games in completion order, not seed
+    # order.  Cumulative stability and same-seed paired comparisons must use
+    # seed order, otherwise every 1000-game batch boundary shows a sawtooth
+    # artifact (fast games first, slow games last).
+    rows = sorted(rows, key=_row_seed_key)
+    outcome_counts = {name: 0 for name in OUTCOMES}
+    methods = {"ron": 0, "tsumo": 0}
     ranks = [0, 0, 0, 0]
     points: list[float | None] = []
+    rank_samples: list[float] = []
     stat_sum = {field: 0.0 for field in STAT_FIELDS}
+    error_types: dict[str, int] = {}
+    indicators: dict[str, list[float | None]] = {name: [] for name in OUTCOMES}
+    first_tenpai_turns: list[float] = []
+    tenpai_games = 0
+    draw_tenpai_games = 0
+    fuuro_counts: list[float] = []
+    raw_win_points: list[float] = []
+    win_hans: list[float] = []
+    win_fus: list[float] = []
+    han_counts: dict[str, int] = {}
+    yaku_counts = {yaku_id: 0 for yaku_id in YAKU_IDS}
+    bonus_tiles = {"dora": 0, "ura_dora": 0, "aka_dora": 0}
+    detailed_wins = 0
+    has_game_metrics = False
     for row in rows:
         result = row.get("result", {})
-        result_type = result.get("type", "error")
-        counts[result_type] = counts.get(result_type, 0) + 1
-        players = row.get("players", [])
-        if len(players) <= oya:
+        outcome, method = _legacy_outcome(result, target_seat)
+        player, player_error = _target_player(row, target_seat)
+        if outcome != "error" and player_error:
+            outcome, method = "error", None
+        for name in OUTCOMES:
+            indicators[name].append(1.0 if outcome == name else (None if outcome == "error" else 0.0))
+        if outcome == "error":
+            key = player_error or str(result.get("error") or "runner_error")
+            error_types[key] = error_types.get(key, 0) + 1
             points.append(None)
             continue
-        player = players[oya]
+        outcome_counts[outcome] += 1
+        if method in methods:
+            methods[method] += 1
+        assert player is not None
         rank = int(player.get("final_rank", 0) or 0)
         if 1 <= rank <= 4:
             ranks[rank - 1] += 1
-        points.append(_number(player.get("score_delta", 0)))
+            rank_samples.append(float(rank))
+        points.append(_number(player["round_balance"]))
+        metrics = row.get("metrics", {})
+        has_game_metrics = has_game_metrics or int(metrics.get("version", 0) or 0) >= 1
+        first_tenpai_turn = metrics.get("first_tenpai_turn")
+        if first_tenpai_turn is not None:
+            first_tenpai_turns.append(_number(first_tenpai_turn))
+            tenpai_games += 1
+        if outcome == "draw" and metrics.get("final_tenpai"):
+            draw_tenpai_games += 1
+        fuuro_counts.append(_number(metrics.get("fuuro_count", 0)))
+        if outcome == "self_win" and metrics.get("yaku_ids") is not None:
+            detailed_wins += 1
+            for yaku_id in set(metrics.get("yaku_ids", [])):
+                if yaku_id in yaku_counts:
+                    yaku_counts[yaku_id] += 1
+            for bonus_id in bonus_tiles:
+                count = int(metrics.get(bonus_id, 0) or 0)
+                bonus_tiles[bonus_id] += count
+                if count > 0:
+                    yaku_counts[bonus_id] += 1
+            if metrics.get("raw_win_point") is not None:
+                raw_win_points.append(_number(metrics["raw_win_point"]))
+            if metrics.get("han") is not None:
+                han = int(metrics["han"])
+                win_hans.append(float(han))
+                han_counts[str(han)] = han_counts.get(str(han), 0) + 1
+            if metrics.get("fu") is not None:
+                win_fus.append(_number(metrics["fu"]))
         stat = row.get("stat")
         if stat is not None:
             for field in STAT_FIELDS:
                 stat_sum[field] += _number(getattr(stat, field, 0))
 
-    games = len(rows)
-    completed = max(games - counts.get("error", 0), 0)
-    avg_rank = sum((i + 1) * count for i, count in enumerate(ranks)) / max(completed, 1)
-    valid_points = [point for point in points if point is not None]
-    avg_point = sum(valid_points) / max(len(valid_points), 1)
-    rounds = stat_sum["round"] or completed
-    return {
+    games, errors = len(rows), sum(error_types.values())
+    completed = games - errors
+    assert completed == sum(outcome_counts.values())
+    assert outcome_counts["self_win"] == methods["ron"] + methods["tsumo"]
+    point_stats = _mean(point for point in points if point is not None)
+    rank_stats = _mean(rank_samples)
+    valid_point_sequence = [point for point in points if point is not None]
+    stability: list[dict[str, float | int]] = []
+    running_total = 0.0
+    stride = max(1, math.ceil(len(valid_point_sequence) / 100))
+    for index, point in enumerate(valid_point_sequence, 1):
+        running_total += point
+        if index % stride == 0 or index == len(valid_point_sequence):
+            stability.append({"games": index, "average_point": running_total / index})
+    wins, riichi_count, fuuro, dama = stat_sum["agari"], stat_sum["riichi"], stat_sum["fuuro"], stat_sum["dama_agari"]
+    agari_points = stat_sum["agari_point_oya"] + stat_sum["agari_point_ko"]
+    houjuu_points = stat_sum["houjuu_point_to_oya"] + stat_sum["houjuu_point_to_ko"]
+    seeds = [row.get("seed") for row in rows if row.get("seed") is not None]
+    seed_key = lambda value: tuple(value) if isinstance(value, (list, tuple)) else (value,)
+    candidate = {
+        "candidate": discard if (discard.startswith("chi:") or discard.startswith("pon") or discard in ("tsumo", "ron", "pass", "daiminkan")) else candidate_id(discard, first_riichi, first_kan, first_kyushu),
         "discard": discard,
-        "games": games,
-        "errors": counts.get("error", 0),
-        "hora": counts.get("hora", 0),
-        "tsumo": counts.get("tsumo", 0),
-        "ryukyoku": counts.get("ryukyoku", 0),
-        "agari_rate": stat_sum["agari"] / max(rounds, 1),
-        "houjuu_rate": stat_sum["houjuu"] / max(rounds, 1),
-        "riichi_rate": stat_sum["riichi"] / max(rounds, 1),
-        "fuuro_rate": stat_sum["fuuro"] / max(rounds, 1),
-        "avg_rank": avg_rank,
-        "avg_point": avg_point,
-        "rank_counts": ranks,
-        "stat": stat_sum,
-        "_points": points,
-        "_rows": rows,
+        "first_riichi": first_riichi,
+        "first_kan": first_kan,
+        "first_kyushu": first_kyushu,
+        "sample": {
+            "games": games,
+            "completed_games": completed,
+            "errors": errors,
+            "seed_start": min(seeds, key=seed_key) if seeds else None,
+            "seed_end": max(seeds, key=seed_key) if seeds else None,
+            "elapsed_seconds": elapsed,
+            "games_per_second": completed / elapsed if elapsed else None,
+        },
+        "value": {
+            "point": point_stats,
+            "rank": rank_stats,
+            "point_definition": "naga_round_balance",
+        },
+        "rank": {"average": rank_stats, "positions": [_rate(count, completed) for count in ranks]},
+        "outcome": {**{name: _rate(count, completed) for name, count in outcome_counts.items()}, "self_ron": _rate(methods["ron"], completed), "self_tsumo": _rate(methods["tsumo"], completed)},
+        "win": {
+            "rate": _rate(outcome_counts["self_win"], completed), "ron_share": _rate(methods["ron"], outcome_counts["self_win"]), "tsumo_share": _rate(methods["tsumo"], outcome_counts["self_win"]),
+            "riichi_share": _ratio(stat_sum["riichi_agari"], wins), "open_share": _ratio(stat_sum["fuuro_agari"], wins), "dama_share": _ratio(dama, wins),
+            "average_point": agari_points / wins if wins else None, "average_raw_point": _mean(raw_win_points), "average_han": _mean(win_hans), "average_fu": _mean(win_fus), "han_distribution": han_counts if detailed_wins else None,
+        },
+        "defense": {"deal_in_rate": _rate(outcome_counts["self_deal_in"], completed), "other_tsumo_rate": _rate(outcome_counts["other_tsumo"], completed), "sideways_rate": _rate(outcome_counts["sideways"], completed), "average_deal_in_loss": houjuu_points / stat_sum["houjuu"] if stat_sum["houjuu"] else None, "average_deal_in_turn": stat_sum["houjuu_jun"] / stat_sum["houjuu"] if stat_sum["houjuu"] else None},
+        "riichi": {"rate": _ratio(riichi_count, completed), "first_rate": _ratio(riichi_count - stat_sum["chasing_riichi"], riichi_count), "chase_rate": _ratio(stat_sum["chasing_riichi"], riichi_count), "win_after_rate": _ratio(stat_sum["riichi_agari"], riichi_count), "average_turn": stat_sum["riichi_jun"] / riichi_count if riichi_count else None},
+        "tenpai": {"rate": _rate(tenpai_games, completed), "average_first_turn": _mean(first_tenpai_turns), "draw_tenpai_rate": _rate(draw_tenpai_games, outcome_counts["draw"])},
+        "call": {"rate": _ratio(fuuro, completed), "average_count": _mean(fuuro_counts), "win_after_rate": _ratio(stat_sum["fuuro_agari"], fuuro), "average_balance": stat_sum["fuuro_point"] / fuuro if fuuro else None},
+        "draw": {"rate": _rate(outcome_counts["draw"], completed), "average_balance": stat_sum["ryukyoku_point"] / stat_sum["ryukyoku"] if stat_sum["ryukyoku"] else None, "tenpai_count": draw_tenpai_games},
+        "special": {"yakuman": int(stat_sum["yakuman"]), "nagashi_mangan": int(stat_sum["nagashi_mangan"]), "error_types": error_types},
+        "weighting": (
+            (lambda raw_w: {
+                "enabled": True,
+                "tau": tau,
+                "ess": (lambda nw: 1.0 / max(1e-12, sum(w*w for w in nw)))(
+                    (lambda s: [w / s for w in raw_w] if s > 0 else [1.0 / len(raw_w)] * len(raw_w))(sum(raw_w))
+                ) if raw_w else float(completed),
+                "ess_ratio": (lambda ess: ess / max(1, completed))(
+                    (lambda nw: 1.0 / max(1e-12, sum(w*w for w in nw)))(
+                        (lambda s: [w / s for w in raw_w] if s > 0 else [1.0 / len(raw_w)] * len(raw_w))(sum(raw_w))
+                    ) if raw_w else float(completed)
+                ),
+                "ess_warning": False,
+            })([float(r.get("weight", 1.0) or 1.0) for r in rows if r.get("weight") is not None])
+            if weighted and any(r.get("weight") is not None for r in rows)
+            else {"enabled": False}
+        ),
+        "yaku": [{"id": yaku_id, "count": yaku_counts[yaku_id] if has_game_metrics else None, "rate": yaku_counts[yaku_id] / wins if has_game_metrics and wins else (0.0 if has_game_metrics else None), "total_tiles": bonus_tiles[yaku_id] if has_game_metrics and yaku_id in bonus_tiles else None, "available": has_game_metrics} for yaku_id in YAKU_IDS],
+        "merge_state": {
+            "scalar_totals": {
+                "win_point": {"n": int(wins), "sum": agari_points},
+                "deal_in_loss": {"n": int(stat_sum["houjuu"]), "sum": houjuu_points},
+                "deal_in_turn": {"n": int(stat_sum["houjuu"]), "sum": stat_sum["houjuu_jun"]},
+                "riichi_turn": {"n": int(riichi_count), "sum": stat_sum["riichi_jun"]},
+                "call_balance": {"n": int(fuuro), "sum": stat_sum["fuuro_point"]},
+                "draw_balance": {"n": int(stat_sum["ryukyoku"]), "sum": stat_sum["ryukyoku_point"]},
+            },
+        },
+        "samples": _sample(rows, candidate_id(discard, first_riichi), target_seat),
+        "stability": stability,
+        "replay_events": next((row.get("trace_events") for row in rows if row.get("trace_events")), None),
+        # Flat compatibility fields for old clients.
+        "games": games, "completed_games": completed, "errors": errors,
+        "avg_point": point_stats["value"], "point_ci95": point_stats["ci95"],
+        "avg_rank": rank_stats["value"], "rank_counts": ranks,
+        "agari_rate": outcome_counts["self_win"] / completed if completed else None, "houjuu_rate": outcome_counts["self_deal_in"] / completed if completed else None, "riichi_rate": riichi_count / completed if completed else None, "fuuro_rate": fuuro / completed if completed else None,
+        "_points": points, "_indicators": indicators,
     }
+    return candidate
 
 
 def _compare(base: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
-    paired = [
-        b - a
-        for a, b in zip(base["_points"], other["_points"])
-        if a is not None and b is not None
-    ]
-    if not paired:
-        return {"discard": other["discard"], "paired_point_delta": 0.0, "ci95": [0.0, 0.0]}
-    mean = sum(paired) / len(paired)
-    variance = sum((value - mean) ** 2 for value in paired) / max(len(paired) - 1, 1)
-    stderr = math.sqrt(variance / len(paired))
+    def paired(left: list[float | None], right: list[float | None]) -> dict[str, Any]:
+        return _mean(b - a for a, b in zip(left, right) if a is not None and b is not None)
     return {
-        "discard": other["discard"],
-        "paired_point_delta": mean,
-        "ci95": [mean - 1.96 * stderr, mean + 1.96 * stderr],
-        "paired_samples": len(paired),
+        "reference": base.get("candidate", base["discard"]),
+        "candidate": other.get("candidate", other["discard"]),
+        "point_delta": paired(base["_points"], other["_points"]),
+        "outcome_deltas": {
+            name: paired(base["_indicators"][name], other["_indicators"][name])
+            for name in OUTCOMES
+        },
     }
+
+
+def _merge_mean(left: dict[str, Any] | None, right: dict[str, Any] | None) -> dict[str, Any]:
+    left, right = left or {}, right or {}
+    n1, n2 = int(left.get("n", 0) or 0), int(right.get("n", 0) or 0)
+    if not n1:
+        return deepcopy(right)
+    if not n2:
+        return deepcopy(left)
+    m1, m2 = float(left["value"]), float(right["value"])
+    sum1 = float(left.get("sum", m1 * n1))
+    sum2 = float(right.get("sum", m2 * n2))
+    sum_sq1 = left.get("sum_sq")
+    sum_sq2 = right.get("sum_sq")
+    if sum_sq1 is None:
+        variance1 = float(left.get("stddev") or 0.0) ** 2
+        sum_sq1 = variance1 * max(0, n1 - 1) + sum1 * sum1 / n1
+    if sum_sq2 is None:
+        variance2 = float(right.get("stddev") or 0.0) ** 2
+        sum_sq2 = variance2 * max(0, n2 - 1) + sum2 * sum2 / n2
+    n = n1 + n2
+    total = sum1 + sum2
+    total_sq = float(sum_sq1) + float(sum_sq2)
+    mean = total / n
+    if n < 2:
+        return {"value": mean, "stddev": None, "ci95": None, "n": n, "sum": total, "sum_sq": total_sq}
+    stddev = math.sqrt(max(0.0, (total_sq - total * total / n) / (n - 1)))
+    margin = _t_critical(n - 1) * stddev / math.sqrt(n)
+    return {"value": mean, "stddev": stddev, "ci95": [mean - margin, mean + margin], "n": n, "sum": total, "sum_sq": total_sq}
+
+
+def _merge_rate(left: dict[str, Any] | None, right: dict[str, Any] | None) -> dict[str, Any]:
+    left, right = left or {}, right or {}
+    return _rate(
+        int(left.get("count", 0) or 0) + int(right.get("count", 0) or 0),
+        int(left.get("total", 0) or 0) + int(right.get("total", 0) or 0),
+    )
+
+
+def _merge_scalar_total(left: Any, right: Any, name: str) -> dict[str, float | int]:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        raise ValueError(f"candidate merge state is missing scalar total: {name}")
+    if "n" not in left or "sum" not in left or "n" not in right or "sum" not in right:
+        raise ValueError(f"candidate merge state is incomplete for scalar total: {name}")
+    return {
+        "n": int(left["n"]) + int(right["n"]),
+        "sum": float(left["sum"]) + float(right["sum"]),
+    }
+
+
+def _scalar_average(total: dict[str, float | int]) -> float | None:
+    count = int(total["n"])
+    return float(total["sum"]) / count if count else None
+
+
+def _trim_samples(samples: list[dict[str, Any]], discard: str, metric: str) -> list[dict[str, Any]]:
+    def seed_order(item: dict[str, Any]) -> tuple[int, ...]:
+        value = item.get("seed")
+        if isinstance(value, (list, tuple)):
+            return tuple(int(part) for part in value)
+        return (int(value),)
+
+    # Persisted JSON turns Rust seed tuples into lists. Normalize both forms so
+    # extending an older run cannot compare a tuple with an integer while
+    # sorting or accidentally retain the same seed twice.
+    unique = {seed_order(item): item for item in samples}
+    items = list(unique.values())
+    if len(items) <= 100:
+        return sorted(items, key=seed_order)
+    ordered = sorted(items, key=seed_order)
+    head = ordered[:50]
+    rest = ordered[50:]
+    rest.sort(key=lambda item: hashlib.sha256(f"{discard}:{metric}:{seed_order(item)}".encode()).digest())
+    return head + rest[:50]
+
+
+def _merge_hanchan_rate(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    """Merge float pseudo-count rates (rank probability sums)."""
+    count = float(left.get("count", 0.0) or 0.0) + float(right.get("count", 0.0) or 0.0)
+    total = int(left.get("total", 0) or 0) + int(right.get("total", 0) or 0)
+    return _rate(count, total)
+
+
+def _merge_hanchan(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    """Merge two candidate hanchan-expectation blocks exactly."""
+    lm = left.get("merge_state") or {}
+    rm = right.get("merge_state") or {}
+    if not lm or not rm:
+        raise ValueError("candidate hanchan merge state is missing")
+
+    expected_rank = _merge_mean(lm["expected_rank"], rm["expected_rank"])
+    rank_rates = []
+    for a, b in zip(lm["rank_rates"], rm["rank_rates"]):
+        merged = _merge_hanchan_rate(a, b)
+        merged = {"rank": a.get("rank", b.get("rank")), **merged}
+        rank_rates.append(merged)
+    dan_pt_ev = {
+        name: _merge_mean(lm["dan_pt_ev"][name], rm["dan_pt_ev"][name])
+        for name in HANCHAN_PT_TABLES
+    }
+    merge_state = {
+        "expected_rank": expected_rank,
+        "rank_rates": rank_rates,
+        "dan_pt_ev": dan_pt_ev,
+    }
+    games = int(left.get("sample", {}).get("games", 0) or 0) + int(right.get("sample", {}).get("games", 0) or 0)
+    return {
+        "expected_rank": expected_rank,
+        "rank_rates": rank_rates,
+        "dan_pt_ev": dan_pt_ev,
+        "merge_state": merge_state,
+        "sample": {"games": games, "completed_games": games, "errors": 0},
+    }
+
+
+def merge_results(base: dict[str, Any], extra: dict[str, Any], operation_id: str) -> dict[str, Any]:
+    """Merge a completed extension only when its formal execution identity matches."""
+    if int(base.get("schema_version", 0)) != 3 or int(extra.get("schema_version", 0)) != 3:
+        raise ValueError("only schema v3 results can be merged")
+    if base.get("decision_contract") != extra.get("decision_contract"):
+        raise ValueError("decision contract mismatch")
+    if base.get("decision_contract") != "stable_advantage_v2":
+        raise ValueError("Formal Lite extensions require stable_advantage_v2")
+    if int(base.get("merge_state_version", 0)) != MERGE_STATE_VERSION or int(extra.get("merge_state_version", 0)) != MERGE_STATE_VERSION:
+        raise ValueError(f"Formal Lite extensions require merge_state_version={MERGE_STATE_VERSION}")
+    identity_fields = (
+        "engine_id",
+        "artifact_sha256",
+        "build_id",
+        "compute_capability",
+        "batch_size",
+        "batch_capacity",
+        "precision_profile",
+    )
+    base_runtime, extra_runtime = base.get("runtime") or {}, extra.get("runtime") or {}
+    for field in identity_fields:
+        if base_runtime.get(field) is None or base_runtime.get(field) != extra_runtime.get(field):
+            raise ValueError(f"runtime identity mismatch: {field}")
+    if (base.get("model") or {}).get("sha256") != (extra.get("model") or {}).get("sha256"):
+        raise ValueError("model SHA256 mismatch")
+    base_hanchan = base.get("hanchan_model") or {}
+    extra_hanchan = extra.get("hanchan_model") or {}
+    for field in ("model_id", "model_sha256", "feature_schema"):
+        if base_hanchan.get(field) != extra_hanchan.get(field):
+            raise ValueError(f"hanchan model identity mismatch: {field}")
+    extension_config = extra.get("config") or {}
+    if extension_config.get("extension_mode") == "candidates":
+        base_candidates = list(base.get("candidates", []))
+        extra_candidates = list(extra.get("candidates", []))
+        if not base_candidates or len(extra_candidates) < 2:
+            raise ValueError("candidate extension requires an original reference and at least one new candidate")
+        base_ids = [candidate_identity(item) for item in base_candidates]
+        extra_ids = [candidate_identity(item) for item in extra_candidates]
+        if len(set(extra_ids)) != len(extra_ids):
+            raise ValueError("candidate extension contains duplicate candidates")
+        reference_id = base_ids[0]
+        if extra_ids[0] != reference_id:
+            raise ValueError("candidate extension reference does not match the original first candidate")
+        if any(candidate_id in base_ids[1:] for candidate_id in extra_ids[1:]):
+            raise ValueError("candidate extension includes an already analyzed option")
+        total_runs = int(base.get("total_runs", base.get("runs", 0)))
+        if int(extra.get("runs", 0)) != total_runs or int(extra.get("seed", 0)) != int(base.get("seed", 0)):
+            raise ValueError("candidate extension must use the original seed range and run count")
+        added_ids = extra_ids[1:]
+        if not added_ids:
+            raise ValueError("candidate extension did not add a new option")
+        merged = deepcopy(base)
+        merged["candidates"] = deepcopy(base_candidates) + [
+            deepcopy(candidate) for candidate in extra_candidates[1:]
+        ]
+        existing_comparisons = list(base.get("comparisons", []))
+        known_comparisons = {
+            (item.get("reference"), item.get("candidate")) for item in existing_comparisons
+        }
+        for item in extra.get("comparisons", []):
+            key = (item.get("reference"), item.get("candidate"))
+            if item.get("reference") == reference_id and item.get("candidate") in added_ids and key not in known_comparisons:
+                existing_comparisons.append(deepcopy(item))
+                known_comparisons.add(key)
+        merged["comparisons"] = existing_comparisons
+        merged["runs"] = total_runs
+        merged["total_runs"] = total_runs
+        merged["elapsed"] = float(base.get("elapsed", 0)) + float(extra.get("elapsed", 0))
+        merged["merge_state_version"] = MERGE_STATE_VERSION
+        history = list(base.get("extension_history", []))
+        history.append({
+            "operation_id": operation_id,
+            "mode": "candidates",
+            "added_candidates": added_ids,
+            "runs": total_runs,
+            "seed_start": base.get("seed"),
+            "seed_end": int(base.get("seed", 0)) + total_runs - 1,
+            "elapsed": extra.get("elapsed"),
+            "batch_size": (extra.get("config") or {}).get("batch_size"),
+            "model_id": (extra.get("model") or {}).get("id"),
+            "model_sha256": (extra.get("model") or {}).get("sha256"),
+            "decision_contract": extra.get("decision_contract"),
+            "runtime_artifact_sha256": (extra.get("runtime") or {}).get("artifact_sha256"),
+            "runtime_build_id": (extra.get("runtime") or {}).get("build_id"),
+        })
+        merged["extension_history"] = history
+        return merged
+    merged = deepcopy(base)
+    extra_by_discard = {candidate_identity(item): item for item in extra.get("candidates", [])}
+    candidates: list[dict[str, Any]] = []
+    for left in base.get("candidates", []):
+        right = extra_by_discard[candidate_identity(left)]
+        out = deepcopy(left)
+        games = int(left.get("games", 0)) + int(right.get("games", 0))
+        completed = int(left.get("completed_games", 0)) + int(right.get("completed_games", 0))
+        errors = int(left.get("errors", 0)) + int(right.get("errors", 0))
+        out["games"], out["completed_games"], out["errors"] = games, completed, errors
+        out["value"] = {
+            "point": _merge_mean(left["value"]["point"], right["value"]["point"]),
+            "rank": _merge_mean(left["value"]["rank"], right["value"]["rank"]),
+            "point_definition": "naga_round_balance",
+        }
+        out["avg_point"] = out["value"]["point"]["value"]
+        out["point_ci95"] = out["value"]["point"]["ci95"]
+        out["avg_rank"] = out["value"]["rank"]["value"]
+        out["rank"] = {
+            "average": out["value"]["rank"],
+            "positions": [_merge_rate(a, b) for a, b in zip(left["rank"]["positions"], right["rank"]["positions"])],
+        }
+        out["rank_counts"] = [item["count"] for item in out["rank"]["positions"]]
+        out["outcome"] = {key: _merge_rate(left["outcome"].get(key), right["outcome"].get(key)) for key in left["outcome"]}
+        for section in ("win", "defense", "riichi", "tenpai", "call", "draw"):
+            out[section] = deepcopy(left[section])
+            for key, value in right[section].items():
+                if isinstance(value, dict) and "count" in value:
+                    out[section][key] = _merge_rate(left[section].get(key), value)
+                elif isinstance(value, dict) and "n" in value:
+                    out[section][key] = _merge_mean(left[section].get(key), value)
+        wins1, wins2 = left["outcome"]["self_win"]["count"], right["outcome"]["self_win"]["count"]
+        left_scalars = (left.get("merge_state") or {}).get("scalar_totals")
+        right_scalars = (right.get("merge_state") or {}).get("scalar_totals")
+        if not isinstance(left_scalars, dict) or not isinstance(right_scalars, dict):
+            raise ValueError("candidate merge state is missing scalar_totals")
+        merged_scalars = {
+            name: _merge_scalar_total(left_scalars.get(name), right_scalars.get(name), name)
+            for name, _, _ in SCALAR_MERGE_FIELDS
+        }
+        out["merge_state"] = {"scalar_totals": merged_scalars}
+        for name, section, field in SCALAR_MERGE_FIELDS:
+            out[section][field] = _scalar_average(merged_scalars[name])
+        left_hanchan = left.get("hanchan")
+        right_hanchan = right.get("hanchan")
+        if left_hanchan or right_hanchan:
+            if not left_hanchan or not right_hanchan:
+                raise ValueError("candidate hanchan merge state is missing")
+            out["hanchan"] = _merge_hanchan(left_hanchan, right_hanchan)
+        out["draw"]["tenpai_count"] = int(left["draw"].get("tenpai_count", 0) or 0) + int(right["draw"].get("tenpai_count", 0) or 0)
+        left_han = left["win"].get("han_distribution")
+        right_han = right["win"].get("han_distribution")
+        if left_han is None and right_han is None:
+            out["win"]["han_distribution"] = None
+        else:
+            out["win"]["han_distribution"] = deepcopy(left_han or {})
+            for key, count in (right_han or {}).items():
+                out["win"]["han_distribution"][key] = out["win"]["han_distribution"].get(key, 0) + count
+        out["special"] = {
+            "yakuman": int(left["special"].get("yakuman", 0)) + int(right["special"].get("yakuman", 0)),
+            "nagashi_mangan": int(left["special"].get("nagashi_mangan", 0)) + int(right["special"].get("nagashi_mangan", 0)),
+            "error_types": deepcopy(left["special"].get("error_types", {})),
+        }
+        for key, count in right["special"].get("error_types", {}).items():
+            out["special"]["error_types"][key] = out["special"]["error_types"].get(key, 0) + count
+        right_yaku = {item["id"]: item for item in right.get("yaku", [])}
+        out["yaku"] = []
+        for item in left.get("yaku", []):
+            other = right_yaku.get(item["id"], {})
+            available = bool(item.get("available") or other.get("available"))
+            count = (item.get("count") or 0) + (other.get("count") or 0) if available else None
+            total_tiles = None if item.get("total_tiles") is None and other.get("total_tiles") is None else (item.get("total_tiles") or 0) + (other.get("total_tiles") or 0)
+            out["yaku"].append({
+                **item,
+                "count": count,
+                "rate": count / (wins1 + wins2) if available and wins1 + wins2 else (0.0 if available else None),
+                "total_tiles": total_tiles,
+                "available": available,
+            })
+        out["samples"] = {}
+        for metric in set(left.get("samples", {})) | set(right.get("samples", {})):
+            out["samples"][metric] = _trim_samples(
+                left.get("samples", {}).get(metric, []) + right.get("samples", {}).get(metric, []),
+                candidate_identity(left),
+                metric,
+            )
+        base_sum = float(left["value"]["point"].get("value") or 0) * int(left["value"]["point"].get("n", 0))
+        out["stability"] = deepcopy(left.get("stability", []))
+        for point in right.get("stability", []):
+            child_games = int(point["games"])
+            total_games = int(left["value"]["point"].get("n", 0)) + child_games
+            out["stability"].append({"games": total_games, "average_point": (base_sum + float(point["average_point"]) * child_games) / total_games})
+        sample = out["sample"] = deepcopy(left.get("sample", {}))
+        sample["games"], sample["completed_games"], sample["errors"] = games, completed, errors
+        sample["seed_end"] = right.get("sample", {}).get("seed_end")
+        sample["elapsed_seconds"] = float(left.get("sample", {}).get("elapsed_seconds", 0)) + float(right.get("sample", {}).get("elapsed_seconds", 0))
+        sample["games_per_second"] = completed / sample["elapsed_seconds"] if sample["elapsed_seconds"] else None
+        out["agari_rate"] = out["outcome"]["self_win"]["rate"]
+        out["houjuu_rate"] = out["outcome"]["self_deal_in"]["rate"]
+        out["riichi_rate"] = out["riichi"]["rate"]["rate"]
+        out["fuuro_rate"] = out["call"]["rate"]["rate"]
+        candidates.append(out)
+    merged["candidates"] = candidates
+    extra_comparisons = {(item["reference"], item["candidate"]): item for item in extra.get("comparisons", [])}
+    merged["comparisons"] = []
+    for item in base.get("comparisons", []):
+        other = extra_comparisons[(item["reference"], item["candidate"])]
+        merged["comparisons"].append({
+            **item,
+            "point_delta": _merge_mean(item["point_delta"], other["point_delta"]),
+            "outcome_deltas": {key: _merge_mean(item["outcome_deltas"][key], other["outcome_deltas"][key]) for key in item["outcome_deltas"]},
+        })
+    additional = int(extra.get("runs", 0))
+    merged["runs"] = int(base.get("runs", 0)) + additional
+    merged["total_runs"] = merged["runs"]
+    merged["elapsed"] = float(base.get("elapsed", 0)) + float(extra.get("elapsed", 0))
+    merged["merge_state_version"] = MERGE_STATE_VERSION
+    history = list(base.get("extension_history", []))
+    history.append({
+        "operation_id": operation_id,
+        "additional_runs": additional,
+        "seed_start": extra.get("seed"),
+        "seed_end": extra.get("seed", 0) + additional - 1,
+        "elapsed": extra.get("elapsed"),
+        "batch_size": (extra.get("config") or {}).get("batch_size"),
+        "model_id": (extra.get("model") or {}).get("id"),
+        "model_sha256": (extra.get("model") or {}).get("sha256"),
+        "decision_contract": extra.get("decision_contract"),
+        "runtime_artifact_sha256": (extra.get("runtime") or {}).get("artifact_sha256"),
+        "runtime_build_id": (extra.get("runtime") or {}).get("build_id"),
+    })
+    merged["extension_history"] = history
+    return merged
+
+
+def _public(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in candidate.items() if not key.startswith("_")}
 
 
 def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
     started = time.perf_counter()
-    (
-        hand, first_tsumo, dora, discards, runs, seed, oya, batch_size, rayon_threads,
-    ) = _parse_inputs(request)
+    # Representative samples and deterministic replay require a per-game trace
+    # identity. The Rust runner hashes the already-buffered event list and does
+    # not persist the full log.
+    os.environ["MORTAL_TRACE"] = "1"
+    if request.get("replay_of"):
+        os.environ["MORTAL_TRACE_EVENTS"] = "1"
+    else:
+        os.environ.pop("MORTAL_TRACE_EVENTS", None)
+    hand, first_tsumo, dora, discards, runs, seed, context, batch_size, rayon_threads, prefix_config = _parse_inputs(request)
+    oya = int(context["oya"])
     _prepare_imports(rayon_threads)
     _emit(emit, "status", message="正在加载模型")
-    engine, device = _load_engine()
+    engine, device, model = _load_engine(
+        request.get("model_id", DEFAULT_MODEL_ID),
+        request.get("engine", "lite"),
+        request.get("decision_contract", "stable_advantage_v2"),
+    )
     import libriichi
-
     runner = libriichi.arena.CustomKyokuRunner()
     _emit(emit, "status", message=f"设备: {device}")
-    summaries = []
-    for candidate_index, discard in enumerate(discards):
-        _emit(
-            emit,
-            "candidate_started",
-            discard=discard,
-            index=candidate_index,
-            total=len(discards),
-        )
+    _emit(emit, "status", message="正在加载半庄顺位模型")
+    hanchan_model = _load_hanchan_model()
+    candidates = []
+    from kyoku_sim_win import parse_hand
+    def _one_tile(value: str, label: str) -> str:
+        v = value.strip().lower()
+        honor_map = {"1z": "E", "2z": "S", "3z": "W", "4z": "N", "5z": "P", "6z": "F", "7z": "C", "0m": "5mr", "0p": "5pr", "0s": "5sr"}
+        if v in honor_map:
+            return honor_map[v]
+        tiles = parse_hand(value.strip())
+        if len(tiles) != 1:
+            raise ValueError(f"{label}必须是单张牌: {value}")
+        return tiles[0]
+
+    for index, first_action in enumerate(discards):
+        discard = first_action["tile"]
+        engine_discard = first_action["engine_tile"]
+        first_riichi = first_action["riichi"]
+        first_kan = first_action.get("kan", False)
+        first_kyushu = first_action.get("kyushu", False)
+        action_id = first_action["candidate"]
+        candidate_started = time.perf_counter()
+        _emit(emit, "candidate_started", discard=discard, candidate=action_id, riichi=first_riichi, kan=first_kan, kyushu=first_kyushu, index=index, total=len(discards))
         rows: list[dict[str, Any]] = []
         for offset in range(0, runs, batch_size):
             count = min(batch_size, runs - offset)
-            batch_rows = runner.run_many(
+            first_tsumo_agari = bool(first_action.get("tsumo", False))
+            first_ron = bool(first_action.get("ron", False))
+            first_pass = bool(first_action.get("pass", False))
+            raw_chi = first_action.get("chi")
+            first_chi = [_one_tile(str(t), "吃牌搭子") for t in raw_chi] if raw_chi else None
+            first_pon = bool(first_action.get("pon", False))
+            first_daiminkan = bool(first_action.get("daiminkan", False))
+            raw_fu = first_action.get("follow_up_discard")
+            first_follow_up_discard = _one_tile(str(raw_fu), "副露后跟切") if raw_fu else None
+
+            rows.extend(runner.run_many(
                 engine=engine,
-                kyoku=1,
-                honba=0,
-                kyotaku=0,
-                bakaze="E",
+                kyoku=context["kyoku"],
+                honba=context["honba"],
+                kyotaku=context["kyotaku"],
+                bakaze=context["bakaze"],
                 oya=oya,
-                scores=[25000] * 4,
-                dora_marker=request["dora"].strip(),
+                scores=context["scores"],
+                dora_marker=dora,
                 main_haipai=hand,
-                first_discard=discard,
-                first_tsumo=request["first_tsumo"].strip(),
+                first_discard=engine_discard,
+                first_tsumo=first_tsumo,
+                first_riichi=first_riichi and not (first_kan or first_kyushu or first_tsumo_agari or first_ron or first_pass),
+                first_kan=engine_discard if first_kan else None,
+                first_kyushu=first_kyushu,
+                target_seat=prefix_config["target_seat"],
+                x=prefix_config["x"],
+                target_past_discards=prefix_config["target_past_discards"],
+                opponent_rivers=prefix_config["opponent_rivers"],
+                tau=prefix_config["tau"],
+                weighted=prefix_config["weighted"],
+                first_tsumo_agari=first_tsumo_agari,
+                first_ron=first_ron,
+                first_pass=first_pass,
+                first_chi=first_chi,
+                first_pon=first_pon,
+                first_daiminkan=first_daiminkan,
+                first_follow_up_discard=first_follow_up_discard,
                 seed_start=(seed + offset, 0xDEAD),
                 count=count,
-            )
-            rows.extend(batch_rows)
-            _emit(
-                emit,
-                "batch_completed",
-                discard=discard,
-                completed=min(offset + count, runs),
-                total=runs,
-            )
-        summary = _summarize(rows, oya, discard)
-        summaries.append(summary)
-        _emit(emit, "candidate_completed", summary=_public_summary(summary))
-
-    comparisons = [_compare(summaries[0], summary) for summary in summaries[1:]]
+            ))
+            _emit(emit, "batch_completed", discard=discard, candidate=action_id, riichi=first_riichi, kan=first_kan, kyushu=first_kyushu, completed=min(offset + count, runs), total=runs)
+        effective_target = prefix_config["target_seat"] if prefix_config["target_seat"] is not None else oya
+        candidate = _summarize(
+            rows, effective_target, action_id, time.perf_counter() - candidate_started,
+            first_riichi=first_riichi, first_kan=first_kan, first_kyushu=first_kyushu,
+            weighted=prefix_config["weighted"], tau=prefix_config["tau"],
+        )
+        candidate["candidate"] = action_id
+        candidate["hanchan"] = _summarize_hanchan(rows, context, hanchan_model, target_seat=effective_target)
+        candidates.append(candidate)
+        _emit(emit, "candidate_completed", summary={
+            key: value for key, value in _public(candidate).items() if key not in {"samples", "yaku"}
+        })
+    comparisons = [_compare(candidates[0], candidate) for candidate in candidates[1:]]
     return {
+        "metrics_version": HANCHAN_METRICS_VERSION,
+        "decision_contract": request.get("decision_contract", "stable_advantage_v2"),
+        "hanchan_model": {
+            "model_id": hanchan_model.model_id,
+            "model_sha256": hanchan_model.model_sha256,
+            "feature_schema": str(hanchan_model.manifest.get("feature_schema", "")),
+            "pt_tables": deepcopy(HANCHAN_PT_TABLES),
+        },
+        "runtime": deepcopy(getattr(engine, "runtime_metadata", {})),
         "elapsed": time.perf_counter() - started,
         "device": str(device),
+        "model": {key: model[key] for key in ("id", "label", "filename", "sha256", "version", "conv_channels", "num_blocks", "engine") if key in model},
         "runs": runs,
+        "total_runs": runs,
         "seed": seed,
-        "summaries": [_public_summary(summary) for summary in summaries],
+        "resolved_context": context,
+        "resolved_input": {
+            "main_haipai": [public_tile(tile) for tile in hand],
+            "first_tsumo": public_tile(first_tsumo),
+            "dora": public_tile(dora),
+        },
+        "candidates": [_public(candidate) for candidate in candidates],
         "comparisons": comparisons,
+        "merge_state_version": MERGE_STATE_VERSION,
+        "extension_history": [],
     }
-
-
-def _public_summary(summary: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in summary.items() if not key.startswith("_")}
 
 
 def worker_main(request: dict[str, Any], event_queue) -> None:
     try:
-        result = run_analysis(request, lambda event: event_queue.put(event))
-        event_queue.put({"type": "completed", "result": result})
-    except BaseException as exc:  # send diagnostics back to the UI process
-        event_queue.put({
-            "type": "failed",
-            "error": str(exc),
-            "traceback": traceback.format_exc(),
-        })
+        event_queue.put({"type": "completed", "result": run_analysis(request, event_queue.put)})
+    except BaseException as exc:
+        event_queue.put({"type": "failed", "error": str(exc), "traceback": traceback.format_exc()})

@@ -156,6 +156,27 @@ impl PlayerState {
 }
 
 impl PlayerState {
+    /// Whether `pai` is a legal discard for an immediately declared riichi.
+    ///
+    /// `can_riichi` only means that at least one discard can declare riichi.
+    /// The simulator also needs to validate the concrete forced first discard,
+    /// otherwise it could announce riichi and then discard into a non-tenpai
+    /// hand.
+    #[inline]
+    #[must_use]
+    pub fn can_riichi_discard(&self, pai: Tile) -> bool {
+        if !self.last_cans.can_riichi {
+            return false;
+        }
+        let tid = pai.deaka().as_usize();
+        self.tehai[tid] > 0
+            && match self.shanten {
+                0 => self.keep_shanten_discards[tid],
+                1 => self.next_shanten_discards[tid],
+                _ => false,
+            }
+    }
+
     #[inline]
     #[must_use]
     pub const fn last_self_tsumo(&self) -> Option<Tile> {

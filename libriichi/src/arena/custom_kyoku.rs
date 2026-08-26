@@ -1,10 +1,12 @@
 /// CustomKyokuRunner — batched multi-kyoku with direct Python engine calls.
 use super::board::{Board, Poll, UNSHUFFLED};
 use super::mortal_onnx::MortalOnnxEngine;
+use crate::algo::agari::Agari;
 use crate::algo::sp::SPWorkspace;
 use crate::mjai::{Event, EventExt};
 use crate::stat::Stat;
 use crate::tile::Tile;
+use crate::vec_ops::vec_add_assign;
 use crate::{must_tile, tu8};
 use ndarray::{Array2, Array3};
 use numpy::{PyArray2, PyArray3};
@@ -108,14 +110,159 @@ struct GameState {
     bs: super::board::BoardState,
     reactions: [EventExt; 4],
     is_first: bool,
+    first_riichi: bool,
+    first_kan: Option<Tile>,
+    first_kyushu: bool,
+    first_tsumo: bool,
+    first_ron: bool,
+    first_pass: bool,
+    first_chi: Option<[Tile; 2]>,
+    first_pon: bool,
+    first_daiminkan: bool,
+    first_follow_up_discard: Option<Tile>,
+    pending_first_riichi_discard: bool,
+    pending_first_meld_discard: bool,
     oya: u8,
+    target_seat: u8,
     discard_tile: Tile,
+    prefix_steps: Vec<super::prefix::PrefixStep>,
+    prefix_index: usize,
+    prefix_reach_declared: bool,
+    prefix_completed: bool,
+    log_likelihoods: [f64; 4],
     ended: bool,
     collected: bool,
     scores: [i32; 4],
+    kyotaku_start: u8,
     enable_agari_guard: bool,
     error_msg: Option<String>,
     seed: (u64, u64),
+    target_discards: u8,
+    first_tenpai_turn: Option<u8>,
+    target_agari_metrics: Option<TargetAgariMetrics>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForcedFirstAction {
+    Discard,
+    Riichi,
+    InvalidRiichi,
+}
+
+const STABLE_ADVANTAGE_V2: &str = "stable_advantage_v2";
+
+/// Select the lowest action id among exact ties without ever considering an
+/// illegal action.  This is the authoritative policy selector for the Lite
+/// decision contract; keep it independent from Python/NumPy argmax behavior.
+fn select_stable_action(
+    scores: &[f32],
+    legal: &[bool],
+    excluded_action: Option<usize>,
+) -> Result<usize, &'static str> {
+    if scores.len() != crate::consts::ACTION_SPACE || legal.len() != crate::consts::ACTION_SPACE {
+        return Err("stable selector expects 46 scores and mask entries");
+    }
+
+    let mut best: Option<(usize, f32)> = None;
+    for action in 0..crate::consts::ACTION_SPACE {
+        if !legal[action] || excluded_action == Some(action) {
+            continue;
+        }
+        let score = scores[action];
+        if score.is_nan() {
+            return Err("stable selector rejected a NaN policy score");
+        }
+        match best {
+            None => best = Some((action, score)),
+            Some((_, best_score)) if score > best_score => best = Some((action, score)),
+            _ => {}
+        }
+    }
+    best.map(|(action, _)| action)
+        .ok_or("stable selector found no legal action")
+}
+
+fn forced_first_action(
+    is_first: bool,
+    pending_riichi_discard: bool,
+    wants_riichi: bool,
+    can_riichi_discard: bool,
+) -> Option<ForcedFirstAction> {
+    if pending_riichi_discard {
+        return Some(ForcedFirstAction::Discard);
+    }
+    if !is_first {
+        return None;
+    }
+    if wants_riichi {
+        return Some(if can_riichi_discard {
+            ForcedFirstAction::Riichi
+        } else {
+            ForcedFirstAction::InvalidRiichi
+        });
+    }
+    Some(ForcedFirstAction::Discard)
+}
+
+struct TargetAgariMetrics {
+    agari: Agari,
+    pattern_yakus: Vec<&'static str>,
+    situational_yakus: Vec<&'static str>,
+    dora: u8,
+    aka_dora: u8,
+    ura_tile_counts: [u8; 34],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoundOutcome {
+    SelfWin,
+    SelfDealIn,
+    Draw,
+    Sideways,
+    OtherTsumo,
+    Error,
+}
+
+impl RoundOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SelfWin => "self_win",
+            Self::SelfDealIn => "self_deal_in",
+            Self::Draw => "draw",
+            Self::Sideways => "sideways",
+            Self::OtherTsumo => "other_tsumo",
+            Self::Error => "error",
+        }
+    }
+}
+
+fn classify_round_outcome(
+    target_player: u8,
+    agaris: &[(u8, u8)],
+    is_error: bool,
+) -> (RoundOutcome, Option<&'static str>) {
+    if is_error {
+        return (RoundOutcome::Error, None);
+    }
+    if agaris.is_empty() {
+        return (RoundOutcome::Draw, None);
+    }
+    if let Some(&(actor, target)) = agaris.iter().find(|&&(actor, _)| actor == target_player) {
+        return (
+            RoundOutcome::SelfWin,
+            Some(if actor == target { "tsumo" } else { "ron" }),
+        );
+    }
+    if agaris
+        .iter()
+        .any(|&(actor, target)| target == target_player && actor != target_player)
+    {
+        return (RoundOutcome::SelfDealIn, None);
+    }
+    if agaris.iter().any(|&(actor, target)| actor == target) {
+        return (RoundOutcome::OtherTsumo, None);
+    }
+    (RoundOutcome::Sideways, None)
 }
 
 #[pyclass]
@@ -131,7 +278,7 @@ impl CustomKyokuRunner {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (engine, kyoku, honba, kyotaku, bakaze, oya, scores,
                         dora_marker, main_haipai, first_discard, seed,
-                        first_tsumo = None))]
+                        first_tsumo = None, first_riichi = false, first_kan = None, first_kyushu = false))]
     fn run(
         &self,
         engine: PyObject,
@@ -146,6 +293,9 @@ impl CustomKyokuRunner {
         first_discard: &str,
         seed: (u64, u64),
         first_tsumo: Option<String>,
+        first_riichi: bool,
+        first_kan: Option<String>,
+        first_kyushu: bool,
         py: Python<'_>,
     ) -> PyResult<PyObject> {
         let mut r = self.run_many(
@@ -162,6 +312,22 @@ impl CustomKyokuRunner {
             seed,
             1,
             first_tsumo,
+            first_riichi,
+            first_kan,
+            first_kyushu,
+            None,
+            1,
+            None,
+            None,
+            1.0,
+            false,
+            false,
+            false,
+            false,
+            None,
+            false,
+            false,
+            None,
             py,
         )?;
         Ok(r.swap_remove(0))
@@ -170,7 +336,12 @@ impl CustomKyokuRunner {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (engine, kyoku, honba, kyotaku, bakaze, oya, scores,
                         dora_marker, main_haipai, first_discard, seed_start, count,
-                        first_tsumo = None))]
+                        first_tsumo = None, first_riichi = false, first_kan = None, first_kyushu = false,
+                        target_seat = None, x = 1, target_past_discards = None, opponent_rivers = None,
+                        tau = 1.0, weighted = false,
+                        first_tsumo_agari = false, first_ron = false, first_pass = false,
+                        first_chi = None, first_pon = false, first_daiminkan = false,
+                        first_follow_up_discard = None))]
     fn run_many(
         &self,
         engine: PyObject,
@@ -186,14 +357,37 @@ impl CustomKyokuRunner {
         seed_start: (u64, u64),
         count: u32,
         first_tsumo: Option<String>,
+        first_riichi: bool,
+        first_kan: Option<String>,
+        first_kyushu: bool,
+        target_seat: Option<u8>,
+        x: u8,
+        target_past_discards: Option<Vec<(String, bool, bool)>>,
+        opponent_rivers: Option<Vec<Vec<(String, bool, bool)>>>,
+        tau: f32,
+        weighted: bool,
+        first_tsumo_agari: bool,
+        first_ron: bool,
+        first_pass: bool,
+        first_chi: Option<Vec<String>>,
+        first_pon: bool,
+        first_daiminkan: bool,
+        first_follow_up_discard: Option<String>,
         py: Python<'_>,
     ) -> PyResult<Vec<PyObject>> {
         let total_started = Instant::now();
-        let profiling = std::env::var("MORTAL_PROFILE").is_ok_and(|v| v == "1");
-        let tracing = std::env::var("MORTAL_TRACE").is_ok_and(|v| v == "1");
+        let profiling = std::env::var("MORTAL_PROFILE").is_ok_and(|v| v.trim() == "1");
+        crate::algo::sp::sp_counters::set_enabled(profiling);
+        let tracing = std::env::var("MORTAL_TRACE").is_ok_and(|v| v.trim() == "1");
+        let trace_events_enabled = std::env::var("MORTAL_TRACE_EVENTS").is_ok_and(|v| v.trim() == "1");
         let mut profile = RunProfile::default();
         let eng = engine.bind_borrowed(py);
         let ver: u32 = eng.getattr("version")?.extract()?;
+        let decision_contract = eng
+            .getattr("decision_contract")
+            .and_then(|value| value.extract::<String>())
+            .unwrap_or_else(|_| "legacy_amp_v1".to_owned());
+        let stable_advantage = decision_contract == STABLE_ADVANTAGE_V2;
 
         // P1-5: Read enable_rule_based_agari_guard from engine
         let enable_agari_guard: bool = eng
@@ -202,36 +396,291 @@ impl CustomKyokuRunner {
             .unwrap_or(false);
 
         let parse = |s: &str| {
-            Tile::from_str(s).map_err(|e| {
+            let normalized = match s {
+                "1z" | "1Z" => "E",
+                "2z" | "2Z" => "S",
+                "3z" | "3Z" => "W",
+                "4z" | "4Z" => "N",
+                "5z" | "5Z" => "P",
+                "6z" | "6Z" => "F",
+                "7z" | "7Z" => "C",
+                "0m" | "0M" => "5mr",
+                "0p" | "0P" => "5pr",
+                "0s" | "0S" => "5sr",
+                other => other,
+            };
+            Tile::from_str(normalized).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("invalid tile: {e}"))
             })
         };
         let dora_tile = parse(dora_marker)?;
         let discard_tile = parse(first_discard)?;
         let first_tsumo_tile = first_tsumo.as_ref().map(|s| parse(s)).transpose()?;
+        let first_kan_tile = first_kan.as_ref().map(|s| parse(s)).transpose()?;
+        let first_follow_up_tile = first_follow_up_discard.as_ref().map(|s| parse(s)).transpose()?;
+        let first_chi_consumed: Option<[Tile; 2]> = if let Some(ref c) = first_chi {
+            if c.len() != 2 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("first_chi must contain exactly 2 consumed tiles"));
+            }
+            Some([parse(&c[0])?, parse(&c[1])?])
+        } else {
+            None
+        };
         let hand: Vec<Tile> = main_haipai
             .iter()
             .map(|s| parse(s))
             .collect::<PyResult<Vec<_>>>()?;
 
+        let effective_target = target_seat.unwrap_or(oya);
+        let is_prefix_mode = x > 1 || target_seat.is_some_and(|s| s != oya) || opponent_rivers.is_some();
+        // Subfamily (mean-field) mode: games are adaptively assembled from
+        // per-player marginal subfamilies, so each game carries weight 1.0.
+        let subfamily_mode = opponent_rivers.is_some();
+
         let build_started = profiling.then(Instant::now);
         let mut games: Vec<GameState> = Vec::with_capacity(count as usize);
-        for i in 0..count {
-            let seed = (seed_start.0.wrapping_add(i as u64), seed_start.1);
-            games.push(build_game(
-                &hand,
-                dora_tile,
-                discard_tile,
-                first_tsumo_tile,
-                kyoku,
-                honba,
-                kyotaku,
-                bakaze,
-                oya,
-                scores,
-                seed,
-                enable_agari_guard,
-            )?);
+
+        if is_prefix_mode {
+            // Build 14-tile target hand array
+            let target_14: [Tile; 14] = if hand.len() == 14 {
+                hand.clone().try_into().map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("target hand must be 14 tiles")
+                })?
+            } else if hand.len() == 13 {
+                let mut h14 = hand.clone();
+                h14.push(first_tsumo_tile.unwrap_or(discard_tile));
+                h14.try_into().map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("target hand must be 14 tiles")
+                })?
+            } else {
+                // Pad melded hands (e.g. 7 or 10 tiles) up to 14 from available non-fixed tiles
+                let mut h14 = hand.clone();
+                let mut fixed_counts = [0u8; 37];
+                for &t in &hand {
+                    fixed_counts[super::prefix::tile_bucket(t)] += 1;
+                }
+                fixed_counts[super::prefix::tile_bucket(dora_tile)] += 1;
+                for item in target_past_discards.as_ref().unwrap_or(&vec![]) {
+                    if let Ok(t) = parse(&item.0) {
+                        fixed_counts[super::prefix::tile_bucket(t)] += 1;
+                    }
+                }
+                if let Some(ref opp_r) = opponent_rivers {
+                    for r in opp_r {
+                        for item in r {
+                            if let Ok(t) = parse(&item.0) {
+                                fixed_counts[super::prefix::tile_bucket(t)] += 1;
+                            }
+                        }
+                    }
+                }
+                // Pick valid padding tiles from available buckets with remaining capacity
+                for b in 0..34 {
+                    let limit = super::prefix::bucket_limit(b);
+                    while h14.len() < 14 && fixed_counts[b] < limit {
+                        let t = Tile::try_from(b).unwrap();
+                        h14.push(t);
+                        fixed_counts[b] += 1;
+                    }
+                }
+                h14.try_into().map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("target hand padding failed")
+                })?
+            };
+
+            let target_past: Vec<super::prefix::DiscardSpec> = target_past_discards
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| parse(&item.0).map(|tile| super::prefix::DiscardSpec { tile, tsumogiri: item.1, is_riichi: item.2 }))
+                .collect::<PyResult<Vec<_>>>()?;
+
+            let has_rivers = opponent_rivers.is_some();
+            let mut rivers: [Vec<super::prefix::DiscardSpec>; 4] = [vec![], vec![], vec![], vec![]];
+            if let Some(ref opp_rivers) = opponent_rivers {
+                if opp_rivers.len() != 4 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        format!("opponent_rivers must have 4 entries (one per seat), got {}", opp_rivers.len())
+                    ));
+                }
+                for (p, river) in opp_rivers.into_iter().enumerate() {
+                    if p as u8 != effective_target {
+                        rivers[p] = river
+                            .into_iter()
+                            .map(|item| parse(&item.0).map(|tile| super::prefix::DiscardSpec { tile, tsumogiri: item.1, is_riichi: item.2 }))
+                            .collect::<PyResult<Vec<_>>>()?;
+                    }
+                }
+            }
+
+            let build_one = |spec: super::prefix::PrefixGameSpec,
+                             seed: (u64, u64)|
+             -> PyResult<GameState> {
+                let mut gs = build_game_state_from_spec(
+                    spec,
+                    discard_tile,
+                    scores,
+                    kyotaku,
+                    enable_agari_guard,
+                    first_riichi,
+                    first_kan_tile,
+                    first_kyushu,
+                    seed,
+                );
+                gs.first_tsumo = first_tsumo_agari;
+                gs.first_ron = first_ron;
+                gs.first_pass = first_pass;
+                gs.first_chi = first_chi_consumed;
+                gs.first_pon = first_pon;
+                gs.first_daiminkan = first_daiminkan;
+                gs.first_follow_up_discard = first_follow_up_tile;
+                Ok(gs)
+            };
+
+            if has_rivers {
+                // ---- Marginal subfamily (mean-field) scheme ----
+                // Pass 1: sample a joint-deal pool uniformly, run the forced
+                // prefix only, and record per-player marginal log-likelihoods.
+                let sub_n = (count as usize * 2).max(4000).min(20000);
+                let mut sub_hands: Vec<[super::prefix::HandAssignment; 4]> = Vec::with_capacity(sub_n);
+                let mut sub_games: Vec<GameState> = Vec::with_capacity(sub_n);
+                for i in 0..sub_n {
+                    let seed = (seed_start.0.wrapping_add(i as u64), seed_start.1);
+                    let spec = super::prefix::sample_prefix_game(
+                        effective_target,
+                        oya,
+                        x,
+                        &target_14,
+                        &target_past,
+                        &rivers,
+                        dora_tile,
+                        kyoku,
+                        honba,
+                        kyotaku,
+                        scores,
+                        seed,
+                    )
+                    .map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "prefix sampler failed: {e}"
+                        ))
+                    })?;
+                    sub_hands.push(spec.hands.clone());
+                    sub_games.push(build_one(spec, seed)?);
+                }
+                run_prefix_only_pass(&mut sub_games, &*eng, ver, tau, py)?;
+
+                let log_likes: Vec<[f64; 4]> =
+                    sub_games.iter().map(|g| g.log_likelihoods).collect();
+
+                // Pass 2: resample per-player subfamilies and assemble
+                // tile-compatible triples.
+                let (assembled, fallback_count) = super::prefix::assemble_marginal_games(
+                    &sub_hands,
+                    &log_likes,
+                    effective_target,
+                    &target_14,
+                    &target_past,
+                    &rivers,
+                    dora_tile,
+                    count as usize,
+                    (seed_start.0, seed_start.1),
+                );
+                if fallback_count > 0 {
+                    eprintln!(
+                        "[CustomKyokuRunner] marginal assembly fallback used for {} of {} games (rivers may be physically contradictory)",
+                        fallback_count, count
+                    );
+                }
+
+                // Pass 3: rebuild games from the assembled hands and run the
+                // full simulation (weights are ~1 under the mean-field scheme).
+                for i in 0..count {
+                    let seed = (seed_start.0.wrapping_add(i as u64), seed_start.1);
+                    let spec = super::prefix::build_prefix_game_from_hands(
+                        effective_target,
+                        oya,
+                        x,
+                        &target_14,
+                        &target_past,
+                        &rivers,
+                        dora_tile,
+                        kyoku,
+                        honba,
+                        kyotaku,
+                        scores,
+                        &assembled[i as usize],
+                        seed,
+                    )
+                    .map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "prefix rebuild failed: {e}"
+                        ))
+                    })?;
+                    games.push(build_one(spec, seed)?);
+                }
+            } else {
+                // Uniform prefix mode (x > 1 without rivers): sample directly.
+                for i in 0..count {
+                    let seed = (seed_start.0.wrapping_add(i as u64), seed_start.1);
+                    let mut g = build_prefix_game(
+                        effective_target,
+                        oya,
+                        x,
+                        &target_14,
+                        &target_past,
+                        &rivers,
+                        dora_tile,
+                        discard_tile,
+                        kyoku,
+                        honba,
+                        kyotaku,
+                        scores,
+                        seed,
+                        enable_agari_guard,
+                        first_riichi,
+                        first_kan_tile,
+                        first_kyushu,
+                    )?;
+                    g.first_tsumo = first_tsumo_agari;
+                    g.first_ron = first_ron;
+                    g.first_pass = first_pass;
+                    g.first_chi = first_chi_consumed;
+                    g.first_pon = first_pon;
+                    g.first_daiminkan = first_daiminkan;
+                    g.first_follow_up_discard = first_follow_up_tile;
+                    games.push(g);
+                }
+            }
+        } else {
+            for i in 0..count {
+                let seed = (seed_start.0.wrapping_add(i as u64), seed_start.1);
+                let mut g = build_game(
+                    &hand,
+                    dora_tile,
+                    discard_tile,
+                    first_tsumo_tile,
+                    kyoku,
+                    honba,
+                    kyotaku,
+                    bakaze,
+                    oya,
+                    scores,
+                    seed,
+                    enable_agari_guard,
+                    first_riichi,
+                    first_kan_tile,
+                    first_kyushu,
+                )?;
+                g.target_seat = effective_target;
+                g.first_tsumo = first_tsumo_agari;
+                g.first_ron = first_ron;
+                g.first_pass = first_pass;
+                g.first_chi = first_chi_consumed;
+                g.first_pon = first_pon;
+                g.first_daiminkan = first_daiminkan;
+                g.first_follow_up_discard = first_follow_up_tile;
+                games.push(g);
+            }
         }
         if let Some(started) = build_started {
             profile.build_game = started.elapsed();
@@ -257,15 +706,221 @@ impl CustomKyokuRunner {
                     if !st.last_cans().can_act() {
                         continue;
                     }
-                    if g.is_first && pid == g.oya as usize {
-                        g.is_first = false;
-                        let ts = st.last_self_tsumo().is_some_and(|t| t == g.discard_tile);
-                        g.reactions[pid] = EventExt::no_meta(Event::Dahai {
-                            actor: pid as u8,
-                            pai: g.discard_tile,
-                            tsumogiri: ts,
-                        });
-                        continue;
+                    if !g.prefix_completed {
+                        if g.prefix_index < g.prefix_steps.len() {
+                            let step = &g.prefix_steps[g.prefix_index];
+                            if pid == step.actor as usize {
+                                if step.is_riichi && !g.prefix_reach_declared && st.last_cans().can_riichi {
+                                    g.reactions[pid] = EventExt::no_meta(Event::Reach { actor: pid as u8 });
+                                    g.prefix_reach_declared = true;
+                                    continue;
+                                }
+                                if st.last_cans().can_discard {
+                                    if step.accumulate_likelihood {
+                                        batch_map.push((gi, pid));
+                                    } else {
+                                        g.reactions[pid] = EventExt::no_meta(Event::Dahai {
+                                            actor: pid as u8,
+                                            pai: step.tile,
+                                            tsumogiri: step.tsumogiri,
+                                        });
+                                        g.prefix_index += 1;
+                                        g.prefix_reach_declared = false;
+                                    }
+                                }
+                            }
+                        } else if pid == g.target_seat as usize {
+                            // Decision point reached! Target can act if they have a discard OR a valid reaction (Ron/Pass/Chi/Pon/Minkan)
+                            if st.last_cans().can_discard || (g.is_first && (g.first_ron || g.first_pass || g.first_chi.is_some() || g.first_pon || g.first_daiminkan)) {
+                                g.prefix_completed = true;
+                            }
+                        }
+
+                        if !g.prefix_completed {
+                            // All intermediate reaction candidates (Chi/Pon/Ron) during prefix replay are passed
+                            continue;
+                        }
+                    }
+
+                    if pid == g.target_seat as usize {
+                        if g.is_first {
+                            // 1. Tsumo Agari
+                            if g.first_tsumo {
+                                g.is_first = false;
+                                if st.last_cans().can_tsumo_agari {
+                                    g.reactions[pid] = EventExt::no_meta(Event::Hora {
+                                        actor: pid as u8,
+                                        target: pid as u8,
+                                        deltas: None,
+                                        ura_markers: None,
+                                    });
+                                } else {
+                                    g.ended = true;
+                                    g.error_msg = Some("first_action_tsumo_unavailable".to_owned());
+                                }
+                                continue;
+                            }
+                            // 2. Ron Agari
+                            if g.first_ron {
+                                g.is_first = false;
+                                if st.last_cans().can_ron_agari {
+                                    g.reactions[pid] = EventExt::no_meta(Event::Hora {
+                                        actor: pid as u8,
+                                        target: st.last_cans().target_actor,
+                                        deltas: None,
+                                        ura_markers: None,
+                                    });
+                                } else {
+                                    g.ended = true;
+                                    g.error_msg = Some("first_action_ron_unavailable".to_owned());
+                                }
+                                continue;
+                            }
+                            // 3. Pass (见逃 / 不鸣)
+                            if g.first_pass {
+                                g.is_first = false;
+                                g.reactions[pid] = EventExt::no_meta(Event::None);
+                                continue;
+                            }
+                            // 4. Chi (吃牌)
+                            if let Some(consumed) = g.first_chi.take() {
+                                g.is_first = false;
+                                g.pending_first_meld_discard = true;
+                                let kawa = st.last_kawa_tile();
+                                if let Some(pai) = kawa {
+                                    g.reactions[pid] = EventExt::no_meta(Event::Chi {
+                                        actor: pid as u8,
+                                        target: st.last_cans().target_actor,
+                                        pai,
+                                        consumed,
+                                    });
+                                } else {
+                                    g.ended = true;
+                                    g.error_msg = Some("first_action_chi_unavailable".to_owned());
+                                }
+                                continue;
+                            }
+                            // 5. Pon (碰牌)
+                            if g.first_pon {
+                                g.is_first = false;
+                                g.first_pon = false;
+                                g.pending_first_meld_discard = true;
+                                let kawa = st.last_kawa_tile();
+                                if let Some(pai) = kawa {
+                                    let akas = st.akas_in_hand();
+                                    let can_aka = match pai.as_u8() {
+                                        tu8!(5m) => akas[0],
+                                        tu8!(5p) => akas[1],
+                                        tu8!(5s) => akas[2],
+                                        _ => false,
+                                    };
+                                    let consumed = if can_aka {
+                                        [pai.akaize(), pai.deaka()]
+                                    } else {
+                                        [pai.deaka(); 2]
+                                    };
+                                    g.reactions[pid] = EventExt::no_meta(Event::Pon {
+                                        actor: pid as u8,
+                                        target: st.last_cans().target_actor,
+                                        pai,
+                                        consumed,
+                                    });
+                                } else {
+                                    g.ended = true;
+                                    g.error_msg = Some("first_action_pon_unavailable".to_owned());
+                                }
+                                continue;
+                            }
+                            // 6. Daiminkan (大明杠)
+                            if g.first_daiminkan {
+                                g.is_first = false;
+                                g.first_daiminkan = false;
+                                let kawa = st.last_kawa_tile();
+                                if let Some(pai) = kawa {
+                                    let consumed = if pai.is_aka() {
+                                        [pai.deaka(); 3]
+                                    } else {
+                                        [pai.akaize(), pai, pai]
+                                    };
+                                    g.reactions[pid] = EventExt::no_meta(Event::Daiminkan {
+                                        actor: pid as u8,
+                                        target: st.last_cans().target_actor,
+                                        pai,
+                                        consumed,
+                                    });
+                                } else {
+                                    g.ended = true;
+                                    g.error_msg = Some("first_action_daiminkan_unavailable".to_owned());
+                                }
+                                continue;
+                            }
+                            // 7. Kyushu
+                            if g.first_kyushu {
+                                g.is_first = false;
+                                g.first_kyushu = false;
+                                g.reactions[pid] = EventExt::no_meta(Event::Ryukyoku { deltas: None });
+                                continue;
+                            }
+                            // 8. Ankan
+                            if g.first_kan.is_some() {
+                                let kan = g.first_kan.take().unwrap();
+                                g.is_first = false;
+                                g.reactions[pid] = EventExt::no_meta(Event::Ankan {
+                                    actor: pid as u8,
+                                    consumed: [kan.akaize(), kan, kan, kan],
+                                });
+                                continue;
+                            }
+                            // 9. Standard Discard / Reach
+                            match forced_first_action(
+                                g.is_first,
+                                g.pending_first_riichi_discard,
+                                g.first_riichi,
+                                st.can_riichi_discard(g.discard_tile),
+                            ) {
+                                Some(ForcedFirstAction::Riichi) => {
+                                    g.is_first = false;
+                                    g.pending_first_riichi_discard = true;
+                                    g.reactions[pid] =
+                                        EventExt::no_meta(Event::Reach { actor: pid as u8 });
+                                    continue;
+                                }
+                                Some(ForcedFirstAction::Discard) => {
+                                    g.is_first = false;
+                                    g.pending_first_riichi_discard = false;
+                                    let ts = st.last_self_tsumo().is_some_and(|t| t == g.discard_tile);
+                                    g.reactions[pid] = EventExt::no_meta(Event::Dahai {
+                                        actor: pid as u8,
+                                        pai: g.discard_tile,
+                                        tsumogiri: ts,
+                                    });
+                                    continue;
+                                }
+                                Some(ForcedFirstAction::InvalidRiichi) => {
+                                    g.is_first = false;
+                                    g.ended = true;
+                                    g.error_msg = Some("first_discard_riichi_unavailable".to_owned());
+                                    continue;
+                                }
+                                None => {}
+                            }
+                        }
+
+                        // Handling post-meld follow-up discard
+                        if g.pending_first_meld_discard {
+                            g.pending_first_meld_discard = false;
+                            if let Some(follow_up) = g.first_follow_up_discard.take() {
+                                if st.tehai()[follow_up.deaka().as_usize()] > 0 {
+                                    g.reactions[pid] = EventExt::no_meta(Event::Dahai {
+                                        actor: pid as u8,
+                                        pai: follow_up,
+                                        tsumogiri: false,
+                                    });
+                                    continue;
+                                }
+                            }
+                            // If no follow_up specified or not in hand, fall through to batch_map (AI decides)
+                        }
                     }
                     batch_map.push((gi, pid));
                 }
@@ -361,7 +1016,52 @@ impl CustomKyokuRunner {
                 let decode_started = profiling.then(Instant::now);
                 for (i, &(gi, pid)) in batch_map.iter().enumerate() {
                     let g = &mut games[gi];
-                    let orig_act = actions[i];
+
+                    if g.prefix_index < g.prefix_steps.len() {
+                        let step = &g.prefix_steps[g.prefix_index];
+                        assert_eq!(pid, step.actor as usize);
+                        let target_action = match step.tile.as_u8() {
+                            tu8!(5mr) => 34,
+                            tu8!(5pr) => 35,
+                            tu8!(5sr) => 36,
+                            _ => step.tile.deaka().as_usize(),
+                        };
+                        if let Ok(log_p) = super::weighted::softmax_log_prob(
+                            &q_values[i],
+                            &masks_recv[i],
+                            target_action,
+                            tau,
+                        ) {
+                            g.log_likelihoods[pid] += log_p;
+                        }
+                        let ctx = g.bs.agent_context();
+                        let can_reach = ctx.player_states[pid].last_cans().can_riichi;
+                        if step.is_riichi && !g.prefix_reach_declared && can_reach {
+                            g.reactions[pid] = EventExt::no_meta(Event::Reach { actor: pid as u8 });
+                            g.prefix_reach_declared = true;
+                        } else {
+                            g.reactions[pid] = EventExt::no_meta(Event::Dahai {
+                                actor: pid as u8,
+                                pai: step.tile,
+                                tsumogiri: step.tsumogiri,
+                            });
+                            g.prefix_index += 1;
+                            g.prefix_reach_declared = false;
+                        }
+                        continue;
+                    }
+
+                    let orig_act = if stable_advantage {
+                        select_stable_action(&q_values[i], &masks_recv[i], None).map_err(
+                            |message| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "{message} at batch row {i}"
+                                ))
+                            },
+                        )?
+                    } else {
+                        actions[i]
+                    };
                     let actor = pid as u8;
                     let guard = g.enable_agari_guard;
 
@@ -373,20 +1073,13 @@ impl CustomKyokuRunner {
                     // but rule_based_agari() disagrees, fall back to the best
                     // alternative action by q_value (excluding action 43).
                     let act = if guard && orig_act == 43 && !st.rule_based_agari() {
-                        let qs = &q_values[i];
-                        let ms = &masks_recv[i];
-                        let mut best = 45usize; // default: no-op
-                        let mut best_q = f32::MIN;
-                        for (j, &q) in qs.iter().enumerate() {
-                            if j == 43 || !ms[j] {
-                                continue;
-                            }
-                            if q > best_q {
-                                best_q = q;
-                                best = j;
-                            }
-                        }
-                        best
+                        select_stable_action(&q_values[i], &masks_recv[i], Some(43)).map_err(
+                            |message| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "{message} after agari guard at batch row {i}"
+                                ))
+                            },
+                        )?
                     } else {
                         orig_act
                     };
@@ -562,6 +1255,27 @@ impl CustomKyokuRunner {
                         44 if cans.can_ryukyoku => Event::Ryukyoku { deltas: None },
                         _ => Event::None,
                     };
+                    if actor == g.target_seat && matches!(&ev, Event::Hora { .. }) {
+                        let is_ron = cans.can_ron_agari;
+                        if let Ok((
+                            agari,
+                            pattern_yakus,
+                            situational_yakus,
+                            dora,
+                            aka_dora,
+                            ura_tile_counts,
+                        )) = st.pending_agari_metrics(is_ron)
+                        {
+                            g.target_agari_metrics = Some(TargetAgariMetrics {
+                                agari,
+                                pattern_yakus,
+                                situational_yakus,
+                                dora,
+                                aka_dora,
+                                ura_tile_counts,
+                            });
+                        }
+                    }
                     g.reactions[pid] = EventExt::no_meta(ev);
                 }
                 if let Some(started) = decode_started {
@@ -587,7 +1301,7 @@ impl CustomKyokuRunner {
                 g.collected = true;
                 let kr = g.bs.end();
                 let fs = kr.scores;
-                let dl: [i32; 4] = array::from_fn(|i| fs[i] - g.scores[i]);
+                let dl: [i32; 4] = score_deltas(fs, g.scores);
                 let mut ord: Vec<usize> = (0..4).collect();
                 ord.sort_by(|&a, &b| fs[b].cmp(&fs[a]));
                 let mut rk = [0i32; 4];
@@ -597,13 +1311,9 @@ impl CustomKyokuRunner {
 
                 let log_started = profiling.then(Instant::now);
                 let log_events = g.bs.take_log();
-                let mut type_str: &str = if g.error_msg.is_some() {
-                    "error"
-                } else {
-                    "ryukyoku"
-                };
-                let mut agari_actor: Option<u8> = None;
-                let mut agari_target: Option<u8> = None;
+                let mut agaris: Vec<(u8, u8)> = Vec::new();
+                let mut ura_dora = 0u8;
+                let round_balances = round_balances_from_events(&log_events);
                 if g.error_msg.is_some() {
                     profile.errors += 1;
                 }
@@ -616,14 +1326,35 @@ impl CustomKyokuRunner {
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>()
                 });
+                let trace_events = trace_events_enabled.then(|| {
+                    log_events
+                        .iter()
+                        .filter_map(|event| serde_json::to_string(event).ok())
+                        .collect::<Vec<_>>()
+                });
 
                 let target_stat: Option<PyObject> = if g.error_msg.is_none() {
-                    for ev in log_events.iter().rev() {
-                        if let Event::Hora { actor, target, .. } = &ev.event {
-                            type_str = if actor == target { "tsumo" } else { "hora" };
-                            agari_actor = Some(*actor);
-                            agari_target = Some(*target);
-                            break;
+                    for ev in &log_events {
+                        if let Event::Hora {
+                            actor,
+                            target,
+                            ura_markers,
+                            ..
+                        } = &ev.event
+                        {
+                            agaris.push((*actor, *target));
+                            if *actor == g.target_seat {
+                                if let (Some(markers), Some(metrics)) =
+                                    (ura_markers, &g.target_agari_metrics)
+                                {
+                                    ura_dora = markers
+                                        .iter()
+                                        .map(|marker| {
+                                            metrics.ura_tile_counts[marker.next().as_usize()]
+                                        })
+                                        .sum();
+                                }
+                            }
                         }
                     }
                     if let Some(started) = log_started {
@@ -632,8 +1363,8 @@ impl CustomKyokuRunner {
 
                     let events: Vec<Event> = log_events.into_iter().map(|e| e.event).collect();
                     let stat_started = profiling.then(Instant::now);
-                    let mut stat = Stat::from_game(&events, g.oya);
-                    stat.point = dl[g.oya as usize] as i64;
+                    let mut stat = Stat::from_game(&events, g.target_seat);
+                    stat.point = dl[g.target_seat as usize] as i64;
                     let stat = Py::new(py, stat).unwrap().into();
                     if let Some(started) = stat_started {
                         profile.stat += started.elapsed();
@@ -646,23 +1377,102 @@ impl CustomKyokuRunner {
                     None
                 };
 
+                let (outcome, win_method) =
+                    classify_round_outcome(g.target_seat, &agaris, g.error_msg.is_some());
+
                 let pack_started = profiling.then(Instant::now);
                 let ctx = g.bs.agent_context();
                 let d = PyDict::new(py);
                 let r = PyDict::new(py);
-                r.set_item("type", type_str).ok();
+                r.set_item("type", outcome.as_str()).ok();
+                r.set_item("outcome", outcome.as_str()).ok();
                 r.set_item("final_scores", fs).ok();
+                r.set_item("initial_scores", g.scores).ok();
                 r.set_item("score_deltas", dl).ok();
-                if let Some(a) = agari_actor {
-                    r.set_item("agari_actor", a).ok();
+                r.set_item("round_balances", round_balances).ok();
+                r.set_item("kyotaku_start", g.kyotaku_start).ok();
+                r.set_item("kyotaku_remaining", kr.kyotaku_left).ok();
+                if let Some(error) = &g.error_msg {
+                    r.set_item("error", error).ok();
                 }
-                if let Some(t) = agari_target {
-                    r.set_item("agari_target", t).ok();
+                r.set_item(
+                    "agari_actors",
+                    agaris.iter().map(|&(actor, _)| actor).collect::<Vec<_>>(),
+                )
+                .ok();
+                r.set_item(
+                    "agari_targets",
+                    agaris.iter().map(|&(_, target)| target).collect::<Vec<_>>(),
+                )
+                .ok();
+                if let Some(method) = win_method {
+                    r.set_item("win_method", method).ok();
                 }
                 d.set_item("result", r).ok();
+                let metrics = PyDict::new(py);
+                metrics.set_item("version", 1).ok();
+                let target_state = &ctx.player_states[g.target_seat as usize];
+                metrics
+                    .set_item("first_tenpai_turn", g.first_tenpai_turn)
+                    .ok();
+                metrics
+                    .set_item("final_tenpai", target_state.shanten() == 0)
+                    .ok();
+                metrics
+                    .set_item("riichi_declared", target_state.self_riichi_declared())
+                    .ok();
+                metrics
+                    .set_item("riichi_accepted", target_state.self_riichi_accepted())
+                    .ok();
+                metrics
+                    .set_item(
+                        "fuuro_count",
+                        target_state.chis().len()
+                            + target_state.pons().len()
+                            + target_state.minkans().len(),
+                    )
+                    .ok();
+                metrics.set_item("target_discards", g.target_discards).ok();
+                if let Some(agari) = &g.target_agari_metrics {
+                    let (fu, han, yakuman, raw_point) = match agari.agari {
+                        Agari::Normal { fu, han } => {
+                            let final_han = han.saturating_add(ura_dora);
+                            let point = Agari::Normal { fu, han: final_han }.point(true);
+                            let raw_point = if win_method == Some("tsumo") {
+                                point.tsumo_total(true)
+                            } else {
+                                point.ron
+                            };
+                            (Some(fu), Some(final_han), None, raw_point)
+                        }
+                        Agari::Yakuman(count) => {
+                            let point = Agari::Yakuman(count).point(true);
+                            let raw_point = if win_method == Some("tsumo") {
+                                point.tsumo_total(true)
+                            } else {
+                                point.ron
+                            };
+                            (None, None, Some(count), raw_point)
+                        }
+                    };
+                    let mut yakus = agari.pattern_yakus.clone();
+                    yakus.extend(agari.situational_yakus.iter().copied());
+                    metrics.set_item("yaku_ids", yakus).ok();
+                    metrics.set_item("fu", fu).ok();
+                    metrics.set_item("han", han).ok();
+                    metrics.set_item("yakuman_count", yakuman).ok();
+                    metrics.set_item("raw_win_point", raw_point).ok();
+                    metrics.set_item("dora", agari.dora).ok();
+                    metrics.set_item("aka_dora", agari.aka_dora).ok();
+                    metrics.set_item("ura_dora", ura_dora).ok();
+                }
+                d.set_item("metrics", metrics).ok();
                 d.set_item("seed", g.seed).ok();
                 if let Some(hash) = trace_hash {
                     d.set_item("trace_hash", hash).ok();
+                }
+                if let Some(events) = trace_events {
+                    d.set_item("trace_events", events).ok();
                 }
                 d.set_item(
                     "stat",
@@ -676,20 +1486,27 @@ impl CustomKyokuRunner {
                         let p = PyDict::new(py);
                         let ps = &ctx.player_states[pid];
                         p.set_item("player_id", pid).unwrap();
+                        p.set_item("is_target", pid == g.target_seat as usize).unwrap();
                         p.set_item("is_oya", pid == g.oya as usize).unwrap();
                         p.set_item("final_score", fs[pid]).unwrap();
                         p.set_item("score_delta", dl[pid]).unwrap();
+                        p.set_item("round_balance", round_balances[pid]).unwrap();
                         p.set_item("final_rank", rk[pid]).unwrap();
                         p.set_item("riichi_declared", ps.self_riichi_declared())
                             .unwrap();
+                        p.set_item("riichi_accepted", ps.self_riichi_accepted())
+                            .unwrap();
                         p.set_item("shanten", ps.shanten() as i32).unwrap();
-                        p.set_item("agari", agari_actor == Some(pid as u8)).unwrap();
+                        p.set_item("agari", agaris.iter().any(|&(actor, _)| actor == pid as u8))
+                            .unwrap();
                         p.set_item(
                             "deal_in",
-                            agari_target == Some(pid as u8) && agari_target != agari_actor,
+                            agaris
+                                .iter()
+                                .any(|&(actor, target)| target == pid as u8 && actor != target),
                         )
                         .unwrap();
-                        let stat = if pid == g.oya as usize {
+                        let stat = if pid == g.target_seat as usize {
                             target_stat
                                 .as_ref()
                                 .map_or_else(|| py.None(), |s| s.clone_ref(py))
@@ -709,24 +1526,305 @@ impl CustomKyokuRunner {
         }
         if profiling {
             profile.print(total_started.elapsed());
+            crate::algo::sp::sp_counters::print_report();
         }
+
+        if !results.is_empty() {
+            let log_likes: Vec<f64> = games
+                .iter()
+                .map(|g| g.log_likelihoods[0] + g.log_likelihoods[1] + g.log_likelihoods[2] + g.log_likelihoods[3])
+                .collect();
+            // Subfamily mode already samples from the (approximate) posterior:
+            // uniform per-game weights. Legacy joint-SNIS weighting only for
+            // non-subfamily weighted requests.
+            let use_uniform = subfamily_mode;
+            let summary_opt = if weighted && !use_uniform {
+                super::weighted::compute_snis_weights(&log_likes).ok()
+            } else {
+                None
+            };
+            for (gi, d_obj) in results.iter().enumerate() {
+                if let Ok(d) = d_obj.downcast_bound::<pyo3::types::PyDict>(py) {
+                    d.set_item("log_likelihood", log_likes[gi]).ok();
+                    if let Some(ref summary) = summary_opt {
+                        d.set_item("weight", summary.weights[gi]).ok();
+                    } else if use_uniform {
+                        d.set_item("weight", 1.0).ok();
+                    }
+                }
+            }
+        }
+
         Ok(results)
     }
+}
+
+
+fn build_game_state_from_spec(
+    spec: super::prefix::PrefixGameSpec,
+    discard_tile: Tile,
+    scores: [i32; 4],
+    kyotaku: u8,
+    enable_agari_guard: bool,
+    first_riichi: bool,
+    first_kan_tile: Option<Tile>,
+    first_kyushu: bool,
+    seed: (u64, u64),
+) -> GameState {
+    let oya = spec.oya;
+    let target_seat = spec.target_seat;
+    let bs = spec.board.into_state_with_oya(oya);
+
+    GameState {
+        bs,
+        reactions: Default::default(),
+        is_first: true,
+        first_riichi,
+        first_kan: first_kan_tile,
+        first_kyushu,
+        first_tsumo: false,
+        first_ron: false,
+        first_pass: false,
+        first_chi: None,
+        first_pon: false,
+        first_daiminkan: false,
+        first_follow_up_discard: None,
+        pending_first_riichi_discard: false,
+        pending_first_meld_discard: false,
+        oya,
+        target_seat,
+        discard_tile,
+        prefix_steps: spec.forced_steps,
+        prefix_index: 0,
+        prefix_reach_declared: false,
+        prefix_completed: false,
+        log_likelihoods: [0.0; 4],
+        ended: false,
+        collected: false,
+        scores,
+        kyotaku_start: kyotaku,
+        enable_agari_guard,
+        error_msg: None,
+        seed,
+        target_discards: 0,
+        first_tenpai_turn: None,
+        target_agari_metrics: None,
+    }
+}
+
+fn build_prefix_game(
+    target_seat: u8,
+    oya: u8,
+    x: u8,
+    target_14: &[Tile; 14],
+    target_past: &[super::prefix::DiscardSpec],
+    opponent_rivers: &[Vec<super::prefix::DiscardSpec>; 4],
+    dora_tile: Tile,
+    discard_tile: Tile,
+    kyoku: u8,
+    honba: u8,
+    kyotaku: u8,
+    scores: [i32; 4],
+    seed: (u64, u64),
+    enable_agari_guard: bool,
+    first_riichi: bool,
+    first_kan_tile: Option<Tile>,
+    first_kyushu: bool,
+) -> PyResult<GameState> {
+    let spec = super::prefix::sample_prefix_game(
+        target_seat,
+        oya,
+        x,
+        target_14,
+        target_past,
+        opponent_rivers,
+        dora_tile,
+        kyoku,
+        honba,
+        kyotaku,
+        scores,
+        seed,
+    ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("prefix sampler failed: {e}")))?;
+
+    Ok(build_game_state_from_spec(
+        spec,
+        discard_tile,
+        scores,
+        kyotaku,
+        enable_agari_guard,
+        first_riichi,
+        first_kan_tile,
+        first_kyushu,
+        seed,
+    ))
+}
+
+
+/// Runs only the forced-prefix phase for a batch of prefix games, accumulating
+/// per-player marginal log-likelihoods. Stops once every game has reached the
+/// target's decision point (or ended). Reaction opportunities (Chi/Pon/Ron)
+/// during the prefix are always passed.
+fn run_prefix_only_pass(
+    games: &mut [GameState],
+    engine: &Bound<'_, PyAny>,
+    ver: u32,
+    tau: f32,
+    py: Python<'_>,
+) -> PyResult<()> {
+    let shape = crate::consts::obs_shape(ver);
+    let obs_len = shape.0 * shape.1;
+    let mut safety = 0usize;
+
+    while games.iter().any(|g| !g.prefix_completed && !g.ended) && safety < 100_000 {
+        safety += 1;
+
+        let mut batch_map: Vec<(usize, usize)> = Vec::new();
+        for (gi, g) in games.iter_mut().enumerate() {
+            if g.ended || g.prefix_completed {
+                continue;
+            }
+            let ctx = g.bs.agent_context();
+            for (pid, st) in ctx.player_states.iter().enumerate() {
+                if !st.last_cans().can_act() {
+                    continue;
+                }
+                if !g.prefix_completed {
+                    if g.prefix_index < g.prefix_steps.len() {
+                        let step = &g.prefix_steps[g.prefix_index];
+                        if pid == step.actor as usize && st.last_cans().can_discard {
+                            if step.accumulate_likelihood {
+                                batch_map.push((gi, pid));
+                            } else {
+                                g.reactions[pid] = EventExt::no_meta(Event::Dahai {
+                                    actor: pid as u8,
+                                    pai: step.tile,
+                                    tsumogiri: step.tsumogiri,
+                                });
+                                g.prefix_index += 1;
+                            }
+                        }
+                    } else if pid == g.target_seat as usize && st.last_cans().can_discard {
+                        g.prefix_completed = true;
+                    }
+                    if !g.prefix_completed {
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let batch_len = batch_map.len();
+        if batch_len != 0 {
+            let mut obs_storage = vec![0.; batch_len * obs_len];
+            let mut mask_storage = vec![[false; crate::consts::ACTION_SPACE]; batch_len];
+            batch_map
+                .par_iter()
+                .zip(obs_storage.par_chunks_mut(obs_len))
+                .zip(mask_storage.par_iter_mut())
+                .for_each(|((&(gi, pid), obs), mask)| {
+                    let st = &games[gi].bs.agent_context().player_states[pid];
+                    SP_WORKSPACE.with_borrow_mut(|workspace| {
+                        st.encode_obs_into_with_workspace(ver, false, obs, mask, workspace);
+                    });
+                });
+
+            let (_actions, q_values, masks_recv, _is_greedy): (
+                Vec<usize>,
+                Vec<Vec<f32>>,
+                Vec<Vec<bool>>,
+                Vec<bool>,
+            ) = if engine.is_instance_of::<MortalOnnxEngine>() {
+                let native: PyRef<'_, MortalOnnxEngine> = engine.extract()?;
+                let native_batch = native.infer(&obs_storage, &mask_storage, shape.0, shape.1)?;
+                (
+                    native_batch.actions,
+                    native_batch.q_values,
+                    mask_storage.iter().map(|mask| mask.to_vec()).collect(),
+                    vec![true; batch_len],
+                )
+            } else {
+                let obs_array =
+                    Array3::from_shape_vec((batch_len, shape.0, shape.1), obs_storage)
+                        .expect("observation batch shape");
+                let flat_masks: Vec<bool> = mask_storage.into_iter().flatten().collect();
+                let mask_array = Array2::from_shape_vec(
+                    (batch_len, crate::consts::ACTION_SPACE),
+                    flat_masks,
+                )
+                .expect("mask batch shape");
+                let batch_obs: Py<PyArray3<f32>> = PyArray3::from_owned_array(py, obs_array).into();
+                let batch_mask: Py<PyArray2<bool>> = PyArray2::from_owned_array(py, mask_array).into();
+                let args = (batch_obs, batch_mask, py.None());
+                let raw = engine.call_method1("react_batch", args).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("react_batch: {e}"))
+                })?;
+                raw.extract().map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("extract: {e}"))
+                })?
+            };
+
+            for (i, &(gi, pid)) in batch_map.iter().enumerate() {
+                let g = &mut games[gi];
+                let step = &g.prefix_steps[g.prefix_index];
+                let target_action = match step.tile.as_u8() {
+                    tu8!(5mr) => 34,
+                    tu8!(5pr) => 35,
+                    tu8!(5sr) => 36,
+                    _ => step.tile.deaka().as_usize(),
+                };
+                if let Ok(log_p) = super::weighted::softmax_log_prob(
+                    &q_values[i],
+                    &masks_recv[i],
+                    target_action,
+                    tau,
+                ) {
+                    g.log_likelihoods[pid] += log_p;
+                }
+                g.reactions[pid] = EventExt::no_meta(Event::Dahai {
+                    actor: pid as u8,
+                    pai: step.tile,
+                    tsumogiri: step.tsumogiri,
+                });
+                g.prefix_index += 1;
+            }
+        }
+
+        games
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(gi, g)| advance_game(gi, g));
+    }
+
+    Ok(())
 }
 
 fn advance_game(gi: usize, g: &mut GameState) {
     if g.ended {
         return;
     }
+    let target_discarded = matches!(
+        &g.reactions[g.target_seat as usize].event,
+        Event::Dahai { actor, .. } if *actor == g.target_seat
+    );
     let mut last_err: Option<String> = None;
     for _retry in 0..3 {
         let rx = std::mem::take(&mut g.reactions);
         match g.bs.poll(rx) {
             Ok(Poll::End) => {
+                if target_discarded {
+                    g.target_discards = g.target_discards.saturating_add(1);
+                }
+                capture_target_metrics(g);
                 g.ended = true;
                 break;
             }
-            Ok(Poll::InGame) => break,
+            Ok(Poll::InGame) => {
+                if target_discarded {
+                    g.target_discards = g.target_discards.saturating_add(1);
+                }
+                capture_target_metrics(g);
+                break;
+            }
             Err(e) => {
                 last_err = Some(format!("{e}"));
                 for (pid, state) in g.bs.agent_context().player_states.iter().enumerate() {
@@ -752,6 +1850,40 @@ fn advance_game(gi: usize, g: &mut GameState) {
     }
 }
 
+fn capture_target_metrics(g: &mut GameState) {
+    if g.first_tenpai_turn.is_some() {
+        return;
+    }
+    let target_state = &g.bs.agent_context().player_states[g.target_seat as usize];
+    if target_state.shanten() == 0 {
+        g.first_tenpai_turn = Some(g.target_discards);
+    }
+}
+
+fn score_deltas(final_scores: [i32; 4], initial_scores: [i32; 4]) -> [i32; 4] {
+    array::from_fn(|index| final_scores[index] - initial_scores[index])
+}
+
+fn round_balances_from_events(events: &[EventExt]) -> [i32; 4] {
+    let mut balances = [0; 4];
+    for event in events {
+        let deltas = match &event.event {
+            Event::Hora {
+                deltas: Some(deltas),
+                ..
+            }
+            | Event::Ryukyoku {
+                deltas: Some(deltas),
+            } => Some(deltas),
+            _ => None,
+        };
+        if let Some(deltas) = deltas {
+            vec_add_assign(&mut balances, deltas);
+        }
+    }
+    balances
+}
+
 fn build_game(
     hand: &[Tile],
     dora_tile: Tile,
@@ -765,7 +1897,40 @@ fn build_game(
     scores: [i32; 4],
     seed: (u64, u64),
     enable_agari_guard: bool,
+    first_riichi: bool,
+    first_kan_tile: Option<Tile>,
+    first_kyushu: bool,
 ) -> PyResult<GameState> {
+    // The 14th tile (first_tsumo) is the last tile of the compact hand and is
+    // NOT part of the 13-tile main hand slice, so include it in action legality.
+    let mut all_tiles: Vec<Tile> = hand.to_vec();
+    if let Some(ft) = first_tsumo_tile {
+        all_tiles.push(ft);
+    }
+    if first_kyushu {
+        let mut seen = [false; 34];
+        let mut kinds = 0usize;
+        for &t in &all_tiles {
+            let id = t.deaka().as_u8() as usize;
+            if id <= 33 && matches!(id, 0 | 8 | 9 | 17 | 18 | 26 | 27..=33) && !seen[id] {
+                seen[id] = true;
+                kinds += 1;
+            }
+        }
+        if kinds < 9 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "first_kyushu_unavailable: hand has only {kinds} terminal/honor kinds (need 9+)"
+            )));
+        }
+    }
+    if let Some(kan) = first_kan_tile {
+        let copies = all_tiles.iter().filter(|&&t| t.deaka() == kan.deaka()).count();
+        if copies < 4 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "first_kan_unavailable: hand has only {copies} copies of {kan:?}"
+            )));
+        }
+    }
     let k0 = kyoku.wrapping_sub(1);
     let mut wall: Vec<Tile> = UNSHUFFLED.to_vec();
 
@@ -837,13 +2002,163 @@ fn build_game(
         bs,
         reactions: Default::default(),
         is_first: true,
+        first_riichi,
+        first_kan: first_kan_tile,
+        first_kyushu,
+        first_tsumo: false,
+        first_ron: false,
+        first_pass: false,
+        first_chi: None,
+        first_pon: false,
+        first_daiminkan: false,
+        first_follow_up_discard: None,
+        pending_first_riichi_discard: false,
+        pending_first_meld_discard: false,
         oya,
+        target_seat: oya,
         discard_tile,
+        prefix_steps: Vec::new(),
+        prefix_index: 0,
+        prefix_reach_declared: false,
+        prefix_completed: true,
+        log_likelihoods: [0.0; 4],
         ended: false,
         collected: false,
         scores,
+        kyotaku_start: kyotaku,
         enable_agari_guard,
         error_msg: None,
         seed,
+        target_discards: 0,
+        first_tenpai_turn: None,
+        target_agari_metrics: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Event, EventExt, ForcedFirstAction, RoundOutcome, classify_round_outcome,
+        forced_first_action, round_balances_from_events, score_deltas, select_stable_action,
+    };
+
+    #[test]
+    fn stable_selector_is_legal_deterministic_and_tie_stable() {
+        let mut scores = [-10.0; 46];
+        let mut legal = [false; 46];
+        legal[3] = true;
+        legal[9] = true;
+        scores[3] = 7.5;
+        scores[9] = 7.5;
+        assert_eq!(select_stable_action(&scores, &legal, None), Ok(3));
+
+        scores[9] = 8.0;
+        assert_eq!(select_stable_action(&scores, &legal, None), Ok(9));
+        assert_eq!(select_stable_action(&scores, &legal, Some(9)), Ok(3));
+    }
+
+    #[test]
+    fn stable_selector_rejects_nan_and_empty_masks() {
+        let mut scores = [-1.0; 46];
+        let mut legal = [false; 46];
+        legal[4] = true;
+        scores[4] = f32::NAN;
+        assert_eq!(
+            select_stable_action(&scores, &legal, None),
+            Err("stable selector rejected a NaN policy score")
+        );
+        assert_eq!(
+            select_stable_action(&[0.0; 46], &[false; 46], None),
+            Err("stable selector found no legal action")
+        );
+    }
+
+    #[test]
+    fn first_riichi_is_an_explicit_reach_then_forced_discard_sequence() {
+        assert_eq!(
+            forced_first_action(true, false, true, true),
+            Some(ForcedFirstAction::Riichi)
+        );
+        assert_eq!(
+            forced_first_action(false, true, true, true),
+            Some(ForcedFirstAction::Discard)
+        );
+        assert_eq!(
+            forced_first_action(true, false, true, false),
+            Some(ForcedFirstAction::InvalidRiichi)
+        );
+        assert_eq!(forced_first_action(false, false, true, true), None);
+    }
+
+    #[test]
+    fn outcome_partition_uses_target_player_perspective() {
+        assert_eq!(
+            classify_round_outcome(0, &[], false),
+            (RoundOutcome::Draw, None)
+        );
+        assert_eq!(
+            classify_round_outcome(0, &[(0, 1)], false),
+            (RoundOutcome::SelfWin, Some("ron"))
+        );
+        assert_eq!(
+            classify_round_outcome(0, &[(0, 0)], false),
+            (RoundOutcome::SelfWin, Some("tsumo"))
+        );
+        assert_eq!(
+            classify_round_outcome(0, &[(2, 0)], false),
+            (RoundOutcome::SelfDealIn, None)
+        );
+        assert_eq!(
+            classify_round_outcome(0, &[(2, 1)], false),
+            (RoundOutcome::Sideways, None)
+        );
+        assert_eq!(
+            classify_round_outcome(0, &[(2, 2)], false),
+            (RoundOutcome::OtherTsumo, None)
+        );
+    }
+
+    #[test]
+    fn multi_ron_precedence_is_target_aware() {
+        assert_eq!(
+            classify_round_outcome(0, &[(1, 3), (0, 3)], false),
+            (RoundOutcome::SelfWin, Some("ron"))
+        );
+        assert_eq!(
+            classify_round_outcome(0, &[(1, 0), (2, 0)], false),
+            (RoundOutcome::SelfDealIn, None)
+        );
+        assert_eq!(
+            classify_round_outcome(0, &[(1, 2), (3, 2)], false),
+            (RoundOutcome::Sideways, None)
+        );
+        assert_eq!(
+            classify_round_outcome(0, &[(0, 1)], true),
+            (RoundOutcome::Error, None)
+        );
+    }
+
+    #[test]
+    fn score_deltas_are_exact_end_minus_start_and_track_kyotaku() {
+        let initial = [24_000, 25_000, 25_000, 25_000];
+        let final_scores = [36_000, 22_000, 22_000, 20_000];
+        let deltas = score_deltas(final_scores, initial);
+        assert_eq!(deltas, [12_000, -3_000, -3_000, -5_000]);
+        // A 1,000-point pre-existing kyotaku was claimed during the round.
+        assert_eq!(deltas.iter().sum::<i32>(), 1_000 * (1 - 0));
+    }
+
+    #[test]
+    fn round_balance_uses_terminal_settlement_and_excludes_riichi_payment() {
+        let events = vec![
+            EventExt::no_meta(Event::ReachAccepted { actor: 0 }),
+            EventExt::no_meta(Event::Hora {
+                actor: 0,
+                target: 1,
+                deltas: Some([8_700, -7_700, 0, 0]),
+                ura_markers: Some(vec![]),
+            }),
+        ];
+        assert_eq!(round_balances_from_events(&events), [8_700, -7_700, 0, 0]);
+    }
 }

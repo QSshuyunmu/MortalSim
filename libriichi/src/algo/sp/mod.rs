@@ -30,7 +30,7 @@ mod state;
 mod tile;
 
 pub use calc::SPCalculator;
-pub(crate) use calc::SPWorkspace;
+pub(crate) use calc::{SPWorkspace, sp_counters};
 pub use candidate::{Candidate, CandidateColumn};
 pub use state::InitState;
 pub use tile::RequiredTile;

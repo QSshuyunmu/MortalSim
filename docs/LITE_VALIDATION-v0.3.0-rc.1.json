@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "release": "v0.3.0-rc.1",
+  "status": "rc",
+  "formal_release_ready": false,
+  "decision_contract": "stable_advantage_v2",
+  "runtime": {
+    "engine_id": "aoti-cuda-sm89",
+    "build_id": "v0.3.0rc1-b9cc517e5828",
+    "artifact_sha256": "b9cc517e58283b5f5520904c0feef9bf04271b4e6093019e4bd0b99afb40d2fd",
+    "compute_capability": "8.9",
+    "batch_size": 1000,
+    "batch_capacity": 1024,
+    "precision_profile": "amp-static-advantage"
+  },
+  "strict_legacy_gate": {
+    "passed": false,
+    "reference_games": 300,
+    "reference_decisions": 14397,
+    "amp_static_gemm_action_mismatches": 3,
+    "reason": "legacy AMP reproduction did not reach zero action divergence"
+  },
+  "verified": {
+    "native_advantage_graph_load": true,
+    "native_checkpoint_constant_load": true,
+    "native_single_batch_inference": true,
+    "portable_exe_health_and_model_import": true,
+    "portable_exe_schema_v3_round_smoke": true,
+    "portable_result_history_no_cache": true,
+    "responsive_ui_no_overflow_or_broken_tiles": true,
+    "local_1000_game_smoke": {
+      "candidate": "1s",
+      "games": 1000,
+      "errors": 0,
+      "games_per_second": 21.1249564474691,
+      "trace_result_sha256": "ca079b53f31d66f1d51b003394a50490558c111901300b304bdb3bb22060430c"
+    },
+    "naga_reference_recommendation": {
+      "games_per_candidate": 1000,
+      "candidates": ["1m", "5m", "2s"],
+      "recommended": "5m",
+      "legacy_recommended": "5m",
+      "unchanged": true,
+      "errors": 0
+    },
+    "three_process_reproducibility": {
+      "processes": 3,
+      "games_per_candidate": 1000,
+      "candidates": ["1s", "6s"],
+      "errors": 0,
+      "all_signatures_identical": true,
+      "trace_result_sha256": {
+        "1s": "ca079b53f31d66f1d51b003394a50490558c111901300b304bdb3bb22060430c",
+        "6s": "dfed7652e2ab22634242c145890b3e1530950dfbdd02d727a981f9c18ffa578e"
+      },
+      "median_games_per_second": 23.468
+    },
+    "three_model_1000_game_smoke": {
+      "models": 3,
+      "games_per_model": 1000,
+      "candidate": "1s",
+      "errors": 0,
+      "model_result_sha256": {
+        "dd51dcbf0765b4f9589db66237a1466c9f3aadfa99383e3a654abdd581e2b3c8": "ca079b53f31d66f1d51b003394a50490558c111901300b304bdb3bb22060430c",
+        "e37010cc2a3e4c84c1c50ece60bc6c5a0cd3e609475a6c6f2ed0f462d781104a": "5928741cb6c1a5ae635aea17917225b15611c0c7b2d8a5572c6f3a84f215bc5b",
+        "0a88ddad649804d085491b5397d895f596b0e55f30632c549ea145bb44786563": "b1ffd601a9244767744c0b51fa26856c058b87fb0be00d38ccd17c309df867a7"
+      }
+    },
+    "extension_1000_plus_1000_equivalence": {
+      "base_runs": 1000,
+      "additional_runs": 1000,
+      "candidates": ["1s", "6s"],
+      "one_shot_sha256": "ae9f3ad288dae1559dde7398455b74760b54df2e5b82100244db641ad5a3c86d",
+      "merged_sha256": "ae9f3ad288dae1559dde7398455b74760b54df2e5b82100244db641ad5a3c86d",
+      "differences": 0,
+      "passed": true
+    },
+    "thirty_minute_vram_stability": {
+      "duration_seconds": 1824.152,
+      "games": 43000,
+      "errors": 0,
+      "games_per_second": 23.573,
+      "memory_first_quartile_median_mib": 489.0,
+      "memory_last_quartile_median_mib": 489.0,
+      "memory_growth_mib": 0.0,
+      "temperature_max_c": 85.0,
+      "critical_samples": 0,
+      "monitor_overhead": {
+        "pairs": 3,
+        "games": 6000,
+        "errors": 0,
+        "overhead_percent": -2.168,
+        "maximum_allowed_percent": 1.0,
+        "passed": true
+      },
+      "passed": true
+    },
+    "million_decision_migration_gate": {
+      "corpus_rounds": 20000,
+      "corpus_decisions": 1102345,
+      "corpus_batches": 1963,
+      "corpus_errors": 0,
+      "corpus_manifest_sha256": "82c5032be313c621494f854ae0e2ddb5708c651564e8147eed7daf0d8e3570d4",
+      "action_mismatches": 631,
+      "action_change_rate": 0.0005724160766366246,
+      "maximum_allowed_rate": 0.001,
+      "passed": true
+    },
+    "fifty_thousand_games_per_candidate": {
+      "runs_per_candidate": 50000,
+      "candidates": {
+        "1s": {
+          "paired_point_delta": -2.222,
+          "paired_point_ci95": [-86.25031447045484, 81.80631447045485],
+          "maximum_outcome_rate_delta": 0.00034
+        },
+        "6s": {
+          "paired_point_delta": -4.868,
+          "paired_point_ci95": [-88.22578172437052, 78.48978172437053],
+          "maximum_outcome_rate_delta": 0.00026
+        }
+      },
+      "point_ci_required_within": [-100.0, 100.0],
+      "maximum_allowed_outcome_rate_delta": 0.0025,
+      "passed": true
+    },
+    "portable_package": {
+      "zip_mib": 33.205,
+      "unpacked_mib": 71.966,
+      "zip_sha256": "ffc553076a584876166c398e87bdcc526d4cd306e7da1f6f67c127a660e6f7ce",
+      "contains_model_weights": false,
+      "contains_pytorch": false
+    },
+    "rust_selector_unit_tests": true,
+    "schema_v3_contract_tests": true,
+    "python_api_tests": 65,
+    "rust_tests": 36,
+    "frontend_typecheck": true,
+    "frontend_build": true
+  },
+  "pending": {
+    "million_decision_migration_gate": false,
+    "fifty_thousand_games_per_candidate": false,
+    "three_process_reproducibility": false,
+    "extension_1000_plus_1000_equivalence": false,
+    "three_model_1000_game_smoke": false,
+    "second_rtx40_hardware_gate": true,
+    "thirty_minute_vram_stability": false,
+    "final_portable_package_gate": false
+  },
+  "policy": "This file must not be changed to formal_release_ready=true until every pending gate is false and the second RTX 40 evidence is attached."
+}

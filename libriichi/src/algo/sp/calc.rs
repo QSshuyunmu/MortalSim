@@ -8,6 +8,86 @@ use crate::{must_tile, t, tu8};
 use ahash::AHashMap;
 use anyhow::{Result, ensure};
 
+pub(crate) mod sp_counters {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    pub(crate) static CALC_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static DRAW_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static DRAW_SLOW_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static DISCARD_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static DISCARD_SLOW_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static GET_DRAW_TILES_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static GET_DISCARD_TILES_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static GET_REQUIRED_TILES_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static GET_SCORE_CALLS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static STATE_CLONES: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static DRAW_SLOW_NS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static DISCARD_SLOW_NS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static GET_SCORE_NS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static TILES_FN_NS: AtomicU64 = AtomicU64::new(0);
+
+    #[inline(always)]
+    pub fn enabled() -> bool {
+        ENABLED.load(Ordering::Relaxed)
+    }
+
+    pub fn set_enabled(v: bool) {
+        ENABLED.store(v, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn bump(counter: &AtomicU64) {
+        if ENABLED.load(Ordering::Relaxed) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline(always)]
+    pub fn add_ns(counter: &AtomicU64, d: Duration) {
+        if ENABLED.load(Ordering::Relaxed) {
+            counter.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn print_report() {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return;
+        }
+        let ms = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e6;
+        let k = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e3;
+        eprintln!("\n=== SP_COUNTERS ===");
+        eprintln!("  calc calls             : {}", CALC_CALLS.load(Ordering::Relaxed));
+        eprintln!(
+            "  draw cache hit/miss    : {} / {}",
+            DRAW_CACHE_HITS.load(Ordering::Relaxed),
+            DRAW_SLOW_CALLS.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "  discard cache hit/miss : {} / {}",
+            DISCARD_CACHE_HITS.load(Ordering::Relaxed),
+            DISCARD_SLOW_CALLS.load(Ordering::Relaxed)
+        );
+        eprintln!("  get_draw_tiles         : {:.0}k", k(&GET_DRAW_TILES_CALLS));
+        eprintln!("  get_discard_tiles      : {:.0}k", k(&GET_DISCARD_TILES_CALLS));
+        eprintln!("  get_required_tiles     : {:.0}k", k(&GET_REQUIRED_TILES_CALLS));
+        eprintln!(
+            "  get_score (agari)      : {:.0}k ({:.1} ms)",
+            k(&GET_SCORE_CALLS),
+            ms(&GET_SCORE_NS)
+        );
+        eprintln!("  state clones           : {:.0}k", k(&STATE_CLONES));
+        eprintln!("  draw_slow total        : {:.1} ms", ms(&DRAW_SLOW_NS));
+        eprintln!("  discard_slow total     : {:.1} ms", ms(&DISCARD_SLOW_NS));
+        eprintln!("  tile-enum fn total     : {:.1} ms", ms(&TILES_FN_NS));
+    }
+
+    pub fn t0() -> Option<Instant> {
+        enabled().then(Instant::now)
+    }
+}
+
 const SHANTEN_THRES: i8 = 3;
 const MAX_TILES_LEFT: usize = 34 * 4 - 1 - 13;
 
@@ -150,6 +230,7 @@ impl SPCalculator<'_> {
         cur_shanten: i8,
         workspace: &mut SPWorkspace,
     ) -> Result<Vec<Candidate>> {
+        sp_counters::bump(&sp_counters::CALC_CALLS);
         ensure!(cur_shanten >= 0, "can't calculate an agari hand");
         ensure!(tsumos_left >= 1, "need at least one more tsumo");
         ensure!(tsumos_left <= MAX_TSUMOS_LEFT as u8);
@@ -293,6 +374,7 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, '_, MAX_TSUMO> {
         for DiscardTile { tile, shanten_diff } in discard_tiles {
             if shanten_diff == 0 {
                 self.state.discard(tile);
+                sp_counters::bump(&sp_counters::GET_REQUIRED_TILES_CALLS);
                 let required_tiles = self.state.get_required_tiles(self.sup.tehai_len_div3);
                 let values_idx = self.draw(shanten);
                 self.state.undo_discard(tile);
@@ -317,6 +399,7 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, '_, MAX_TSUMO> {
                 candidates.push(candidate);
             } else if self.sup.calc_shanten_down && shanten_diff == 1 && shanten < SHANTEN_THRES {
                 self.state.discard(tile);
+                sp_counters::bump(&sp_counters::GET_REQUIRED_TILES_CALLS);
                 let required_tiles = self.state.get_required_tiles(self.sup.tehai_len_div3);
                 self.state.n_extra_tsumo += 1;
                 let values_idx = self.draw(shanten + 1);
@@ -341,6 +424,7 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, '_, MAX_TSUMO> {
     }
 
     fn analyze_draw(&mut self, shanten: i8) -> Vec<Candidate> {
+        sp_counters::bump(&sp_counters::GET_REQUIRED_TILES_CALLS);
         let required_tiles = self.state.get_required_tiles(self.sup.tehai_len_div3);
         let values_idx = self.draw(shanten);
         let values = &self.values[values_idx];
@@ -373,6 +457,7 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, '_, MAX_TSUMO> {
             .into_iter()
             .map(|DiscardTile { tile, shanten_diff }| {
                 self.state.discard(tile);
+                sp_counters::bump(&sp_counters::GET_REQUIRED_TILES_CALLS);
                 let required_tiles = self.state.get_required_tiles(self.sup.tehai_len_div3);
                 self.state.undo_discard(tile);
 
@@ -387,6 +472,7 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, '_, MAX_TSUMO> {
     }
 
     fn analyze_draw_simple(&mut self) -> Vec<Candidate> {
+        sp_counters::bump(&sp_counters::GET_REQUIRED_TILES_CALLS);
         let required_tiles = self.state.get_required_tiles(self.sup.tehai_len_div3);
         let candidate = Candidate::from(RawCandidate {
             tile: t!(?),
@@ -534,19 +620,28 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, '_, MAX_TSUMO> {
     }
 
     fn draw_without_tegawari(&mut self, shanten: i8) -> usize {
-        self.draw_cache[shanten as usize]
-            .get(&self.state)
-            .copied()
-            .unwrap_or_else(|| self.draw_without_tegawari_slow(shanten))
+        if let Some(idx) = self.draw_cache[shanten as usize].get(&self.state).copied() {
+            sp_counters::bump(&sp_counters::DRAW_CACHE_HITS);
+            idx
+        } else {
+            sp_counters::bump(&sp_counters::DRAW_SLOW_CALLS);
+            self.draw_without_tegawari_slow(shanten)
+        }
     }
 
     fn draw_without_tegawari_slow(&mut self, shanten: i8) -> usize {
+        let _t = sp_counters::t0();
         let mut tenpai_probs = [0.; MAX_TSUMO];
         let mut win_probs = [0.; MAX_TSUMO];
         let mut exp_values = [0.; MAX_TSUMO];
 
+        sp_counters::bump(&sp_counters::GET_DRAW_TILES_CALLS);
         // 自摸候補を取得する。
+        let _tile_t = sp_counters::t0();
         let draw_tiles = self.state.get_draw_tiles(shanten, self.sup.tehai_len_div3);
+        if let Some(t) = _tile_t {
+            sp_counters::add_ns(&sp_counters::TILES_FN_NS, t.elapsed());
+        }
 
         // 有効牌の合計枚数を計算する。
         let sum_required_tiles: u8 = draw_tiles
@@ -646,23 +741,36 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, '_, MAX_TSUMO> {
             win_probs,
             exp_values,
         });
+        sp_counters::bump(&sp_counters::STATE_CLONES);
+        if let Some(t) = _t {
+            sp_counters::add_ns(&sp_counters::DRAW_SLOW_NS, t.elapsed());
+        }
         self.draw_cache[shanten as usize].insert(self.state.clone(), values_idx);
 
         values_idx
     }
 
     fn discard(&mut self, shanten: i8) -> usize {
-        self.discard_cache[shanten as usize]
-            .get(&self.state)
-            .copied()
-            .unwrap_or_else(|| self.discard_slow(shanten))
+        if let Some(idx) = self.discard_cache[shanten as usize].get(&self.state).copied() {
+            sp_counters::bump(&sp_counters::DISCARD_CACHE_HITS);
+            idx
+        } else {
+            sp_counters::bump(&sp_counters::DISCARD_SLOW_CALLS);
+            self.discard_slow(shanten)
+        }
     }
 
     fn discard_slow(&mut self, shanten: i8) -> usize {
+        let _t = sp_counters::t0();
+        sp_counters::bump(&sp_counters::GET_DISCARD_TILES_CALLS);
         // 打牌候補を取得する。
+        let _tile_t = sp_counters::t0();
         let discard_tiles = self
             .state
             .get_discard_tiles(shanten, self.sup.tehai_len_div3);
+        if let Some(t) = _tile_t {
+            sp_counters::add_ns(&sp_counters::TILES_FN_NS, t.elapsed());
+        }
 
         // 期待値が最大となる打牌を選択する。
         let mut max_tenpai_probs = [f32::MIN; MAX_TSUMO];
@@ -724,6 +832,10 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, '_, MAX_TSUMO> {
             win_probs: max_win_probs,
             exp_values: max_exp_values,
         });
+        sp_counters::bump(&sp_counters::STATE_CLONES);
+        if let Some(t) = _t {
+            sp_counters::add_ns(&sp_counters::DISCARD_SLOW_NS, t.elapsed());
+        }
         self.discard_cache[shanten as usize].insert(self.state.clone(), values_idx);
 
         values_idx
@@ -731,6 +843,7 @@ impl<const MAX_TSUMO: usize> SPCalculatorState<'_, '_, MAX_TSUMO> {
 
     /// None: no yaku
     fn get_score(&self, win_tile: Tile) -> Option<[f32; 4]> {
+        sp_counters::bump(&sp_counters::GET_SCORE_CALLS);
         let calc = AgariCalculator {
             tehai: &self.state.tehai,
             is_menzen: self.sup.is_menzen,

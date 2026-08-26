@@ -1,0 +1,151 @@
+253 INFO: PyInstaller: 6.21.0, contrib hooks: 2026.6
+253 INFO: Python: 3.13.14
+287 INFO: Platform: Windows-11-10.0.26200-SP0
+287 INFO: Python environment: C:\Users\HP\AppData\Local\Programs\Python\Python313
+291 INFO: Removing temporary files and cleaning cache in C:\Users\HP\AppData\Local\pyinstaller
+8532 INFO: Module search paths (PYTHONPATH):
+['D:\\tenhoulib\\MortalSim',
+ 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\python313.zip',
+ 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\DLLs',
+ 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib',
+ 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313',
+ 'C:\\Users\\HP\\AppData\\Roaming\\Python\\Python313\\site-packages',
+ 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages',
+ 'D:\\tenhoulib\\MortalSim']
+9011 INFO: Appending 'binaries' from .spec
+9012 INFO: Appending 'datas' from .spec
+9018 INFO: checking Analysis
+9018 INFO: Building Analysis because Analysis-00.toc is non existent
+9018 INFO: Looking for Python shared library...
+9018 INFO: Using Python shared library: C:\Users\HP\AppData\Local\Programs\Python\Python313\python313.dll
+9018 INFO: Running Analysis Analysis-00.toc
+9019 INFO: Target bytecode optimization level: 0
+9019 INFO: Initializing module dependency graph...
+9022 INFO: Initializing module graph hook caches...
+9061 INFO: Analyzing modules for base_library.zip ...
+11487 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+12183 INFO: Processing standard module hook 'hook-math.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+15371 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+17371 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+18470 INFO: Caching module dependency graph...
+18600 INFO: Analyzing D:\tenhoulib\MortalSim\run_mortalsim.py
+18699 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+19109 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+19836 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+19846 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+20377 INFO: Processing standard module hook 'hook-webbrowser.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+20421 INFO: Processing standard module hook 'hook-uvicorn.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+23011 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+23104 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+23107 INFO: SetuptoolsInfo: initializing cached setuptools info...
+24328 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+25659 INFO: Processing standard module hook 'hook-websockets.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+27346 INFO: Processing standard module hook 'hook-anyio.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+29188 INFO: Processing standard module hook 'hook-pydantic.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+30438 INFO: Processing standard module hook 'hook-rich.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+31704 INFO: Processing standard module hook 'hook-pygments.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+32860 INFO: Processing standard module hook 'hook-chardet.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+36952 INFO: Processing standard module hook 'hook-zoneinfo.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+41385 INFO: Processing standard module hook 'hook-numpy.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+45796 INFO: Processing standard module hook 'hook-psutil.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+48705 INFO: Processing standard module hook 'hook-charset_normalizer.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+49572 INFO: Processing standard module hook 'hook-lightgbm.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+50943 INFO: Processing standard module hook 'hook-scipy.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+52012 INFO: Processing standard module hook 'hook-pycparser.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+52466 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+52517 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+52617 INFO: Processing pre-safe-import-module hook 'hook-jaraco.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+52618 INFO: Setuptools: 'jaraco' appears to be a full setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco'!
+52647 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+52649 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.more_itertools'!
+53361 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+53999 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+54003 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+54027 INFO: Processing pre-safe-import-module hook 'hook-backports.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+54028 INFO: Setuptools: 'backports' appears to be a partial setuptools-vendored copy - extending search paths to ['C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\setuptools\\_vendor\\backports', 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\backports']!
+54029 INFO: Processing pre-safe-import-module hook 'hook-backports.tarfile.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+54030 INFO: Setuptools: 'backports.tarfile' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.backports.tarfile'!
+54250 INFO: Processing standard module hook 'hook-backports.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+54513 INFO: Processing pre-safe-import-module hook 'hook-importlib_metadata.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+54515 INFO: Setuptools: 'importlib_metadata' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.importlib_metadata'!
+54607 INFO: Processing standard module hook 'hook-setuptools._vendor.importlib_metadata.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+54674 INFO: Processing pre-safe-import-module hook 'hook-zipp.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+54675 INFO: Setuptools: 'zipp' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.zipp'!
+55380 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+56841 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+60057 INFO: Processing standard module hook 'hook-scipy.linalg.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+60476 INFO: Processing standard module hook 'hook-scipy.special._ufuncs.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+64310 INFO: Processing standard module hook 'hook-scipy.spatial._ckdtree.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+65856 INFO: Processing standard module hook 'hook-scipy.spatial.transform.rotation.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+68577 INFO: Processing standard module hook 'hook-scipy.stats._stats.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+70036 INFO: Processing standard module hook 'hook-scipy.sparse.csgraph.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+72432 INFO: Processing standard module hook 'hook-scipy.special._ellip_harm_2.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+75229 INFO: Processing standard module hook 'hook-openpyxl.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+75489 INFO: Processing standard module hook 'hook-xml.etree.cElementTree.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+75689 INFO: Processing standard module hook 'hook-xml.dom.domreg.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+78356 INFO: Analyzing hidden import 'openpyxl.compat.abc'
+78359 INFO: Analyzing hidden import 'openpyxl.compat.product'
+78361 INFO: Analyzing hidden import 'openpyxl.compat.singleton'
+78365 INFO: Analyzing hidden import 'openpyxl.descriptors.slots'
+78370 INFO: Analyzing hidden import 'openpyxl.packaging.interface'
+78374 INFO: Analyzing hidden import 'openpyxl.utils.dataframe'
+78380 INFO: Analyzing hidden import 'openpyxl.utils.inference'
+78382 INFO: Analyzing hidden import 'openpyxl.worksheet.cell_watch'
+78383 INFO: Analyzing hidden import 'openpyxl.worksheet.controls'
+78397 INFO: Analyzing hidden import 'openpyxl.worksheet.custom'
+78402 INFO: Analyzing hidden import 'openpyxl.worksheet.errors'
+78411 INFO: Analyzing hidden import 'openpyxl.worksheet.picture'
+78414 INFO: Analyzing hidden import 'openpyxl.worksheet.smart_tag'
+78421 INFO: Processing module hooks (post-graph stage)...
+78901 WARNING: Hidden import "ascii__mypyc" not found!
+78901 WARNING: Hidden import "confusion__mypyc" not found!
+78901 WARNING: Hidden import "escape__mypyc" not found!
+78902 WARNING: Hidden import "magic__mypyc" not found!
+78902 WARNING: Hidden import "orchestrator__mypyc" not found!
+78902 WARNING: Hidden import "statistical__mypyc" not found!
+78903 WARNING: Hidden import "structural__mypyc" not found!
+78903 WARNING: Hidden import "utf1632__mypyc" not found!
+78904 WARNING: Hidden import "utf8__mypyc" not found!
+78904 WARNING: Hidden import "validity__mypyc" not found!
+78909 WARNING: Hidden import "pycparser.lextab" not found!
+78909 WARNING: Hidden import "pycparser.yacctab" not found!
+85195 WARNING: Hidden import "scipy.special._cdflib" not found!
+85282 INFO: Processing standard module hook 'hook-tzdata.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+85989 INFO: Performing binary vs. data reclassification (700 entries)
+86374 INFO: Looking for ctypes DLLs
+86854 INFO: Analyzing run-time hooks ...
+86872 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+86878 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+86884 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+86890 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+86973 INFO: Creating base_library.zip...
+87047 INFO: Looking for dynamic libraries
+123683 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\numpy.libs', 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\scipy.libs', 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\torch\\lib', 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\pandas.libs', 'C:\\Users\\HP\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\pyarrow.libs']
+123683 INFO: Extra DLL search directories (PATH): []
+127942 INFO: Warnings written to D:\tenhoulib\MortalSim\build\mortalsim_lite\warn-mortalsim_lite.txt
+128302 INFO: Graph cross-reference written to D:\tenhoulib\MortalSim\build\mortalsim_lite\xref-mortalsim_lite.html
+128473 INFO: checking PYZ
+128474 INFO: Building PYZ because PYZ-00.toc is non existent
+128474 INFO: Building PYZ (ZlibArchive) D:\tenhoulib\MortalSim\build\mortalsim_lite\PYZ-00.pyz
+132035 INFO: Building PYZ (ZlibArchive) D:\tenhoulib\MortalSim\build\mortalsim_lite\PYZ-00.pyz completed successfully.
+132124 INFO: checking PKG
+132125 INFO: Building PKG because PKG-00.toc is non existent
+132125 INFO: Building PKG (CArchive) MortalSim.pkg
+132202 INFO: Building PKG (CArchive) MortalSim.pkg completed successfully.
+132204 INFO: Bootloader C:\Users\HP\AppData\Local\Programs\Python\Python313\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+132204 INFO: checking EXE
+132204 INFO: Building EXE because EXE-00.toc is non existent
+132204 INFO: Building EXE from EXE-00.toc
+132205 INFO: Copying bootloader EXE to D:\tenhoulib\MortalSim\build\mortalsim_lite\MortalSim.exe
+132385 INFO: Copying icon to EXE
+132533 INFO: Copying 0 resources to EXE
+132533 INFO: Embedding manifest in EXE
+132678 INFO: Appending PKG archive to EXE
+133248 INFO: Fixing EXE headers
+134272 INFO: Building EXE from EXE-00.toc completed successfully.
+134295 INFO: checking COLLECT
+134295 INFO: Building COLLECT because COLLECT-00.toc is non existent
+134296 INFO: Removing dir D:\tenhoulib\MortalSim\dist\MortalSim
+134569 INFO: Building COLLECT COLLECT-00.toc
+136841 INFO: Building COLLECT COLLECT-00.toc completed successfully.
+136870 INFO: Build complete! The results are available in: D:\tenhoulib\MortalSim\dist

@@ -73,6 +73,118 @@ pub enum Agari {
     Yakuman(u8),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum YakuId {
+    Tanyao,
+    Pinfu,
+    Iipeikou,
+    SeatWind,
+    RoundWind,
+    Haku,
+    Hatsu,
+    Chun,
+    SanshokuDoujun,
+    Ikkitsuukan,
+    Chanta,
+    Chiitoitsu,
+    Toitoi,
+    Sanankou,
+    Honroutou,
+    SanshokuDoukou,
+    Sankantsu,
+    Shousangen,
+    Honitsu,
+    Junchan,
+    Ryanpeikou,
+    Chinitsu,
+    Kokushi,
+    Suuankou,
+    Daisangen,
+    Shousuushii,
+    Daisuushii,
+    Tsuuiisou,
+    Chinroutou,
+    Ryuuiisou,
+    Chuuren,
+    Suukantsu,
+}
+
+impl YakuId {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tanyao => "tanyao",
+            Self::Pinfu => "pinfu",
+            Self::Iipeikou => "iipeikou",
+            Self::SeatWind => "seat_wind",
+            Self::RoundWind => "round_wind",
+            Self::Haku => "haku",
+            Self::Hatsu => "hatsu",
+            Self::Chun => "chun",
+            Self::SanshokuDoujun => "sanshoku_doujun",
+            Self::Ikkitsuukan => "ikkitsuukan",
+            Self::Chanta => "chanta",
+            Self::Chiitoitsu => "chiitoitsu",
+            Self::Toitoi => "toitoi",
+            Self::Sanankou => "sanankou",
+            Self::Honroutou => "honroutou",
+            Self::SanshokuDoukou => "sanshoku_doukou",
+            Self::Sankantsu => "sankantsu",
+            Self::Shousangen => "shousangen",
+            Self::Honitsu => "honitsu",
+            Self::Junchan => "junchan",
+            Self::Ryanpeikou => "ryanpeikou",
+            Self::Chinitsu => "chinitsu",
+            Self::Kokushi => "kokushi",
+            Self::Suuankou => "suuankou",
+            Self::Daisangen => "daisangen",
+            Self::Shousuushii => "shousuushii",
+            Self::Daisuushii => "daisuushii",
+            Self::Tsuuiisou => "tsuuiisou",
+            Self::Chinroutou => "chinroutou",
+            Self::Ryuuiisou => "ryuuiisou",
+            Self::Chuuren => "chuuren",
+            Self::Suukantsu => "suukantsu",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_yakuman(self) -> bool {
+        matches!(
+            self,
+            Self::Kokushi
+                | Self::Suuankou
+                | Self::Daisangen
+                | Self::Shousuushii
+                | Self::Daisuushii
+                | Self::Tsuuiisou
+                | Self::Chinroutou
+                | Self::Ryuuiisou
+                | Self::Chuuren
+                | Self::Suukantsu
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgariBreakdown {
+    pub agari: Agari,
+    pub yakus: Vec<YakuId>,
+}
+
+impl Ord for AgariBreakdown {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.agari.cmp(&other.agari)
+    }
+}
+
+impl PartialOrd for AgariBreakdown {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Debug)]
 pub struct AgariCalculator<'a> {
     /// Must include the winning tile (i.e. must be 3n+2)
@@ -213,6 +325,11 @@ impl AgariCalculator<'_> {
         self.search_yakus_impl(false)
     }
 
+    #[must_use]
+    pub fn search_yaku_breakdown(&self) -> Option<AgariBreakdown> {
+        self.search_yaku_breakdown_impl(false)
+    }
+
     /// `additional_hans` includes 門前清自摸和, (両)立直, 槍槓, 嶺上開花, 海底
     /// 摸月 and 河底撈魚. 天和 and 地和 are supposed to be checked somewhere
     /// else other than here.
@@ -255,6 +372,11 @@ impl AgariCalculator<'_> {
     }
 
     fn search_yakus_impl(&self, return_if_any: bool) -> Option<Agari> {
+        self.search_yaku_breakdown_impl(return_if_any)
+            .map(|breakdown| breakdown.agari)
+    }
+
+    fn search_yaku_breakdown_impl(&self, return_if_any: bool) -> Option<AgariBreakdown> {
         assert_eq!(
             self.is_menzen,
             self.chis.is_empty() && self.pons.is_empty() && self.minkans.is_empty(),
@@ -264,7 +386,10 @@ impl AgariCalculator<'_> {
         // pattern-based yakus.
         if self.is_menzen && shanten::calc_kokushi(self.tehai) == -1 {
             // 国士無双
-            return Some(Agari::Yakuman(1));
+            return Some(AgariBreakdown {
+                agari: Agari::Yakuman(1),
+                yakus: vec![YakuId::Kokushi],
+            });
         }
 
         let (tile14, key) = get_tile14_and_key(self.tehai);
@@ -449,9 +574,10 @@ impl<'a> DivWorker<'a> {
         ((fu - 1) / 10 + 1) * 10
     }
 
-    fn search_yakus<const RETURN_IF_ANY: bool>(&self) -> Option<Agari> {
+    fn search_yakus<const RETURN_IF_ANY: bool>(&self) -> Option<AgariBreakdown> {
         let mut han = 0;
         let mut yakuman = 0;
+        let mut yakus = Vec::new();
 
         let has_pinfu = self.menzen_shuntsu.len() == 4
             && !matches_tu8!(self.pair_tile, P | F | C)
@@ -465,14 +591,21 @@ impl<'a> DivWorker<'a> {
         macro_rules! make_return {
             () => {
                 return if yakuman > 0 {
-                    Some(Agari::Yakuman(yakuman))
+                    yakus.retain(|yaku| yaku.is_yakuman());
+                    Some(AgariBreakdown {
+                        agari: Agari::Yakuman(yakuman),
+                        yakus,
+                    })
                 } else if han > 0 {
                     let fu = if RETURN_IF_ANY || han >= 5 {
                         0
                     } else {
                         self.calc_fu(has_pinfu)
                     };
-                    Some(Agari::Normal { fu, han })
+                    Some(AgariBreakdown {
+                        agari: Agari::Normal { fu, han },
+                        yakus,
+                    })
                 } else {
                     None
                 };
@@ -488,18 +621,22 @@ impl<'a> DivWorker<'a> {
         }
 
         if has_pinfu {
+            yakus.push(YakuId::Pinfu);
             // 平和
             check_early_return! { han += 1 };
         }
         if self.div.has_chitoi {
+            yakus.push(YakuId::Chiitoitsu);
             // 七対子
             check_early_return! { han += 2 };
         }
         if self.div.has_ryanpeikou {
+            yakus.push(YakuId::Ryanpeikou);
             // 二盃口
             check_early_return! { han += 3 };
         }
         if self.div.has_chuuren {
+            yakus.push(YakuId::Chuuren);
             // 九蓮宝燈
             check_early_return! { yakuman += 1 };
         }
@@ -524,6 +661,7 @@ impl<'a> DivWorker<'a> {
                 })
         };
         if has_tanyao {
+            yakus.push(YakuId::Tanyao);
             // 断幺九
             check_early_return! { han += 1 };
         }
@@ -531,6 +669,7 @@ impl<'a> DivWorker<'a> {
         let has_toitoi =
             !self.div.has_chitoi && self.menzen_shuntsu.is_empty() && self.sup.chis.is_empty();
         if has_toitoi {
+            yakus.push(YakuId::Toitoi);
             // 対々和
             check_early_return! { han += 2 };
         }
@@ -563,17 +702,24 @@ impl<'a> DivWorker<'a> {
                 .for_each(drop);
         }
         if isou_kind.is_none() {
+            yakus.push(YakuId::Tsuuiisou);
             // 字一色
             check_early_return! { yakuman += 1 };
         } else if is_chinitsu_or_honitsu {
             // 混一色, 清一色
             let n = if has_jihai { 2 } else { 5 } + self.sup.is_menzen as u8;
+            yakus.push(if has_jihai {
+                YakuId::Honitsu
+            } else {
+                YakuId::Chinitsu
+            });
             check_early_return! { han += n };
         }
 
         if !self.div.has_chitoi {
             // 一盃口
             if self.div.has_ipeikou {
+                yakus.push(YakuId::Iipeikou);
                 check_early_return! { han += 1 };
             } else if !self.sup.ankans.is_empty()
                 && self.sup.is_menzen
@@ -592,14 +738,17 @@ impl<'a> DivWorker<'a> {
                     }
                 });
                 if has_ipeikou {
+                    yakus.push(YakuId::Iipeikou);
                     check_early_return! { han += 1 };
                 }
             }
 
             // 一気通貫
             if self.sup.is_menzen && self.div.has_ittsuu {
+                yakus.push(YakuId::Ikkitsuukan);
                 check_early_return! { han += 2 };
             } else if self.sup.chis.is_empty() && self.div.has_ittsuu {
+                yakus.push(YakuId::Ikkitsuukan);
                 check_early_return! { han += 1 };
             } else if self.menzen_shuntsu.len() + self.sup.chis.len() >= 3 {
                 let mut kinds = [0; 3];
@@ -614,6 +763,7 @@ impl<'a> DivWorker<'a> {
                     };
                 }
                 if kinds.contains(&0b111) {
+                    yakus.push(YakuId::Ikkitsuukan);
                     check_early_return! { han += 1 };
                 }
             }
@@ -627,6 +777,7 @@ impl<'a> DivWorker<'a> {
             if s_counter.contains(&0b111) {
                 // 三色同順
                 let n = if self.sup.is_menzen { 2 } else { 1 };
+                yakus.push(YakuId::SanshokuDoujun);
                 check_early_return! { han += n };
             } else {
                 let mut k_counter = [0; 9];
@@ -638,6 +789,7 @@ impl<'a> DivWorker<'a> {
                     }
                 }
                 if k_counter.contains(&0b111) {
+                    yakus.push(YakuId::SanshokuDoukou);
                     // 三色同刻
                     check_early_return! { han += 2 };
                 }
@@ -647,18 +799,30 @@ impl<'a> DivWorker<'a> {
                 - self.winning_tile_makes_minkou as usize;
             match ankous_count {
                 // 四暗刻
-                4 => check_early_return! { yakuman += 1 },
+                4 => {
+                    yakus.push(YakuId::Suuankou);
+                    check_early_return! { yakuman += 1 }
+                }
                 // 三暗刻
-                3 => check_early_return! { han += 2 },
+                3 => {
+                    yakus.push(YakuId::Sanankou);
+                    check_early_return! { han += 2 }
+                }
                 _ => (),
             };
 
             let kans_count = self.sup.ankans.len() + self.sup.minkans.len();
             match kans_count {
                 // 四槓子
-                4 => check_early_return! { yakuman += 1 },
+                4 => {
+                    yakus.push(YakuId::Suukantsu);
+                    check_early_return! { yakuman += 1 }
+                }
                 // 三槓子
-                3 => check_early_return! { han += 2 },
+                3 => {
+                    yakus.push(YakuId::Sankantsu);
+                    check_early_return! { han += 2 }
+                }
                 _ => (),
             };
 
@@ -668,6 +832,7 @@ impl<'a> DivWorker<'a> {
                 .all(|k| matches_tu8!(k, 2s | 3s | 4s | 6s | 8s | F))
                 && self.all_shuntsu().all(|s| s == tu8!(2s)); // only 234s is possible for shuntsu in ryuisou
             if has_ryuisou {
+                yakus.push(YakuId::Ryuuiisou);
                 // 緑一色
                 check_early_return! { yakuman += 1 };
             }
@@ -681,22 +846,34 @@ impl<'a> DivWorker<'a> {
                     }
                 }
                 if has_jihai[self.sup.bakaze as usize - 3 * 9] {
+                    yakus.push(YakuId::RoundWind);
                     // 役牌:門風牌
                     check_early_return! { han += 1 };
                 }
                 if has_jihai[self.sup.jikaze as usize - 3 * 9] {
+                    yakus.push(YakuId::SeatWind);
                     // 役牌:場風牌
                     check_early_return! { han += 1 };
                 }
 
                 let saneins = (4..7).filter(|&i| has_jihai[i]).count() as u8;
                 if saneins > 0 {
+                    for (index, yaku) in [YakuId::Haku, YakuId::Hatsu, YakuId::Chun]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if has_jihai[index + 4] {
+                            yakus.push(yaku);
+                        }
+                    }
                     // 役牌:三元牌
                     check_early_return! { han += saneins };
                     if saneins == 3 {
+                        yakus.push(YakuId::Daisangen);
                         // 大三元
                         check_early_return! { yakuman += 1 };
                     } else if saneins == 2 && matches_tu8!(self.pair_tile, P | F | C) {
+                        yakus.push(YakuId::Shousangen);
                         // 小三元
                         check_early_return! { han += 2 };
                     }
@@ -705,9 +882,11 @@ impl<'a> DivWorker<'a> {
                 let winds = (0..4).filter(|&i| has_jihai[i]).count();
                 #[allow(clippy::if_same_then_else)]
                 if winds == 4 {
+                    yakus.push(YakuId::Daisuushii);
                     // 大四喜
                     check_early_return! { yakuman += 1 };
                 } else if winds == 3 && matches_tu8!(self.pair_tile, E | S | W | N) {
+                    yakus.push(YakuId::Shousuushii);
                     // 小四喜
                     check_early_return! { yakuman += 1 };
                 }
@@ -736,9 +915,11 @@ impl<'a> DivWorker<'a> {
             if is_junchan_or_chanta_or_chinroutou_or_honroutou {
                 if self.div.has_chitoi || has_toitoi {
                     if has_jihai {
+                        yakus.push(YakuId::Honroutou);
                         // 混老頭
                         check_early_return! { han += 2 };
                     } else {
+                        yakus.push(YakuId::Chinroutou);
                         // 清老頭
                         check_early_return! { yakuman += 1 };
                     }
@@ -750,6 +931,11 @@ impl<'a> DivWorker<'a> {
                     if is_junchan_or_chanta {
                         // 混全帯幺九, 純全帯幺九
                         let n = if has_jihai { 1 } else { 2 } + self.sup.is_menzen as u8;
+                        yakus.push(if has_jihai {
+                            YakuId::Chanta
+                        } else {
+                            YakuId::Junchan
+                        });
                         check_early_return! { han += n };
                     }
                 }
@@ -977,6 +1163,10 @@ mod test {
         };
         let yaku = calc.search_yakus().unwrap();
         assert_eq!(yaku, Agari::Normal { fu: 40, han: 4 });
+        let breakdown = calc.search_yaku_breakdown().unwrap();
+        assert_eq!(breakdown.agari, yaku);
+        assert!(breakdown.yakus.contains(&YakuId::Tanyao));
+        assert!(breakdown.yakus.contains(&YakuId::SanshokuDoujun));
 
         let tehai = hand("12334m 345p 22s 777z 2m").unwrap();
         let calc = AgariCalculator {

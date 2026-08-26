@@ -6,13 +6,15 @@ Usage:
       --discard "1m" --dora "5s" --runs 100 --seed 42
 """
 import sys, os, time, argparse
+from pathlib import Path
 
-# Windows paths
-MORTAL_ROOT = r"D:\tenhoulib\Mortal"
-MORTAL_DIR = os.path.join(MORTAL_ROOT, "mortal")
-LIBRIICHI_DIR = os.path.join(MORTAL_ROOT, "target", "release")
-MODEL_PATH = os.path.join(MORTAL_ROOT, "Akagi", "model_v4_20240308_best_min.pth")
-ONNX_MODEL_PATH = os.path.join(MORTAL_ROOT, "Akagi", "model_v4_20240308_best_min.onnx")
+# Resolve both source checkouts and PyInstaller's bundled ``_internal`` tree
+# without embedding a developer-specific absolute path.
+MORTAL_ROOT = Path(__file__).resolve().parents[1]
+MORTAL_DIR = str(MORTAL_ROOT / "mortal")
+LIBRIICHI_DIR = str(MORTAL_ROOT / "target" / "release")
+MODEL_PATH = str(MORTAL_ROOT / "models" / "model_v4_20240308_best_min.pth")
+ONNX_MODEL_PATH = str(MORTAL_ROOT / "models" / "model_v4_20240308_best_min.onnx")
 
 TILE_NAMES = {"1m","2m","3m","4m","5m","6m","7m","8m","9m",
     "1p","2p","3p","4p","5p","6p","7p","8p","9p",
@@ -65,6 +67,8 @@ def main():
     ap.add_argument("--hand", default="123456789m1234p")
     ap.add_argument("--first-tsumo", default=None, help="指定第一摸牌 (如 '1m')")
     ap.add_argument("--discard", default="1m")
+    ap.add_argument("--first-kan", default=None, help="第一打暗杠 (如 '9m')")
+    ap.add_argument("--first-kyushu", action="store_true", help="第一打九種九牌流局")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--runs", type=int, default=100)
     ap.add_argument("--batch-size", type=int, default=1000,
@@ -169,6 +173,8 @@ def main():
                 dora_marker=args.dora, main_haipai=hand,
                 first_discard=args.discard,
                 first_tsumo=args.first_tsumo,
+                first_kan=args.first_kan,
+                first_kyushu=args.first_kyushu,
                 seed_start=(args.seed + batch_start, 0xDEAD), count=n,
             )
         except Exception as e:

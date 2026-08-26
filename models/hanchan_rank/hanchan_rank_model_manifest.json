@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "model_id": "hanchan-rank-lgb-v1",
+  "feature_schema": "hanchan_rank_v1",
+  "feature_names": [
+    "s0_norm",
+    "s1_norm",
+    "s2_norm",
+    "s3_norm",
+    "kyoku_idx_norm",
+    "honba",
+    "kyotaku_norm",
+    "oya_0",
+    "oya_1",
+    "oya_2",
+    "oya_3"
+  ],
+  "training_corpus": "tenhou-houou-games_200k_v2+heldout_mjai+games_10k_fixed",
+  "snapshot_rows": 2447934,
+  "train_rows": 2322313,
+  "val_rows": 65573,
+  "test_rows": 60048,
+  "date_split": {
+    "train_min": "20210101",
+    "train_max": "20220808",
+    "val_min": "20220809",
+    "val_max": "20221019",
+    "test_min": "20221020",
+    "test_max": "20260509"
+  },
+  "lightgbm_params": {
+    "objective": "multiclass",
+    "num_class": 4,
+    "learning_rate": 0.08,
+    "num_leaves": 31,
+    "min_child_samples": 200,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_lambda": 1.0,
+    "n_estimators": 300,
+    "random_state": 42,
+    "n_jobs": -1,
+    "verbose": -1
+  },
+  "models": [
+    {
+      "seat": 0,
+      "file": "hanchan_rank_lgb_seat0.txt",
+      "n_estimators": 296,
+      "val_logloss": 1.100646,
+      "test_logloss": 1.093952,
+      "test_accuracy": 0.47875,
+      "test_expected_rank": 2.493069,
+      "test_actual_rank": 2.507444,
+      "test_expected_rank_mae": 0.711605,
+      "train_seconds": 74.95
+    },
+    {
+      "seat": 1,
+      "file": "hanchan_rank_lgb_seat1.txt",
+      "n_estimators": 241,
+      "val_logloss": 1.108968,
+      "test_logloss": 1.110938,
+      "test_accuracy": 0.472872,
+      "test_expected_rank": 2.496376,
+      "test_actual_rank": 2.488826,
+      "test_expected_rank_mae": 0.723695,
+      "train_seconds": 53.6
+    },
+    {
+      "seat": 2,
+      "file": "hanchan_rank_lgb_seat2.txt",
+      "n_estimators": 299,
+      "val_logloss": 1.113425,
+      "test_logloss": 1.115866,
+      "test_accuracy": 0.475536,
+      "test_expected_rank": 2.508913,
+      "test_actual_rank": 2.505945,
+      "test_expected_rank_mae": 0.728948,
+      "train_seconds": 79.37
+    },
+    {
+      "seat": 3,
+      "file": "hanchan_rank_lgb_seat3.txt",
+      "n_estimators": 215,
+      "val_logloss": 1.13258,
+      "test_logloss": 1.137826,
+      "test_accuracy": 0.465661,
+      "test_expected_rank": 2.50118,
+      "test_actual_rank": 2.497785,
+      "test_expected_rank_mae": 0.756649,
+      "train_seconds": 51.01
+    }
+  ],
+  "file_sha256": {
+    "hanchan_rank_lgb_seat0.txt": "e122d4726883176ddb979b538d54a969f20f848ac8bcc99509014e5ce63871bd",
+    "hanchan_rank_lgb_seat1.txt": "cad768a78b3828aeed036782628e6f497e99d15c76420feedd17a41b684fec8a",
+    "hanchan_rank_lgb_seat2.txt": "379a09947e7ef910c683601774b13b99a8a546a418d6b324a50f4fe55dbccc2d",
+    "hanchan_rank_lgb_seat3.txt": "0d2df3a9ad260380ab7ccd184dbd95bc48bfe22fb70e705e93ac1b406ae8bf94"
+  }
+}

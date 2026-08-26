@@ -1,30 +1,31 @@
-# PyInstaller onedir build. Keep the CUDA package separate from the CPU package.
+# PyInstaller onedir build for the CUDA-only Windows distribution.
+import os
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 ROOT = Path(SPEC).resolve().parents[1]
 web_dist = ROOT / "apps" / "web" / "dist"
-model = ROOT / "Akagi" / "model_v4_20240308_best_min.pth"
 manifest = ROOT / "models" / "MODEL_MANIFEST.json"
 mortal = ROOT / "mortal"
-akagi = ROOT / "Akagi"
+simulator = ROOT / "simulator"
 release = ROOT / "target" / "release"
 
-torch_datas = collect_data_files("torch")
 torch_binaries = collect_dynamic_libs("torch")
 torch_hidden = ["torch", "torch.nn", "torch.cuda"]
+excel_hidden = collect_submodules("openpyxl")
 datas = []
 if web_dist.exists():
     datas.append((str(web_dist), "apps/web/dist"))
-if model.exists():
-    datas.append((str(model), "Akagi"))
-kyoku_parser = ROOT / "Akagi" / "kyoku_sim_win.py"
+# Checkpoints are never part of the portable application. Users import a
+# compatible local file after startup; this keeps model distribution outside
+# of the public project and release pipeline.
+kyoku_parser = simulator / "kyoku_sim_win.py"
 if kyoku_parser.exists():
-    datas.append((str(kyoku_parser), "Akagi"))
+    datas.append((str(kyoku_parser), "simulator"))
 if manifest.exists():
     datas.append((str(manifest), "models"))
-datas.append((str(mortal), "mortal"))
-datas.extend(torch_datas)
+for source in mortal.glob("*.py"):
+    datas.append((str(source), "mortal"))
 
 binaries = list(torch_binaries)
 for filename in ("libriichi.cp313-win_amd64.pyd", "libriichi.dll"):
@@ -32,14 +33,43 @@ for filename in ("libriichi.cp313-win_amd64.pyd", "libriichi.dll"):
     if path.exists():
         binaries.append((str(path), "target/release"))
 
-hiddenimports = list(torch_hidden) + [
+hiddenimports = list(torch_hidden) + list(excel_hidden) + [
     "apps.api.main",
     "apps.api.services",
     "apps.desktop_launcher.main",
     "mortal_app.service",
+    "mortal_app.model_registry",
     "mortal_app.gpu_monitor",
     "numpy",
     "tkinter",
+]
+
+# PyInstaller's third-party hooks eagerly follow optional Torch export, data,
+# plotting and JIT stacks installed in the build interpreter. MortalSim only
+# performs eager CUDA inference; collecting those packages adds more than 1 GB
+# of unrelated files to the portable build.
+excluded_optional_stacks = [
+    "torchvision",
+    "torchaudio",
+    "onnx",
+    "onnxscript",
+    "onnxruntime",
+    "pandas",
+    "pyarrow",
+    "scipy",
+    "matplotlib",
+    "numba",
+    "llvmlite",
+    "sklearn",
+    "tensorboard",
+    "tensorrt",
+    "tensorflow",
+    "pytest",
+    "_pytest",
+    "py",
+    "pluggy",
+    "PIL",
+    "lxml",
 ]
 
 a = Analysis(
@@ -48,6 +78,7 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
+    excludes=excluded_optional_stacks,
     noarchive=False,
 )
 pyz = PYZ(a.pure)

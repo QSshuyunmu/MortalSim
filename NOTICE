@@ -7,3 +7,8 @@ mahjong simulation engine and the libriichi Rust runner.
 The application code remains covered by AGPL-3.0-or-later unless a file
 states otherwise. Third-party components and model weights may have separate
 terms; see THIRD_PARTY_LICENSES.md and MODEL_LICENSE.md.
+
+MortalSim is an independent project. References to Mortal, NAGA, Rust,
+PyTorch, NVIDIA, and mahjong platforms identify compatible technology or
+external comparison data and do not imply endorsement or official
+affiliation.

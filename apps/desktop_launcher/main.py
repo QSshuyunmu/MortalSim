@@ -3,10 +3,12 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import socket
+import sys
 import time
 import traceback
 import urllib.request
 import webbrowser
+import ctypes
 from pathlib import Path
 from threading import Thread
 
@@ -30,7 +32,12 @@ def wait_for_health(port: int, timeout: float = 20.0) -> bool:
 
 
 def write_startup_error(message: str) -> None:
-    root = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "MortalSim" / "logs"
+    configured = os.environ.get("MORTALSIM_DATA_DIR")
+    root = (
+        Path(configured).expanduser().resolve() / "logs"
+        if configured
+        else Path(os.environ.get("LOCALAPPDATA", Path.home())) / "MortalSim" / "logs"
+    )
     root.mkdir(parents=True, exist_ok=True)
     (root / "launcher.log").write_text(message + "\n", encoding="utf-8")
 
@@ -38,22 +45,28 @@ def write_startup_error(message: str) -> None:
 def main() -> None:
     mp.freeze_support()
     try:
+        engine = os.environ.get("MORTALSIM_ENGINE", "lite").strip().lower()
+        if engine == "lite" and getattr(sys, "frozen", False):
+            os.environ.setdefault("MORTALSIM_LITE_RUNTIME_DIR", str(Path(sys._MEIPASS) / "lite_runtime"))
         import uvicorn
         from apps.api.main import app
         from mortal_app.service import require_cuda
 
-        require_cuda()
+        require_cuda(engine)
 
         port = int(os.environ.get("MORTALSIM_PORT", "0")) or free_port()
         # GUI-mode PyInstaller builds expose no stderr; disable Uvicorn's
         # console formatter so startup does not fail before the API binds.
-        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", access_log=False, log_config=None)
+        # Keep the portable build independent of optional httptools wheels.
+        # h11 is pure Python and is already part of the locked Uvicorn stack.
+        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", access_log=False, log_config=None, http="h11")
         server = uvicorn.Server(config)
         thread = Thread(target=server.run, name="mortalsim-api", daemon=True)
         thread.start()
         if not wait_for_health(port):
             raise RuntimeError(f"MortalSim API failed to start on port {port}")
-        webbrowser.open(f"http://127.0.0.1:{port}/")
+        if os.environ.get("MORTALSIM_NO_BROWSER") != "1":
+            webbrowser.open(f"http://127.0.0.1:{port}/")
         try:
             while thread.is_alive():
                 thread.join(timeout=0.5)
@@ -63,12 +76,8 @@ def main() -> None:
         message = "MortalSim could not start. Check the log under %LOCALAPPDATA%\\MortalSim\\logs.\n" + str(exc)
         write_startup_error(message + "\n" + traceback.format_exc())
         try:
-            from tkinter import Tk, messagebox
-
-            root = Tk()
-            root.withdraw()
-            messagebox.showerror("MortalSim", message)
-            root.destroy()
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.MessageBoxW(None, message, "MortalSim", 0x10)
         except BaseException:
             pass
         raise

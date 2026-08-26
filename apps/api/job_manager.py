@@ -15,8 +15,10 @@ from uuid import UUID, uuid4
 
 from mortal_app.gpu_monitor import GpuMonitor
 
-from .models import RunRequest
+from .models import DiscardCandidate, RunRequest
 from .services import SimulationService, StatisticsService
+from mortal_app.service import candidate_id, merge_results, public_tile
+from mortal_app.model_registry import ModelRegistry
 
 
 def utc_now() -> datetime:
@@ -31,6 +33,40 @@ def default_data_dir() -> Path:
     if local_app_data:
         return Path(local_app_data) / "MortalSim"
     return Path.home() / ".mortalsim"
+
+
+def _result_candidate_pairs(result: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Return every current first-discard candidate from a completed result.
+
+    A parent analysis may contain more candidates in ``result.candidates`` than
+    in its original ``request.discards`` after a previous candidate extension.
+    A later run extension must include every current candidate; otherwise the
+    atomic merge fails with a missing-candidate KeyError such as ``'4s'``.
+    """
+    pairs: list[dict[str, Any]] = []
+    for candidate in (result or {}).get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        tile = str(candidate.get("discard") or candidate.get("tile") or "").strip()
+        if not tile:
+            continue
+        pairs.append({
+            "tile": public_tile(tile),
+            # ``riichi`` inside a result candidate is the riichi statistics
+            # section, not the first-action riichi flag; only ``first_riichi``
+            # records whether this candidate declares riichi on the first turn.
+            "riichi": bool(candidate.get("first_riichi", False)),
+            "kan": bool(candidate.get("first_kan", False)),
+            "kyushu": bool(candidate.get("first_kyushu", False)),
+        })
+    return pairs
+
+
+def _result_candidate_ids(result: dict[str, Any] | None) -> set[str]:
+    return {
+        candidate_id(pair["tile"], pair["riichi"])
+        for pair in _result_candidate_pairs(result)
+    }
 
 
 @dataclass
@@ -50,6 +86,10 @@ class Job:
     monitor_thread: threading.Thread | None = None
     gpu_monitor: GpuMonitor | None = None
     gpu_summary: dict[str, Any] | None = None
+    diagnostic_log: str | None = None
+    extension_of: UUID | None = None
+    progress: dict[str, Any] = field(default_factory=dict)
+    gpu_status: dict[str, Any] | None = None
 
     def publish(self, event: dict[str, Any]) -> None:
         with self.event_condition:
@@ -63,8 +103,15 @@ def worker_entry(request: dict[str, Any], events: Any) -> None:
     try:
         result = SimulationService.run(request, events.put)
         events.put({"type": "completed", "result": result})
-    except BaseException:
-        events.put({"type": "failed", "error": "worker crashed", "traceback": traceback.format_exc()})
+    except BaseException as exc:
+        # The parent persists the full traceback locally.  Keep the event
+        # concise enough for the UI while still identifying the real failure.
+        detail = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+        events.put({
+            "type": "failed",
+            "error": f"{type(exc).__name__}: {detail}",
+            "traceback": traceback.format_exc(),
+        })
 
 
 class JobManager:
@@ -90,7 +137,7 @@ class JobManager:
                 updated_at = datetime.fromisoformat(payload.get("updated_at", payload["created_at"]))
                 status = payload.get("status", "failed")
                 if status in {"queued", "running"}:
-                    status = "failed"
+                    status = "interrupted"
                     payload["error"] = "application restarted before the run completed"
                 self.jobs[run_id] = Job(
                     run_id=run_id,
@@ -100,6 +147,8 @@ class JobManager:
                     updated_at=updated_at,
                     result=payload.get("result"),
                     error=payload.get("error"),
+                    diagnostic_log=payload.get("diagnostic_log"),
+                    extension_of=UUID(payload["extension_of"]) if payload.get("extension_of") else None,
                 )
                 if status not in {"queued", "running"}:
                     self.jobs[run_id].done.set()
@@ -107,11 +156,21 @@ class JobManager:
                 continue
 
     def create(self, request: RunRequest) -> Job:
+        # Do not persist the deprecated legacy first_tsumo field for new
+        # 14-tile requests. Existing history records retain it verbatim.
+        data = request.model_dump(exclude_none=True)
+        # Ensure candidate_id is explicitly present in discards dicts
+        for idx, cand_obj in enumerate(request.discards):
+            if idx < len(data.get("discards", [])):
+                data["discards"][idx]["candidate"] = cand_obj.candidate_id
+        return self._create_job(data)
+
+    def _create_job(self, request: dict[str, Any], extension_of: UUID | None = None) -> Job:
         with self.lock:
             active = [job for job in self.jobs.values() if job.status in {"queued", "running"}]
             if active:
                 raise RuntimeError("only one simulation can run at a time")
-            job = Job(run_id=uuid4(), request=request.model_dump())
+            job = Job(run_id=uuid4(), request=request, extension_of=extension_of)
             self.jobs[job.run_id] = job
             self._persist(job)
             job.process_events = mp.Queue()
@@ -144,6 +203,102 @@ class JobManager:
             self._persist(job)
             return job
 
+    def create_extension(
+        self,
+        run_id: UUID,
+        additional_runs: int | None = None,
+        batch_size: int | None = None,
+        discards: list[DiscardCandidate] | None = None,
+    ) -> Job:
+        parent = self.get(run_id)
+        if parent.status != "completed" or not parent.result:
+            raise RuntimeError("only completed analyses can be extended")
+        if int(parent.result.get("schema_version", 0)) != 3:
+            raise RuntimeError("schema v1/v2 analyses are read-only; rerun them as Formal Lite before extending")
+        if int(parent.result.get("metrics_version", 0)) != 3:
+            raise RuntimeError("the analysis metrics version is not extendable")
+        if int(parent.result.get("merge_state_version", 0)) != 3:
+            raise RuntimeError("该记录缺少精确扩容状态；请按正式 Lite 重新运行后再增加局数")
+        if any(job.extension_of == run_id and job.status in {"queued", "running"} for job in self.jobs.values()):
+            raise RuntimeError("this analysis already has an active extension")
+        request = dict(parent.request)
+        contract = parent.result.get("decision_contract")
+        if contract != "stable_advantage_v2":
+            raise RuntimeError("only stable_advantage_v2 analyses can be extended in Formal Lite")
+        if request.get("decision_contract") != contract:
+            raise RuntimeError("analysis request and result decision contracts do not match")
+        parent_runtime = parent.result.get("runtime") or {}
+        required_runtime = (
+            "engine_id",
+            "artifact_sha256",
+            "build_id",
+            "compute_capability",
+            "batch_size",
+            "batch_capacity",
+            "precision_profile",
+        )
+        if any(parent_runtime.get(key) is None for key in required_runtime):
+            raise RuntimeError("analysis does not contain a complete Formal Lite runtime identity")
+        model = ModelRegistry(self.data_dir).get(request.get("model_id"))
+        expected_hash = (parent.result.get("model") or {}).get("sha256")
+        if expected_hash and str(expected_hash).lower() != str(model["sha256"]).lower():
+            raise RuntimeError("扩容模型与原分析不一致，请保留原模型文件")
+        total_before = int(parent.result.get("total_runs", parent.result.get("runs", request.get("runs", 0))))
+        parent_batch = int(request.get("batch_size", 1000))
+        if parent_batch != 1000 or int(parent_runtime.get("batch_size", 0)) != 1000:
+            raise RuntimeError("Formal Lite extensions require the original fixed batch_size=1000")
+        if batch_size is not None and int(batch_size) != parent_batch:
+            # CUDA AMP can choose different convolution kernels for a different
+            # batch shape. That occasionally changes a near-tied argmax, which
+            # is unacceptable for an atomic strict-seed extension.
+            raise RuntimeError("当前 CUDA AMP 下 Batch 会改变少数逐局动作；严格扩容必须继承原 Batch")
+        result_discards = _result_candidate_pairs(parent.result)
+        if (additional_runs is None) == (discards is None):
+            raise RuntimeError("provide exactly one extension mode")
+        if discards is not None:
+            existing = set()
+            for item in request.get("discards", []):
+                if isinstance(item, dict):
+                    tile = str(item.get("tile", "")).strip()
+                    existing.add(f"riichi:{tile}" if item.get("riichi") else tile)
+                else:
+                    existing.add(str(item).strip())
+            # A previous candidate extension may have added candidates that are
+            # present in result.candidates but not in the original request.
+            existing.update(_result_candidate_ids(parent.result))
+            additions = [item.model_dump() for item in discards]
+            addition_ids = [
+                f"riichi:{item['tile']}" if item.get("riichi") else item["tile"]
+                for item in additions
+            ]
+            if any(candidate in existing for candidate in addition_ids):
+                raise RuntimeError("追加的打牌选项已经存在于本分析")
+            if result_discards:
+                reference = dict(result_discards[0])
+            else:
+                raw_reference = request["discards"][0]
+                reference = dict(raw_reference) if isinstance(raw_reference, dict) else {"tile": str(raw_reference), "riichi": False}
+            # Re-run only the original reference plus the new candidates. This
+            # preserves paired comparisons without duplicating every old option.
+            request["discards"] = [reference, *additions]
+            request["runs"] = total_before
+            request["seed"] = int(parent.result.get("seed", request.get("seed", 0)))
+            request["extension_mode"] = "candidates"
+            request["added_candidates"] = addition_ids
+        else:
+            # Run extensions must cover every candidate currently in the result.
+            # Reusing only the original request.discards would omit candidates
+            # added by an earlier candidate extension and make the atomic merge
+            # fail with a KeyError on the first missing candidate.
+            if result_discards:
+                request["discards"] = result_discards
+            request["runs"] = int(additional_runs)
+            request["seed"] = int(parent.result.get("seed", request.get("seed", 0))) + total_before
+            request["extension_mode"] = "runs"
+        request["batch_size"] = parent_batch
+        request["extension_of"] = str(run_id)
+        return self._create_job(request, extension_of=run_id)
+
     def _monitor(self, job: Job) -> None:
         while True:
             try:
@@ -163,10 +318,23 @@ class JobManager:
     def _handle_event(self, job: Job, event: dict[str, Any]) -> None:
         event = {"at": utc_now().isoformat(), **event}
         kind = event.get("type")
+        if kind == "batch_completed":
+            job.progress = {key: event[key] for key in ("discard", "completed", "total") if key in event}
+        elif kind == "gpu_status":
+            job.gpu_status = event
         if kind == "completed":
-            self._finish(job, "completed", result=event.get("result"))
-            event = {"type": "completed", "result": job.result}
+            try:
+                self._finish(job, "completed", result=event.get("result"))
+                event = {"type": "completed", "result": job.result}
+            except BaseException as exc:
+                kind = "failed"
+                self._finish(job, "failed", error=f"extension merge failed: {exc}")
+                event = {"type": "failed", "error": job.error}
         elif kind == "failed":
+            diagnostic_log = self._record_worker_traceback(job, event.get("traceback"))
+            if diagnostic_log:
+                job.diagnostic_log = diagnostic_log
+                event["diagnostic_log"] = diagnostic_log
             self._finish(job, "failed", error=event.get("error", "simulation failed"))
         job.publish(event)
         if kind in {"completed", "failed"}:
@@ -192,11 +360,34 @@ class JobManager:
                 raw_result=raw_result,
                 gpu_telemetry=job.gpu_summary,
             )
+            if job.extension_of is not None:
+                parent = self.get(job.extension_of)
+                if parent.result is None:
+                    raise RuntimeError("extension parent has no result")
+                parent.result = merge_results(parent.result, result, str(job.run_id))
+                parent.updated_at = utc_now()
+                self._persist(parent)
+                result = parent.result
         job.status = status
         job.result = result
         job.error = error
         job.updated_at = utc_now()
         self._persist(job)
+
+    def _record_worker_traceback(self, job: Job, worker_traceback: Any) -> str | None:
+        if not isinstance(worker_traceback, str) or not worker_traceback.strip():
+            return None
+        filename = f"worker-{job.run_id}.log"
+        path = self.logs_dir / filename
+        try:
+            path.write_text(
+                f"MortalSim worker failure\nrun_id: {job.run_id}\nrecorded_at: {utc_now().isoformat()}\n\n"
+                f"{worker_traceback}",
+                encoding="utf-8",
+            )
+        except OSError:
+            return None
+        return filename
 
     def cancel(self, run_id: UUID) -> Job:
         job = self.get(run_id)
@@ -219,7 +410,15 @@ class JobManager:
 
     def list(self) -> list[Job]:
         with self.lock:
-            return sorted(self.jobs.values(), key=lambda job: job.created_at, reverse=True)
+            return sorted(
+                (job for job in self.jobs.values() if job.extension_of is None),
+                key=lambda job: job.created_at,
+                reverse=True,
+            )
+
+    def active_tasks(self) -> list[dict[str, Any]]:
+        with self.lock:
+            return [self.task_record(job) for job in self.jobs.values() if job.status in {"queued", "running"}]
 
     def delete(self, run_id: UUID) -> None:
         job = self.get(run_id)
@@ -231,7 +430,7 @@ class JobManager:
 
     def _persist(self, job: Job) -> None:
         payload = {
-            "schema_version": 1,
+            "schema_version": 3,
             "run_id": str(job.run_id),
             "status": job.status,
             "created_at": job.created_at.isoformat(),
@@ -239,6 +438,8 @@ class JobManager:
             "request": job.request,
             "result": job.result,
             "error": job.error,
+            "diagnostic_log": job.diagnostic_log,
+            "extension_of": str(job.extension_of) if job.extension_of else None,
         }
         path = self.runs_dir / f"{job.run_id}.json"
         temporary = path.with_suffix(".json.tmp")
@@ -247,7 +448,7 @@ class JobManager:
 
     def record(self, job: Job) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": 3,
             "run_id": str(job.run_id),
             "status": job.status,
             "created_at": job.created_at.isoformat(),
@@ -255,4 +456,17 @@ class JobManager:
             "request": job.request,
             "result": job.result,
             "error": job.error,
+            "diagnostic_log": job.diagnostic_log,
+            "extension_of": str(job.extension_of) if job.extension_of else None,
+        }
+
+    def task_record(self, job: Job) -> dict[str, Any]:
+        return {
+            "run_id": str(job.run_id),
+            "status": job.status,
+            "extension_of": str(job.extension_of) if job.extension_of else None,
+            "request": job.request,
+            "progress": job.progress,
+            "gpu_status": job.gpu_status,
+            "created_at": job.created_at.isoformat(),
         }
