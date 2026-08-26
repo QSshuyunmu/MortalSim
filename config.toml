@@ -1,0 +1,34 @@
+# MortalSim QQ Bot 配置
+# 修改后重启 bot.py 生效
+
+[bot]
+# OneBot 11 配置（NapCat / Lagrange / go-cqhttp）
+self_qq = "3983079058"                                 # 机器人 QQ 号（用于识别 @）
+onebot_http_url = "http://127.0.0.1:5700"        # OneBot HTTP API 地址
+onebot_ws_url = "ws://127.0.0.1:5701"            # OneBot 正向 WebSocket（消息事件）
+listen_port = 0
+auto_reload = true                               # 代码保存后自动重载                                  # 0 = 只使用 ws 事件；备用 HTTP 上报端口（未用）
+group_whitelist = [781398797, 852636730]      # 仅允许这些群使用
+admin_qq = ["2361035324"]                          # 唯一管理员 QQ
+
+[mortalsim]
+api_base = "http://127.0.0.1:50715"              # MortalSim 本地 API（需固定端口启动）
+model_id = "mortal-0a88ddad649804d0"             # 本机已导入模型
+rayon_threads = 20                               # CPU 线程（FFI 调用）
+default_runs = 500                               # 群聊默认局数
+max_runs = 10000
+max_candidates = 4                                # 单次最大候选数                                  # 单次最大局数
+timeout_seconds = 0                             # 0 = 不设超时限制                           # 单任务最长等待（秒）
+
+[quota]
+quota_enabled = false                            # 取消每日限额
+max_requests_per_user_per_day = 999999           # (已取消限额)
+max_games_per_user_per_day = 999999999         # (已取消限额)
+max_global_queued = 5                            # 全局排队上限
+cooldown_seconds = 60                            # 同一用户冷却
+db_path = "data/quota.db"
+
+[render]
+tile_assets_dir = "D:\\tenhoulib\\MortalSim-Local-v0.3.0-rc.1-new10\\_internal\\apps\\web\\dist\\tiles"
+font_path = "C:\\Windows\\Fonts\\msyh.ttc"       # 微软雅黑
+output_dir = "data/png"

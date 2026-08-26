@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+logs/
+data/
+napcat/
+napcat_shell/
+*.zip
+.vscode/
+.idea/
