@@ -63,7 +63,7 @@ typing-inspection==0.4.2
     # via
     #   fastapi
     #   pydantic
-uvicorn==0.46.0
+uvicorn==0.52.4
     # via -r requirements-app.txt
 
 # The following packages are considered to be unsafe in a requirements file:
