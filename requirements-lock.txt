@@ -20,7 +20,7 @@ et-xmlfile==2.0.0
     # via openpyxl
 fastapi==0.137.1
     # via -r requirements-app.txt
-filelock==3.32.0
+filelock==3.32.4
     # via torch
 fsspec==2026.6.0
     # via torch
