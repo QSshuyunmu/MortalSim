@@ -540,7 +540,7 @@ impl CustomKyokuRunner {
                 // ---- Marginal subfamily (mean-field) scheme ----
                 // Pass 1: sample a joint-deal pool uniformly, run the forced
                 // prefix only, and record per-player marginal log-likelihoods.
-                let sub_n = (count as usize * 2).max(4000).min(20000);
+                let sub_n = (count as usize * 2).max(100).min(2000);
                 let mut sub_hands: Vec<[super::prefix::HandAssignment; 4]> = Vec::with_capacity(sub_n);
                 let mut sub_games: Vec<GameState> = Vec::with_capacity(sub_n);
                 for i in 0..sub_n {
@@ -804,31 +804,33 @@ impl CustomKyokuRunner {
                             if g.first_pon {
                                 g.is_first = false;
                                 g.first_pon = false;
-                                g.pending_first_meld_discard = true;
-                                let kawa = st.last_kawa_tile();
-                                if let Some(pai) = kawa {
-                                    let akas = st.akas_in_hand();
-                                    let can_aka = match pai.as_u8() {
-                                        tu8!(5m) => akas[0],
-                                        tu8!(5p) => akas[1],
-                                        tu8!(5s) => akas[2],
-                                        _ => false,
-                                    };
-                                    let consumed = if can_aka {
-                                        [pai.akaize(), pai.deaka()]
-                                    } else {
-                                        [pai.deaka(); 2]
-                                    };
-                                    g.reactions[pid] = EventExt::no_meta(Event::Pon {
-                                        actor: pid as u8,
-                                        target: st.last_cans().target_actor,
-                                        pai,
-                                        consumed,
-                                    });
-                                } else {
-                                    g.ended = true;
-                                    g.error_msg = Some("first_action_pon_unavailable".to_owned());
+                                if st.last_cans().can_pon {
+                                    g.pending_first_meld_discard = true;
+                                    let kawa = st.last_kawa_tile();
+                                    if let Some(pai) = kawa {
+                                        let akas = st.akas_in_hand();
+                                        let can_aka = match pai.as_u8() {
+                                            tu8!(5m) => akas[0],
+                                            tu8!(5p) => akas[1],
+                                            tu8!(5s) => akas[2],
+                                            _ => false,
+                                        };
+                                        let consumed = if can_aka {
+                                            [pai.akaize(), pai.deaka()]
+                                        } else {
+                                            [pai.deaka(); 2]
+                                        };
+                                        g.reactions[pid] = EventExt::no_meta(Event::Pon {
+                                            actor: pid as u8,
+                                            target: st.last_cans().target_actor,
+                                            pai,
+                                            consumed,
+                                        });
+                                        continue;
+                                    }
                                 }
+                                g.ended = true;
+                                g.error_msg = Some("first_action_pon_unavailable".to_owned());
                                 continue;
                             }
                             // 6. Daiminkan (大明杠)
@@ -1417,6 +1419,10 @@ impl CustomKyokuRunner {
                     .ok();
                 metrics
                     .set_item("final_tenpai", target_state.shanten() == 0)
+                    .ok();
+                let oya_state = &ctx.player_states[g.oya as usize];
+                metrics
+                    .set_item("dealer_tenpai", oya_state.shanten() == 0)
                     .ok();
                 metrics
                     .set_item("riichi_declared", target_state.self_riichi_declared())

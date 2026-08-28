@@ -157,21 +157,23 @@ pub fn validate_inputs(
     ensure!(target_seat < 4, "target_seat must be 0..3");
     ensure!(oya < 4, "oya must be 0..3");
     ensure!(x >= 1 && x <= 18, "x must be in 1..=18");
+    let tp_len = target_past.len();
     ensure!(
-        target_past.len() == (x - 1) as usize,
-        "target_past length ({}) must equal x - 1 ({})",
-        target_past.len(),
-        x - 1
+        tp_len == (x - 1) as usize || tp_len == x as usize,
+        "target_past length ({}) must be x - 1 ({}) or x ({})",
+        tp_len,
+        x - 1,
+        x
     );
     for p in 0..4u8 {
         if p != target_seat {
-            let exp = expected_discards(p, target_seat, oya, x);
+            let r_len = opponent_rivers[p as usize].len();
             ensure!(
-                opponent_rivers[p as usize].len() == exp,
-                "opponent {} river length ({}) must equal expected ({})",
+                r_len >= ((x - 1) as usize).saturating_sub(1) && r_len <= (x + 1) as usize,
+                "opponent {} river length ({}) out of valid range for turn {}",
                 p,
-                opponent_rivers[p as usize].len(),
-                exp
+                r_len,
+                x
             );
         }
     }
@@ -259,12 +261,13 @@ pub fn build_prefix_game_from_hands(
                 player_draws.insert((p, turn_idx), tile);
             }
         }
-        if p == target_seat {
-            // The target's decision-point draw (14th tile).
+        if p == target_seat && target_past.len() < x as usize {
+            // The target's decision-point draw (14th tile) in discard timing.
             player_draws.insert((target_seat, (x - 1) as usize), target_14[13]);
         }
     }
 
+    // Build the chronological timeline (draws + forced discards).
     // Build the chronological timeline (draws + forced discards).
     let mut scripted_draws: Vec<Tile> = Vec::new();
     let mut forced_steps: Vec<PrefixStep> = Vec::new();
@@ -276,34 +279,49 @@ pub fn build_prefix_game_from_hands(
     scripted_draws.push(oya_draw_0);
     player_draw_counters[oya as usize] += 1;
 
-    let pos_target = (target_seat + 4 - oya) % 4;
-    'outer: for r in 1..=x {
+    let is_post_discard_reaction = target_past.len() == x as usize;
+
+    'outer: for r in 1..=(x + 1) {
         for offset in 0..4u8 {
             let p = (oya + offset) % 4;
-            let pos_p = offset;
+            let river_idx = (r - 1) as usize;
 
-            if r == x && pos_p == pos_target {
-                let draw_tile = *player_draws
-                    .get(&(p, (x - 1) as usize))
-                    .context("target turn x draw missing")?;
-                scripted_draws.push(draw_tile);
-                break 'outer;
-            }
+            let has_discard = if p == target_seat {
+                river_idx < target_past.len()
+            } else {
+                river_idx < opponent_rivers[p as usize].len()
+            };
 
-            if r == x && pos_p > pos_target {
+            if !has_discard {
+                if p == target_seat && !is_post_discard_reaction && r == x {
+                    // Standard turn x discard decision point reached!
+                    let draw_tile = *player_draws
+                        .get(&(p, (x - 1) as usize))
+                        .context("target turn x draw missing")?;
+                    scripted_draws.push(draw_tile);
+                    break 'outer;
+                }
+                let remaining_any = (0..4u8).any(|check_p| {
+                    if check_p == target_seat {
+                        river_idx < target_past.len()
+                    } else {
+                        river_idx < opponent_rivers[check_p as usize].len()
+                    }
+                });
+                if !remaining_any {
+                    break 'outer;
+                }
                 continue;
             }
 
             if !(r == 1 && p == oya) {
                 let d_idx = player_draw_counters[p as usize];
-                let draw_tile = *player_draws
-                    .get(&(p, d_idx))
-                    .with_context(|| format!("draw missing for player {} turn {}", p, r))?;
-                scripted_draws.push(draw_tile);
-                player_draw_counters[p as usize] += 1;
+                if let Some(&draw_tile) = player_draws.get(&(p, d_idx)) {
+                    scripted_draws.push(draw_tile);
+                    player_draw_counters[p as usize] += 1;
+                }
             }
 
-            let river_idx = (r - 1) as usize;
             let discard_spec = if p == target_seat {
                 target_past[river_idx]
             } else {
@@ -689,11 +707,11 @@ pub fn sample_prefix_game(
         hands[p as usize] = HandAssignment { current_13, kept_draws: kept_tiles };
     }
 
-    // Target: kept subset among the first 13 tiles.
+    // Target: kept subset among the first 13 tiles (using actual target_past.len()).
     {
-        let kp = (x - 1) as usize;
+        let kp = target_past.len();
         let tsumogiri_count = target_past.iter().filter(|d| d.tsumogiri).count();
-        let num_kept = kp - tsumogiri_count;
+        let num_kept = (kp - tsumogiri_count).min(13);
         let current_13: [Tile; 13] = target_14[..13].try_into().unwrap();
 
         let mut kept_indices: Vec<usize> = (0..13).collect();

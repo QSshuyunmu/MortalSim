@@ -158,7 +158,7 @@ class JobManager:
     def create(self, request: RunRequest) -> Job:
         # Do not persist the deprecated legacy first_tsumo field for new
         # 14-tile requests. Existing history records retain it verbatim.
-        data = request.model_dump(exclude_none=True)
+        data = request.model_dump(by_alias=True, exclude_none=True)
         # Ensure candidate_id is explicitly present in discards dicts
         for idx, cand_obj in enumerate(request.discards):
             if idx < len(data.get("discards", [])):

@@ -399,16 +399,21 @@ def _load_engine(
 
 
 def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
-    """Resolve public relative-seat inputs to libriichi's absolute seats."""
+    """Resolve public relative-seat inputs to libriichi's table seats.
+    
+    In table coordinates:
+    Seat 0 = 东家 (Dealer / 亲)
+    Seat 1 = 南家 (下家 / 子)
+    Seat 2 = 西家 (对家 / 子)
+    Seat 3 = 北家 (上家 / 子)
+    """
     if "round" not in request:
-        # Historical schema-v2 requests used an explicit dealer seat while
-        # always simulating an East round. Preserve that replay behavior.
         oya = int(request.get("oya", 0))
         return {
             "round": f"E{oya + 1}",
             "kyoku": 1,
             "bakaze": "E",
-            "oya": oya,
+            "oya": 0,
             "honba": int(request.get("honba", 0)),
             "kyotaku": int(request.get("kyotaku", 0)),
             "scores": [int(value) for value in request.get("absolute_scores", [25_000] * 4)],
@@ -420,9 +425,13 @@ def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
     wind_index = "ESW".index(round_id[0])
     round_number = int(round_id[1])
     kyoku = wind_index * 4 + round_number
-    # In single-kyoku simulations with absolute seats (0=East, 1=South, 2=West, 3=North),
-    # the dealer (oya) is always seat 0 (East).
+
+    # On table: Dealer is always Seat 0!
     oya = 0
+
+    target_seat = request.get("target_seat")
+    effective_target = int(target_seat) if target_seat is not None else 0
+
     honba = int(request.get("honba", 0))
     kyotaku = int(request.get("kyotaku", 0))
     relative = request.get("scores") or {}
@@ -437,17 +446,23 @@ def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("honba and kyotaku must be between 0 and 99")
     if any(value < 0 or value % 100 for value in all_relative):
         raise ValueError("all scores must be non-negative multiples of 100")
+    
+    # Map relative scores (self, shimo, toimen, kami) onto table seats (0=东, 1=南, 2=西, 3=北)
+    # self is sitting at effective_target!
     scores = [0] * 4
     for offset, value in enumerate(all_relative):
-        scores[(oya + offset) % 4] = value
+        scores[(effective_target + offset) % 4] = value
+
     return {
         "round": round_id,
         "kyoku": kyoku,
         "bakaze": round_id[0],
-        "oya": oya,
+        "round_number": round_number,
+        "oya": 0,
         "honba": honba,
         "kyotaku": kyotaku,
         "scores": scores,
+        "target_seat": effective_target,
         "relative_scores": {
             "self": values[0],
             "shimocha": values[1],
@@ -498,10 +513,11 @@ def _parse_inputs(request: dict[str, Any]):
             candidate["engine_tile"] = "1m"
             candidate["candidate"] = "ron"
             continue
-        if candidate.get("pass") or candidate.get("candidate") == "pass":
+        if candidate.get("pass") or candidate.get("pass_action") or candidate.get("candidate") == "pass":
             candidate["tile"] = "pass"
             candidate["engine_tile"] = "1m"
             candidate["candidate"] = "pass"
+            candidate["pass"] = True
             continue
         if candidate.get("chi") or str(candidate.get("candidate", "")).startswith("chi:"):
             candidate["tile"] = "chi"
@@ -560,6 +576,8 @@ def _parse_inputs(request: dict[str, Any]):
         target_seat = int(target_seat)
         if not 0 <= target_seat <= 3:
             raise ValueError(f"target_seat 必须在 0..3 范围内，当前为 {target_seat}")
+    else:
+        target_seat = context["oya"]
 
     x = int(request.get("x", 1))
     if not 1 <= x <= 18:
@@ -834,9 +852,15 @@ def _resolve_next_hanchan_state(
     oya = int(context.get("oya", 0))
     honba = int(context.get("honba", 0))
     kyotaku_next = int(result.get("kyotaku_remaining", 0))
-    dealer_tenpai = bool((metrics or {}).get("final_tenpai"))
 
-    renchan = outcome == "self_win" or (outcome == "draw" and dealer_tenpai)
+    # Check if OYA (dealer) won or is tenpai in a draw
+    agari_actors = result.get("agari_actors", [])
+    if isinstance(agari_actors, bytes):
+        agari_actors = list(agari_actors)
+    oya_won = oya in agari_actors if agari_actors else (outcome == "self_win" and context.get("target_seat", oya) == oya)
+    dealer_tenpai = bool((metrics or {}).get("dealer_tenpai") if (metrics or {}).get("dealer_tenpai") is not None else (metrics or {}).get("final_tenpai", False))
+
+    renchan = oya_won or (outcome == "draw" and dealer_tenpai)
 
     # Game-end predicates validated against real Tenhou data.
     if any(score < 0 for score in scores):
@@ -912,11 +936,22 @@ def _summarize_hanchan(
 ) -> dict[str, Any]:
     """Aggregate NAGA-style final-hanchan expectations from simulated rows."""
     rows = sorted(rows, key=_row_seed_key)
-    target_seat = int(target_seat if target_seat is not None else context.get("target_seat", context["oya"]))
+    target_seat = int(target_seat if target_seat is not None else context.get("target_seat", 0))
 
     expected_ranks: list[float] = []
     rank_prob_sums = [0.0, 0.0, 0.0, 0.0]
     pt_rows = {name: [] for name in HANCHAN_PT_TABLES}
+
+    round_id = str(context.get("round", "E1")).upper()
+    round_number = int(context.get("round_number", int(round_id[1]) if len(round_id) >= 2 and round_id[1].isdigit() else 1))
+
+    # In Tenhou Houou logs, dealer in round N is player (N - 1) % 4.
+    # On our table: Seat 0 is the current dealer (风=东).
+    # Seat P's current wind is P (0=东, 1=南, 2=西, 3=北).
+    # To map Table Seat P to Tenhou permanent Player K in round N:
+    # K = (P + round_number - 1) % 4
+    # The dealer (Table Seat 0) maps to Tenhou Player (round_number - 1) % 4 (the oya in round N!).
+    # Target Seat (Table Seat target_seat) maps to Tenhou Player (target_seat + round_number - 1) % 4.
 
     for row in rows:
         result = row.get("result") or {}
@@ -930,14 +965,27 @@ def _summarize_hanchan(
                 continue
             probs = _final_rank_distribution([int(value) for value in scores], target_seat)
         else:
+            next_kyoku_num = state["kyoku_num"]
+            next_oya_tenhou = (next_kyoku_num - 1) % 4 if state["bakaze"] in ("E", "S", "W") else 0
+            
+            # Map next kyoku table scores back to Tenhou permanent player coordinates
+            table_scores = state["scores"]
+            tenhou_scores = [0] * 4
+            for t_seat in range(4):
+                # When oya in next kyoku is table seat (0 if renchan, 1 if dealer rotated):
+                k = (t_seat + round_number - 1) % 4
+                tenhou_scores[k] = table_scores[t_seat]
+            
+            tenhou_target_player = (target_seat + round_number - 1) % 4
+
             probs = model.predict_seat(
-                state["scores"],
+                tenhou_scores,
                 state["bakaze"],
                 state["kyoku_num"],
                 state["honba"],
                 state["kyotaku"],
-                state["oya"],
-                target_seat,
+                next_oya_tenhou,
+                tenhou_target_player,
             )
         probs = [float(value) for value in probs]
         expected_ranks.append(sum((rank + 1) * probs[rank] for rank in range(4)))
@@ -1552,13 +1600,13 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
         rows: list[dict[str, Any]] = []
         for offset in range(0, runs, batch_size):
             count = min(batch_size, runs - offset)
-            first_tsumo_agari = bool(first_action.get("tsumo", False))
-            first_ron = bool(first_action.get("ron", False))
-            first_pass = bool(first_action.get("pass", False))
+            first_tsumo_agari = bool(first_action.get("tsumo", False)) or first_action.get("candidate") == "tsumo"
+            first_ron = bool(first_action.get("ron", False)) or first_action.get("candidate") == "ron"
+            first_pass = bool(first_action.get("pass", False)) or bool(first_action.get("pass_action", False)) or first_action.get("candidate") == "pass"
             raw_chi = first_action.get("chi")
             first_chi = [_one_tile(str(t), "吃牌搭子") for t in raw_chi] if raw_chi else None
-            first_pon = bool(first_action.get("pon", False))
-            first_daiminkan = bool(first_action.get("daiminkan", False))
+            first_pon = bool(first_action.get("pon", False)) or str(first_action.get("candidate", "")).startswith("pon")
+            first_daiminkan = bool(first_action.get("daiminkan", False)) or first_action.get("candidate") == "daiminkan"
             raw_fu = first_action.get("follow_up_discard")
             first_follow_up_discard = _one_tile(str(raw_fu), "副露后跟切") if raw_fu else None
 
