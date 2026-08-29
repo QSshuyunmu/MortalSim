@@ -743,6 +743,18 @@ impl CustomKyokuRunner {
                     }
 
                     if pid == g.target_seat as usize {
+                        // Handling post-riichi declaration discard (the riichi declaration discard tile)
+                        if g.pending_first_riichi_discard {
+                            g.pending_first_riichi_discard = false;
+                            let ts = st.last_self_tsumo().is_some_and(|t| t == g.discard_tile);
+                            g.reactions[pid] = EventExt::no_meta(Event::Dahai {
+                                actor: pid as u8,
+                                pai: g.discard_tile,
+                                tsumogiri: ts,
+                            });
+                            continue;
+                        }
+
                         if g.is_first {
                             // 1. Tsumo Agari
                             if g.first_tsumo {

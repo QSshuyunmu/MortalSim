@@ -530,9 +530,11 @@ def _parse_inputs(request: dict[str, Any]):
         if candidate.get("pon") or str(candidate.get("candidate", "")).startswith("pon"):
             candidate["tile"] = "pon"
             candidate["engine_tile"] = "1m"
+            c_target = candidate.get("call_tile")
             c_fu = candidate.get("follow_up_discard")
             fu_str = f">{c_fu}" if c_fu else ""
-            candidate["candidate"] = candidate.get("candidate") or f"pon{fu_str}"
+            target_str = f":{c_target}" if c_target else ""
+            candidate["candidate"] = candidate.get("candidate") or f"pon{target_str}{fu_str}"
             continue
         if candidate.get("daiminkan") or str(candidate.get("candidate", "")) == "daiminkan":
             candidate["tile"] = "daiminkan"

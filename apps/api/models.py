@@ -73,7 +73,9 @@ class DiscardCandidate(BaseModel):
     chi: list[str] | None = None
     pon: bool = False
     daiminkan: bool = False
+    call_tile: str | None = None
     follow_up_discard: str | None = None
+    candidate: str | None = None
 
     @field_validator("tile")
     @classmethod
@@ -96,7 +98,8 @@ class DiscardCandidate(BaseModel):
             return f"chi:{''.join(self.chi)}{fu}"
         if self.pon:
             fu = f">{self.follow_up_discard}" if self.follow_up_discard else ""
-            return f"pon{fu}"
+            target_str = f":{self.call_tile}" if self.call_tile else ""
+            return f"pon{target_str}{fu}"
         if self.daiminkan:
             return "daiminkan"
         if self.kyushu:
