@@ -226,11 +226,13 @@ def _generate_default_rivers(
     target_seat: int,
     oya: int,
     x: int,
+    call_target_tile: str | None = None,
 ) -> tuple[list[tuple[str, bool, bool]], list[list[tuple[str, bool, bool]]]]:
     """当巡目 x >= 2 且用户未提供牌河时，自动生成四家物理合法、无冲突且符合牌理的牌河：
        1. 严格按 字牌 -> 幺九 -> 28 -> 37 -> 456 优先级出牌；
        2. 严禁打出手牌以及手牌附近的牌（±1 邻张/进张/搭子）；
-       3. 首巡四家各打不同牌，绝对避免触发四风连打中途流局。
+       3. 首巡四家各打不同牌，绝对避免触发四风连打中途流局；
+       4. 若指定了副露目标牌 call_target_tile，前驱出牌者在当前巡目的最后一打必须为该牌。
     """
     forbidden = set()
     for t in hand_tiles:
@@ -291,6 +293,7 @@ def _generate_default_rivers(
         return "1z"
 
     pos_target = (target_seat + 4 - oya) % 4
+    preceding_player = (target_seat + 3) % 4
     rivers: list[list[tuple[str, bool, bool]]] = [[], [], [], []]
 
     for r in range(1, x + 1):
@@ -302,7 +305,14 @@ def _generate_default_rivers(
                 break
             if r == x and pos_p > pos_target:
                 continue
-            tile = pick_tile_for_player(p, r, used_this_turn)
+
+            # 若此切是目标前驱在目标反应点前的最后一打，且指定了碰/吃目标牌：
+            if call_target_tile and r == x and p == preceding_player:
+                tile = call_target_tile
+                tile_used_counts[tile] = tile_used_counts.get(tile, 0) + 1
+                used_this_turn.add(tile)
+            else:
+                tile = pick_tile_for_player(p, r, used_this_turn)
             rivers[p].append((tile, False, False))
 
     target_past = rivers[target_seat]
@@ -322,6 +332,8 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
     x_m = re.search(r"(?i)(?:^|(?<=[\s,;]))x[:：=]?(\d{1,2})\b", rest)
     if x_m:
         x_val = int(x_m.group(1))
+        if not (1 <= x_val <= 18):
+            return None, f"巡目参数 x 不合法：{x_val}（必须在 1..18 范围内）"
         rest = rest[:x_m.start()] + " " + rest[x_m.end():]
 
     # 0b. 提取自身座位 seat
@@ -349,20 +361,20 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
 
     # 1. 提取点数 P...
     scores_raw = None
-    scores_m = re.search(r'(?i)\b[pP][:：\s]?([-0-9,\s]+?)(?=\s+[cdCD\d]|\s*$)', rest)
+    scores_m = re.search(r"(?i)\b[pP][:：\s]?([-0-9,\.kK\s，、]+?)(?=\s+[cdCD\d]|\s*$)", rest)
     if scores_m:
         scores_raw = scores_m.group(1).strip()
         rest = rest[:scores_m.start()] + " " + rest[scores_m.end():]
 
     # 2. 提取宝牌 d...
-    dora_m = re.search(r'(?i)\b[dD][:：\s]?([0-9mpsz]{2,4})\b', rest)
+    dora_m = re.search(r'(?i)\b[dD][:：\s]?([0-9mpszrKR]{2,4})\b', rest)
     if not dora_m:
         return None, "缺少宝牌参数，例：d8p 或 d4m"
     dora_raw = dora_m.group(1).strip()
     rest = rest[:dora_m.start()] + " " + rest[dora_m.end():]
 
     # 3. 提取候选 c... (若未提供，后续自动从手牌提取切牌候选)
-    cand_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[cC][:：=]?([a-zA-Z0-9mpszkrKR>:\-_,，、\s\u4e00-\u9fa5]+?)(?=\s+[pPdDeEwWsSxX]|\s*$)', rest)
+    cand_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[cC][:：=]?([a-zA-Z0-9mpszkrKR>:\-_,，、\u4e00-\u9fa5]+?)(?=\s+[pPdDeEwWsSxX]|\s+\d+\b|\s*$)', rest)
     cand_raw = None
     if cand_m:
         cand_raw = cand_m.group(1).strip()
@@ -401,6 +413,14 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
     dora_indicator = dora_to_indicator(dora_norm)
 
     candidates = []
+    # 严格规则校验 1: 单牌数量上限 (全局同种牌不能超过 4 张)
+    from collections import Counter
+    hand_counts = Counter(hand_tiles)
+    for tile_name, cnt in hand_counts.items():
+        base_t = normalize_tile_text(tile_name)
+        if cnt > 4:
+            return None, f"手牌违背规则：同种牌【{base_t}】在手牌中出现了 {cnt} 张（麻将中同种牌最多 4 张）"
+
     if cand_raw is None:
         unique_hand = list(dict.fromkeys(hand_tiles))
         for tile in unique_hand[:4]:
@@ -440,33 +460,96 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
                 candidates.append({"tile": "chi", "riichi": False, "kan": False, "kyushu": False, "chi": c_tiles, "follow_up_discard": fu_tile})
                 continue
             if part.startswith("pon") or part.startswith("碰"):
+                # 支持：
+                # 1. 显式指定碰牌：c=pon:5z>2p / c=碰5z>2p / c=pon5z>2p / c=pon:8m>2p
+                # 2. 简写：c=pon>2p（自动推断手牌唯一对子；若存在多个对子则提示必须指明）
                 fu_tile = None
+                call_part = part
                 if ">" in part:
-                    fu_part = part.split(">", 1)[1].strip()
-                    fu_norm = normalize_tile_text(fu_part)
+                    main_p, fu_p = part.split(">", 1)
+                    call_part = main_p.strip()
+                    fu_norm = normalize_tile_text(fu_p.strip())
                     if len(fu_norm) == 2:
                         fu_tile = fu_norm
-                candidates.append({"tile": "pon", "riichi": False, "kan": False, "kyushu": False, "pon": True, "follow_up_discard": fu_tile})
+
+                # 提取碰的目标牌
+                pon_target = None
+                m_t = re.search(r'(?i)(?:pon|碰)[:：]?([0-9mpsz]{2})', call_part)
+                if m_t:
+                    pon_target = normalize_tile_text(m_t.group(1))
+
+                # 若未显式写碰哪张牌，分析手牌中现存的所有对子/暗刻
+                if not pon_target:
+                    from collections import Counter
+                    hand_counts = Counter(hand_tiles)
+                    pairs = [t for t, count in hand_counts.items() if count >= 2]
+                    if len(pairs) == 1:
+                        pon_target = pairs[0]
+                    elif len(pairs) > 1:
+                        p_str = ", ".join(pairs)
+                        return None, (
+                            f"无法确定碰哪张牌：你的手牌中存在多个对子 [{p_str}]。\n"
+                            f"💡 请在副露中明确指出碰哪张牌，例如：c=pon:{pairs[0]}>{fu_tile or '2p'} 或 c=碰{pairs[0]}>{fu_tile or '2p'}"
+                        )
+                    else:
+                        return None, f"副露错误：手牌中没有可以碰的对子（手牌：{''.join(hand_tiles)}）"
+
+                cand_dict = {
+                    "tile": "pon",
+                    "riichi": False,
+                    "kan": False,
+                    "kyushu": False,
+                    "pon": True,
+                    "call_tile": pon_target,
+                    "follow_up_discard": fu_tile,
+                    "candidate": f"pon:{pon_target}>{fu_tile}" if fu_tile else f"pon:{pon_target}",
+                }
+                candidates.append(cand_dict)
                 continue
             if part in ("daiminkan", "minkan", "大明杠", "明杠"):
                 candidates.append({"tile": "daiminkan", "riichi": False, "kan": False, "kyushu": False, "daiminkan": True})
                 continue
 
-            kan = part.endswith("k")
-            riichi = part.endswith("r")
-            if kan:
-                part = part[:-1]
-            elif riichi:
-                part = part[:-1]
-            tile = normalize_tile_text(part)
+            is_riichi = False
+            is_kan = False
+            clean_part = part.lower().strip()
+            if clean_part.startswith("riichi:") or clean_part.startswith("立直:"):
+                is_riichi = True
+                clean_part = clean_part.split(":", 1)[1].strip()
+            elif clean_part.startswith("riichi") or clean_part.startswith("立直"):
+                is_riichi = True
+                clean_part = re.sub(r'^(?:riichi|立直)\s*', '', clean_part).strip()
+            elif clean_part.startswith("r") and len(clean_part) == 3:
+                is_riichi = True
+                clean_part = clean_part[1:]
+            elif clean_part.endswith("r"):
+                is_riichi = True
+                clean_part = clean_part[:-1]
+            elif clean_part.endswith("k") or clean_part.endswith("杠"):
+                is_kan = True
+                clean_part = clean_part[:-1].rstrip("杠")
+            tile = normalize_tile_text(clean_part)
             if len(tile) != 2:
                 return None, f"候选格式错误：{part}"
-            if kan:
+            # 严格规则校验 2: 切牌候选必须是手牌中实际存在的牌 (赤五与普通五严格区分)
+            tile_in_hand = False
+            if tile in ("0m", "0p", "0s"):
+                tile_in_hand = tile in hand_tiles
+            elif tile in ("5m", "5p", "5s"):
+                tile_in_hand = tile in hand_tiles
+            else:
+                tile_in_hand = any(normalize_tile_text(t) == tile for t in hand_tiles)
+
+            if not tile_in_hand and not is_kan:
+                return None, f"切牌动作违背规则：候选牌【{tile}】不在自家手牌中（当前手牌：{''.join(hand_tiles)}）"
+
+            if is_kan:
                 if hand_tiles.count(tile) < 4:
                     return None, f"暗杠候选 {tile}k 不合法：手牌中 {tile} 只有 {hand_tiles.count(tile)} 张（需要 4 张）。"
-                candidates.append({"tile": tile, "riichi": False, "kan": True})
+                candidates.append({"tile": tile, "riichi": False, "kan": True, "candidate": f"kan:{tile}"})
             else:
-                candidates.append({"tile": tile, "riichi": riichi, "kan": False})
+                c_name = f"riichi:{tile}" if is_riichi else tile
+                candidates.append({"tile": tile, "riichi": is_riichi, "kan": False, "candidate": c_name})
 
     if not candidates:
         return None, "没有识别到候选。"
@@ -479,9 +562,14 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         target_past, opp_rivers, prefix_melds, river_err = _parse_river_spec(river_raw, effective_target_seat, x_val, 0)
         if river_err:
             return None, river_err
-    elif x_val >= 2:
-        # 当巡目 x >= 2 且用户未提供牌河时，自动生成四家合法默认牌河
-        target_past, opp_rivers = _generate_default_rivers(hand_tiles, effective_target_seat, 0, x_val)
+    elif x_val >= 2 or (x_val >= 1 and effective_target_seat != 0):
+        # 提取副露目标牌
+        call_tile = None
+        for cand in candidates:
+            if cand.get("call_tile"):
+                call_tile = cand["call_tile"]
+                break
+        target_past, opp_rivers = _generate_default_rivers(hand_tiles, effective_target_seat, 0, x_val, call_target_tile=call_tile)
 
     request: dict[str, Any] = {
         "hand": hand_norm,
@@ -501,14 +589,17 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
     }
 
     if scores_raw:
-        scores_parts = [s.strip() for s in re.split(r'[,，\s]+', scores_raw) if s.strip()]
+        scores_parts = [s.strip().lower() for s in re.split(r'[,，、\s]+', scores_raw) if s.strip()]
         if len(scores_parts) == 4:
             try:
                 parsed_scores = []
                 for p in scores_parts:
-                    val = int(p)
-                    if abs(val) < 1000:
-                        val *= 100
+                    if p.endswith("k"):
+                        val = int(float(p[:-1]) * 1000)
+                    else:
+                        val = int(float(p))
+                        if abs(val) < 1000:
+                            val *= 100
                     parsed_scores.append(val)
                 target_p = target_seat_val if target_seat_val is not None else 0
                 rel_self = parsed_scores[target_p]
@@ -516,9 +607,19 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
                 rel_toimen = parsed_scores[(target_p + 2) % 4]
                 rel_kami = parsed_scores[(target_p + 3) % 4]
                 request["scores"] = {"self": rel_self, "shimocha": rel_shimo, "toimen": rel_toimen}
-            except ValueError:
-                return None, f"点数格式错误：{scores_raw}"
+            except Exception:
+                return None, f"点数格式错误：{scores_raw}（支持 P180,200,390,230 或 P18k,20k,39k,23k）"
 
+    if target_past is not None and x_val >= 1:
+        tp_len = len(target_past)
+        if tp_len not in (max(0, x_val - 1), x_val):
+            seat_names = ['东', '南', '西', '北']
+            s_name = seat_names[effective_target_seat]
+            return None, (
+                f'牌河张数错误：你设定了【{s_name}家 第 {x_val} 巡】，'
+                f'自家历史舍牌应为 {max(0, x_val - 1)} 张（摸牌决策）或 {x_val} 张（切牌后反应决策），'
+                f'当前输入了 {tp_len} 张。'
+            )
     return request, None
 
 

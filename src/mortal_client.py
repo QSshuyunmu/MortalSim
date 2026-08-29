@@ -35,7 +35,14 @@ class MortalClient:
         if resp.status_code != 200:
             raise MortalSimError(f"查询活跃任务失败 HTTP {resp.status_code}: {resp.text[:300]}")
         data = resp.json()
-        return [str(item.get("run_id")) for item in data if item.get("run_id")]
+        if not data:
+            return []
+        if isinstance(data, dict):
+            run_id = data.get("run_id")
+            return [str(run_id)] if run_id else []
+        if isinstance(data, list):
+            return [str(item.get("run_id")) for item in data if isinstance(item, dict) and item.get("run_id")]
+        return []
 
     async def _wait_until_free(self, deadline: float, poll_seconds: float = 4.0) -> None:
         """持续等待 MortalSim 空闲（不再有排队/运行任务）。"""

@@ -26,7 +26,10 @@ log = logging.getLogger("bot")
 
 
 def load_config(path: str | Path = "config.toml") -> dict:
-    with open(path, "rb") as f:
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent.parent / p
+    with open(p, "rb") as f:
         return tomllib.load(f)
 
 
@@ -349,9 +352,11 @@ class Bot:
         self.quota.reserve(user_id, runs)
         position = self.active + self.tasks.qsize() + 1
         await self.tasks.put({"user_id": user_id, "group_id": group_id, "request": request, "runs": runs})
+        # 总是发送简短确认：进入模拟进程即告知用户已收到并在推演
+        cand_count = len(request.get("discards", []))
         await self.send_group_text(
             group_id,
-            f"已收到，当前排队第 {position} 位。本次 {runs} 局 × {len(request['discards'])} 候选，预计 5~10 分钟。",
+            f"🎲 已接收，正在推演 {runs} 局 × {cand_count} 个候选，请稍候...",
         )
 
     # ---------- 消息处理 ----------
@@ -392,24 +397,12 @@ class Bot:
         if not text or text.startswith(("/help", "帮助", "help")):
             await self.send_group_text(
                 group_id,
-                "【MortalSim 早巡与全动作模拟器 指令帮助】\n"
-                "• /help 本帮助  • /state 查看队列与统计  • /取消 撤回任务\n\n"
-                "【基础模拟格式】\n"
-                "/sim 手牌 d宝牌 c候选 [局-本场] [局数] [P点数] [x=巡目] [seat=座次] [河=牌河]\n\n"
-                "【典型功能使用示例】\n"
-                "1. 经典第1打决策：\n"
-                "   /sim 123456789m789s12p d8p c1p,2p E1-0 1000\n\n"
-                "2. 摸牌巡打牌/暗杠/自摸：\n"
-                "   /sim 123456789m789s11p d8p c=tsumo,1p,9s E1-0 1000\n\n"
-                "3. 早巡牌河推理模拟 (x<=6)：\n"
-                "   /sim 234699m24789s336p d1z c9m,3p,6p E1-0 1000 seat=南 x=2 河=4z,1st/2zt/4z/9m\n\n"
-                "4. 荣和 vs 见逃决策：\n"
-                "   /sim 567m0678p123s789s7z d8m c=ron,pass E2-1 P181,211,397,211 seat=西 x=3 河=2zt,1pt,3zt/5zt,1zt,1st/1pt,2z/2z,7z\n\n"
-                "5. 吃碰副露 vs 门清决策：\n"
-                "   /sim 2334m0678p456s77z d1p c=chi:24m>7z,pon>7z,pass E1-0 500 seat=南 x=2 河=1z,3m/1s/9p/9s\n\n"
-                "【语法说明】\n"
-                "• 动作候选支持：打牌(1m/1mr)、暗杠(6sk)、自摸(tsumo)、荣和(ron)、见逃(pass)、吃牌(chi:24m>7z)、碰牌(pon>7z)、大明杠(minkan)、九种九牌(kk)\n"
-                "• 牌河可用 / 顺序隔开各家，后缀 t 或 ^ 表示摸切",
+                "🀄 【MortalSim 模拟器指令速查】\n"
+                "格式：/sim 手牌 d宝牌 [c候选] [局况] [点数] [座次] [巡目] [局数]\n"
+                "• 基础切牌：/sim 123456789m789s12p d8p E1-0 1000\n"
+                "• 副露/见逃：/sim 77m4p4056799s112z d5s c=pon>4p,pass seat=东 x=2\n"
+                "• 快捷选项：候选可省略自动提取；牌河可省略自动生成；点数写 P180,200,390,230 或 18k,20k,39k,23k\n"
+                "• 控制指令：/state 查看状态 | /取消 撤回任务",
             )
             return
 
@@ -520,33 +513,56 @@ class Bot:
         if not result.get("candidates"):
             raise MortalSimError("结果中没有候选数据")
 
-        # 推荐第一打（后端结果无推荐字段，这里用前端同款规则：以凤七段 pt 为准，不一致时按 pt）
-        candidates = result["candidates"]
-        point_best = max(candidates, key=lambda c: (c.get("value") or {}).get("point", {}).get("value") if isinstance(c.get("value"), dict) else float("-inf"))
-        pt_best = max(
-            candidates,
-            key=lambda c: ((c.get("hanchan") or {}).get("dan_pt_ev") or {}).get("houou_7", {}).get("value")
-            if (c.get("hanchan") or {}).get("dan_pt_ev") else float("-inf"),
-        )
-        recommended = pt_best if point_best.get("discard") != pt_best.get("discard") else point_best
+        # 注入请求配置供 render_png 完整读取手牌、局况、宝牌
+        result["config"] = job.get("request", {})
 
         def label(c):
-            if c.get("first_kyushu"):
+            if not isinstance(c, dict):
+                return "?"
+            if c.get("first_kyushu") or c.get("candidate") == "kyushu:kk":
                 return "kk"
-            base = c.get("discard") or "?"
+            if c.get("first_tsumo") or c.get("candidate") == "tsumo":
+                return "自摸"
+            if c.get("first_ron") or c.get("candidate") == "ron":
+                return "荣和"
+            if c.get("first_pass") or c.get("candidate") == "pass":
+                return "见逃"
+            cand_name = str(c.get("candidate") or c.get("discard") or "?")
+            if cand_name.startswith("chi:"):
+                return f"吃 {cand_name[4:]}"
+            if cand_name.startswith("pon"):
+                return f"碰 {cand_name[3:]}" if len(cand_name) > 3 else "碰"
+            if cand_name == "daiminkan":
+                return "大明杠"
+            base = c.get("discard") or cand_name
             if c.get("first_kan"):
                 return base + "k"
             return base + ("r" if c.get("first_riichi") else "")
 
+        candidates = result["candidates"]
+        def _pt_value(c):
+            v = (c.get("value") or {}).get("point", {}).get("value")
+            return v if isinstance(v, (int, float)) else float("-inf")
+        def _han_pt_value(c):
+            v = ((c.get("hanchan") or {}).get("dan_pt_ev") or {}).get("houou_7", {}).get("value")
+            return v if isinstance(v, (int, float)) else float("-inf")
+
+        valid_candidates = [c for c in candidates if isinstance(c.get("value"), dict)]
+        point_best = max(valid_candidates if valid_candidates else candidates, key=_pt_value)
+        pt_best = max(valid_candidates if valid_candidates else candidates, key=_han_pt_value)
+        recommended = pt_best if label(point_best) != label(pt_best) else point_best
         rec_tile = label(recommended)
 
         png_path = Path(self.render_cfg["output_dir"]) / f"{run_id}.png"
+        import random
+        selected_theme = random.choice(["obsidian", "emerald", "titanium"])
         render_png(
             result,
             asset_dir=self.render_cfg["tile_assets_dir"],
             font_path=self.render_cfg["font_path"],
             output_path=png_path,
             recommended_tile=rec_tile,
+            theme=selected_theme,
         )
         x_turn = item.get("request", {}).get("x", 1)
         action_label = f"第 {x_turn} 打" if x_turn > 1 else "第一打"
@@ -588,24 +604,32 @@ def _pid_alive(pid: int) -> bool:
     return ctypes.windll.kernel32.GetLastError() == 5
 
 
+_bot_mutex_handle = None
+
+_bot_mutex_handle = None
+
 def _acquire_singleton() -> bool:
-    """单实例锁：任何启动路径（计划任务/手动/重启）都只会有一个 Bot。"""
-    lock = _bot_lock_path()
-    lock.parent.mkdir(parents=True, exist_ok=True)
+    """单实例锁：使用 Windows 原生命名互斥体 (Win32 Named Mutex) 保证全局绝对唯一实例。"""
+    global _bot_mutex_handle
+    if os.name != 'nt':
+        return True
     try:
-        pid = int(lock.read_text(encoding="utf-8").strip())
-    except (FileNotFoundError, ValueError):
-        pid = None
-    if pid is not None:
-        if _pid_alive(pid):
-            log.error("another bot instance is running (pid=%s); this instance exits.", pid)
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        MUTEX_NAME = r"Global\MortalSim_Bot_Core_Singleton_Mutex"
+        _bot_mutex_handle = kernel32.CreateMutexW(None, True, MUTEX_NAME)
+        last_error = kernel32.GetLastError()
+        ERROR_ALREADY_EXISTS = 183
+        if last_error == ERROR_ALREADY_EXISTS:
+            if _bot_mutex_handle:
+                kernel32.CloseHandle(_bot_mutex_handle)
+                _bot_mutex_handle = None
+            log.error("another bot core instance is already running (Win32 Mutex Active); exiting.")
             return False
-        try:
-            lock.unlink()
-        except OSError:
-            pass
-    lock.write_text(str(os.getpid()), encoding="utf-8")
-    return True
+        return True
+    except Exception as e:
+        log.warning("Win32 Mutex check failed: %s; allowing startup.", e)
+        return True
 
 
 def main() -> None:

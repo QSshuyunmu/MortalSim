@@ -1,31 +1,65 @@
-"""QQ Bot 守护进程：确保 bot.py 始终在后台存活，若进程异常退出或被外部误杀则自动拉起。"""
-import sys, time, subprocess, os
+"""QQ Bot 守护进程：使用 Windows 原生命名互斥体 (Win32 Mutex) 保证全局绝对单例。"""
+import sys, time, subprocess, os, ctypes
 from pathlib import Path
 
 BOT_DIR = Path(r"D:\tenhoulib\MortalSim-Bot").resolve()
 PYTHON_EXE = sys.executable
+MUTEX_NAME = "Global\\MortalSim_Bot_Daemon_Singleton_Mutex"
+
+_mutex_handle = None
+
+def acquire_win32_mutex(name: str) -> bool:
+    global _mutex_handle
+    if os.name != 'nt':
+        return True
+    try:
+        kernel32 = ctypes.windll.kernel32
+        _mutex_handle = kernel32.CreateMutexW(None, True, name)
+        last_error = kernel32.GetLastError()
+        ERROR_ALREADY_EXISTS = 183
+        if last_error == ERROR_ALREADY_EXISTS:
+            if _mutex_handle:
+                kernel32.CloseHandle(_mutex_handle)
+                _mutex_handle = None
+            return False
+        return True
+    except Exception as e:
+        print(f"[Daemon] Mutex error: {e}", flush=True)
+        return True
 
 def is_bot_running() -> bool:
     import psutil
     for p in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
-            cmd = p.info.get('cmdline') or []
-            if any('bot.py' in str(arg) for arg in cmd) and not any('daemon.py' in str(arg) for arg in cmd):
+            cmd_list = p.info.get('cmdline')
+            if not cmd_list:
+                continue
+            cmd_str = " ".join(cmd_list)
+            if "bot.py" in cmd_str and "daemon.py" not in cmd_str:
                 return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
             continue
     return False
 
 def start_bot():
     print("[Daemon] Starting bot.py in background...", flush=True)
+    bot_script = BOT_DIR / "src" / "bot.py"
+    log_file = BOT_DIR / "logs" / "bot.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    f = open(log_file, "a", encoding="utf-8", buffering=1)
     subprocess.Popen(
-        [PYTHON_EXE, str(BOT_DIR / "src" / "bot.py")],
+        [PYTHON_EXE, "-u", str(bot_script)],
         cwd=str(BOT_DIR),
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+        stdout=f,
+        stderr=f,
     )
 
 def main():
-    print("[Daemon] Bot Guardian started. Monitoring bot.py every 3 seconds...", flush=True)
+    if not acquire_win32_mutex(MUTEX_NAME):
+        print("[Daemon] Another daemon instance is already active. Exiting immediately.", flush=True)
+        sys.exit(0)
+
+    print(f"[Daemon] Bot Guardian started (PID {os.getpid()}). Global Win32 Mutex acquired.", flush=True)
     while True:
         try:
             if not is_bot_running():

@@ -25,10 +25,10 @@ quota_enabled = false                            # 取消每日限额
 max_requests_per_user_per_day = 999999           # (已取消限额)
 max_games_per_user_per_day = 999999999         # (已取消限额)
 max_global_queued = 5                            # 全局排队上限
-cooldown_seconds = 60                            # 同一用户冷却
+cooldown_seconds = 5                            # 同一用户冷却
 db_path = "data/quota.db"
 
 [render]
-tile_assets_dir = "D:\\tenhoulib\\MortalSim-Local-v0.3.0-rc.1-new10\\_internal\\apps\\web\\dist\\tiles"
+tile_assets_dir = "D:\\tenhoulib\\MortalSim\\apps\\web\\dist\\tiles"
 font_path = "C:\\Windows\\Fonts\\msyh.ttc"       # 微软雅黑
 output_dir = "data/png"
