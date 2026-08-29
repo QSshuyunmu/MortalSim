@@ -7,6 +7,7 @@ mod result;
 mod two_vs_two;
 pub(crate) mod prefix;
 pub(crate) mod weighted;
+pub(crate) mod shanten_priors;
 
 pub use board::Board;
 pub use result::GameResult;
