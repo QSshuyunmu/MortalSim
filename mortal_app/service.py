@@ -426,8 +426,9 @@ def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
     round_number = int(round_id[1])
     kyoku = wind_index * 4 + round_number
 
-    # On table: Dealer is always Seat 0!
-    oya = 0
+    # On table: Seat 0=East, Seat 1=South, Seat 2=West, Seat 3=North.
+    # Dealer of the round is: E1/S1 -> Seat 0, E2/S2 -> Seat 1, E3/S3 -> Seat 2, E4/S4 -> Seat 3.
+    oya = (round_number - 1) % 4
 
     target_seat = request.get("target_seat")
     effective_target = int(target_seat) if target_seat is not None else 0

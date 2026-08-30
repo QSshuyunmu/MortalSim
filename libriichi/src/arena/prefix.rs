@@ -448,48 +448,76 @@ fn synthesize_shanten_hand_multidim(
 ) -> Result<[Tile; 13]> {
     ensure!(pool.len() >= 13, "pool underflow");
 
-    // 1. If target shanten >= 3 (loose/early hand), do natural draw from pool and verify shanten >= 3
-    if target_shanten >= 3 {
-        for _ in 0..50 {
-            pool.shuffle(rng);
-            let candidate: [Tile; 13] = pool[pool.len() - 13..].try_into().unwrap();
-            let counts = hand_to_counts_34(&candidate);
-            let sh = crate::algo::shanten::calc_all(&counts, 4);
-            if sh >= 3 {
-                let h: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
-                return Ok(h);
-            }
+    // 采用自然蒙特卡洛拒绝抽样：保持真实手牌的自然愚形与真实进张面
+    let mut best_candidate: Option<([Tile; 13], i8)> = None;
+
+    for _ in 0..120 {
+        pool.shuffle(rng);
+        let candidate: [Tile; 13] = pool[pool.len() - 13..].try_into().unwrap();
+        let counts = hand_to_counts_34(&candidate);
+        let sh = crate::algo::shanten::calc_all(&counts, 4);
+
+        let match_ok = match target_shanten {
+            0 => sh == 0,
+            1 => sh == 1,
+            2 => sh == 2,
+            _ => sh >= 3,
+        };
+
+        if match_ok {
+            let h: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
+            return Ok(h);
         }
-        let h: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
-        return Ok(h);
+
+        match best_candidate {
+            None => best_candidate = Some((candidate, sh)),
+            Some((_, best_sh)) if (sh - target_shanten).abs() < (best_sh - target_shanten).abs() => {
+                best_candidate = Some((candidate, sh));
+            }
+            _ => {}
+        }
     }
 
-    let mut pool_counts = [0u8; 34];
-    for &t in pool.iter() {
-        pool_counts[t.deaka().as_usize()] += 1;
-    }
-
-    // 2. Pattern: Chiitoitsu (七对子) path if 0 or 1 shanten targeted and pairs available
+    // 针对 0/1 向听在自然洗牌中极难直接抽中的极少数情况，允许进行积木组合
     if target_shanten <= 1 {
-        let available_pairs: Vec<usize> = (0..34).filter(|&k| pool_counts[k] >= 2).collect();
-        if available_pairs.len() >= 6 {
-            let p_roll: u32 = rng.gen_range(0..100);
-            if (available_pairs.len() >= 7 && p_roll < 30) || (available_pairs.len() == 6 && p_roll < 10) {
-                let mut chitoi_pairs = available_pairs.clone();
-                chitoi_pairs.shuffle(rng);
-                let mut used_counts = [0u8; 34];
-                for &p_tile in &chitoi_pairs[..6] {
-                    used_counts[p_tile] += 2;
-                }
-                for i in 0..34 {
-                    if used_counts[i] == 0 && pool_counts[i] >= 1 {
-                        used_counts[i] += 1;
-                        break;
+        let mut pool_counts = [0u8; 34];
+        for &t in pool.iter() {
+            pool_counts[t.deaka().as_usize()] += 1;
+        }
+
+        for _ in 0..80 {
+            let mut trial_counts = pool_counts;
+            // 雀头
+            let mut possible_pairs: Vec<usize> = (0..34).filter(|&k| trial_counts[k] >= 2).collect();
+            if !possible_pairs.is_empty() {
+                possible_pairs.shuffle(rng);
+                trial_counts[possible_pairs[0]] -= 2;
+            }
+            // 面子
+            let mut melds_found = 0;
+            let mut all_indices: Vec<usize> = (0..34).collect();
+            all_indices.shuffle(rng);
+            for &base in &all_indices {
+                if melds_found >= (if target_shanten == 0 { 3 } else { 2 }) { break; }
+                if base < 27 {
+                    let num = base % 9;
+                    if num <= 6 && trial_counts[base] >= 1 && trial_counts[base + 1] >= 1 && trial_counts[base + 2] >= 1 {
+                        trial_counts[base] -= 1; trial_counts[base + 1] -= 1; trial_counts[base + 2] -= 1;
+                        melds_found += 1;
+                        continue;
                     }
                 }
+                if trial_counts[base] >= 3 {
+                    trial_counts[base] -= 3;
+                    melds_found += 1;
+                }
+            }
+            if melds_found >= (if target_shanten == 0 { 3 } else { 2 }) {
+                let mut assembled_indices = [0u8; 34];
+                for i in 0..34 { assembled_indices[i] = pool_counts[i] - trial_counts[i]; }
                 let mut extracted: Vec<Tile> = Vec::with_capacity(13);
                 for i in 0..34 {
-                    let needed = used_counts[i];
+                    let needed = assembled_indices[i];
                     let mut got = 0;
                     let mut p_idx = 0;
                     while p_idx < pool.len() && got < needed {
@@ -500,6 +528,9 @@ fn synthesize_shanten_hand_multidim(
                             p_idx += 1;
                         }
                     }
+                }
+                while extracted.len() < 13 && !pool.is_empty() {
+                    extracted.push(pool.pop().unwrap());
                 }
                 if extracted.len() == 13 {
                     let h: [Tile; 13] = extracted.try_into().unwrap();
@@ -514,128 +545,8 @@ fn synthesize_shanten_hand_multidim(
         }
     }
 
-    // 3. Pattern: Standard 4面子1雀头 Guided Skeletal Assembly (Target-Shanten Driven)
-    // 严格按照目标向听度组装：
-    // target_shanten == 0 -> 3 面子 + 1 雀头 + 1 听牌搭子 (sh == 0)
-    // target_shanten == 1 -> 2 面子 + 1 雀头 + 2 搭子 (sh == 1)
-    // target_shanten == 2 -> 1 面子 + 1 雀头 + 2 搭子 (sh == 2)
-    let min_melds_needed = match target_shanten {
-        0 => 3,
-        1 => 2,
-        2 => 1,
-        _ => 0,
-    };
-
-    for _ in 0..150 {
-        let mut trial_counts = pool_counts;
-
-        // 1. Pick a Pair (雀头)
-        let mut possible_pairs: Vec<usize> = (0..34).filter(|&k| trial_counts[k] >= 2).collect();
-        if possible_pairs.is_empty() && target_shanten <= 1 {
-            break;
-        }
-        if !possible_pairs.is_empty() {
-            possible_pairs.shuffle(rng);
-            let pair_t = possible_pairs[0];
-            trial_counts[pair_t] -= 2;
-        }
-
-        // 2. Try picking Melds (顺子 or 刻子)
-        let mut melds_found = 0;
-        let mut all_indices: Vec<usize> = (0..34).collect();
-        all_indices.shuffle(rng);
-
-        for &base in &all_indices {
-            if melds_found >= min_melds_needed {
-                break;
-            }
-            if base < 27 {
-                let num = base % 9;
-                if num <= 6 && trial_counts[base] >= 1 && trial_counts[base + 1] >= 1 && trial_counts[base + 2] >= 1 {
-                    trial_counts[base] -= 1;
-                    trial_counts[base + 1] -= 1;
-                    trial_counts[base + 2] -= 1;
-                    melds_found += 1;
-                    continue;
-                }
-            }
-            if trial_counts[base] >= 3 {
-                trial_counts[base] -= 3;
-                melds_found += 1;
-            }
-        }
-
-        // 3. Try picking Wait / Taatsu (搭子)
-        let max_taatsu = match target_shanten {
-            0 => 1,
-            1 => 2,
-            2 => 2,
-            _ => 1,
-        };
-        let mut taatsu_found = 0;
-        for &base in &all_indices {
-            if taatsu_found >= max_taatsu {
-                break;
-            }
-            if base < 27 {
-                let num = base % 9;
-                if num <= 7 && trial_counts[base] >= 1 && trial_counts[base + 1] >= 1 {
-                    trial_counts[base] -= 1;
-                    trial_counts[base + 1] -= 1;
-                    taatsu_found += 1;
-                    continue;
-                }
-            }
-            if trial_counts[base] >= 2 {
-                trial_counts[base] -= 2;
-                taatsu_found += 1;
-            }
-        }
-
-        if melds_found >= min_melds_needed {
-            let mut assembled_indices = [0u8; 34];
-            for i in 0..34 {
-                assembled_indices[i] = pool_counts[i] - trial_counts[i];
-            }
-            let mut extracted: Vec<Tile> = Vec::with_capacity(13);
-            for i in 0..34 {
-                let needed = assembled_indices[i];
-                let mut got = 0;
-                let mut p_idx = 0;
-                while p_idx < pool.len() && got < needed {
-                    if pool[p_idx].deaka().as_usize() == i {
-                        extracted.push(pool.swap_remove(p_idx));
-                        got += 1;
-                    } else {
-                        p_idx += 1;
-                    }
-                }
-            }
-            while extracted.len() < 13 && !pool.is_empty() {
-                extracted.push(pool.pop().unwrap());
-            }
-            if extracted.len() == 13 {
-                let h: [Tile; 13] = extracted.try_into().unwrap();
-                let counts = hand_to_counts_34(&h);
-                let sh = crate::algo::shanten::calc_all(&counts, 4);
-                let match_ok = match target_shanten {
-                    0 => sh == 0,
-                    1 => sh == 1,
-                    2 => sh == 2,
-                    _ => sh >= 3,
-                };
-                if match_ok {
-                    return Ok(h);
-                }
-                for t in h {
-                    pool.push(t);
-                }
-            }
-        }
-    }
-
-    // Fallback: fast structured sample matching target_shanten
-    sample_structured_hand_for_opponent(pool, target_shanten, rng)
+    let h: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
+    Ok(h)
 }
 
 fn sample_structured_hand_for_opponent(
