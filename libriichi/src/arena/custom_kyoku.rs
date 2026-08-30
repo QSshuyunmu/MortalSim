@@ -872,7 +872,12 @@ impl CustomKyokuRunner {
                             if g.first_kyushu {
                                 g.is_first = false;
                                 g.first_kyushu = false;
-                                g.reactions[pid] = EventExt::no_meta(Event::Ryukyoku { deltas: None });
+                                if st.last_cans().can_ryukyoku {
+                                    g.reactions[pid] = EventExt::no_meta(Event::Ryukyoku { deltas: None });
+                                } else {
+                                    g.ended = true;
+                                    g.error_msg = Some("first_action_kyushu_unavailable".to_owned());
+                                }
                                 continue;
                             }
                             // 8. Ankan

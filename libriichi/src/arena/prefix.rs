@@ -1,12 +1,12 @@
 #![allow(dead_code)]
-/// Proposal sampler and scripted prefix game construction for
+/// Forward Native Rollout and scripted prefix game construction for
 /// "Ko's x-th Discard" conditional simulation.
 ///
-/// v0.2 (marginal/mean-field scheme):
-///  - `sample_prefix_game` draws joint deals from the shared pool (uniform proposal).
-///  - Per-player marginal likelihoods are computed by the runner (softmax Q/tau).
-///  - `build_prefix_game_from_hands` rebuilds a game from an assembled
-///    (possibly cross-deal) triple of hands + kept-draw assignments.
+/// Forward Native Rollout Scheme:
+///  - Deduct target 14, dora indicator, and all river discards from the 136-tile pool.
+///  - Opponent initial haipai: k tedashi discards from their river + (13 - k) uniform draws from pool.
+///  - Timeline: tsumogiri discards are placed at their draw slots; tedashi draws are natural draws from pool.
+///  - Replay in prefix executes strictly forward in O(1) without rejection or artificial priors.
 
 use super::board::{Board, UNSHUFFLED};
 use crate::tile::Tile;
@@ -15,7 +15,6 @@ use anyhow::{Context, Result, anyhow, ensure};
 use rand::prelude::*;
 use rand_chacha::ChaCha12Rng;
 use sha3::{Digest, Sha3_256};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiscardSpec {
@@ -33,16 +32,13 @@ pub struct PrefixStep {
     pub accumulate_likelihood: bool,
 }
 
-/// A player's decision-point hand together with which of its tiles were
-/// drawn-and-kept (in chronological order). This is the minimal state needed
-/// to reconstruct a legal trajectory consistent with the player's river.
-#[derive(Debug, Clone)]
+/// A player's initial 13-tile deal for the prefix game.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandAssignment {
-    pub current_13: [Tile; 13],
-    pub kept_draws: Vec<Tile>,
+    pub initial_13: [Tile; 13],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PrefixGameSpec {
     pub board: Board,
     pub oya: u8,
@@ -123,10 +119,9 @@ pub fn fixed_tile_counts(
     counts
 }
 
-/// Increment counts with a 13-tile hand; returns false if any bucket exceeds
-/// its physical limit.
-pub fn add_hand_counts(counts: &mut [u8; TILE_BUCKETS], hand: &[Tile; 13]) -> bool {
-    for &t in hand {
+/// Add counts of a slice of tiles; returns false if any bucket exceeds its limit.
+pub fn add_tiles_count(counts: &mut [u8; TILE_BUCKETS], tiles: &[Tile]) -> bool {
+    for &t in tiles {
         let b = tile_bucket(t);
         counts[b] += 1;
     }
@@ -136,6 +131,12 @@ pub fn add_hand_counts(counts: &mut [u8; TILE_BUCKETS], hand: &[Tile; 13]) -> bo
         }
     }
     true
+}
+
+/// Increment counts with a 13-tile hand; returns false if any bucket exceeds
+/// its physical limit.
+pub fn add_hand_counts(counts: &mut [u8; TILE_BUCKETS], hand: &[Tile; 13]) -> bool {
+    add_tiles_count(counts, hand)
 }
 
 pub fn hand_counts(hand: &[Tile; 13]) -> [u8; TILE_BUCKETS] {
@@ -189,9 +190,121 @@ pub fn validate_inputs(
     Ok(())
 }
 
-/// Build the full prefix game (Board + forced steps) from explicit per-seat
-/// hand assignments. The hands must be physically compatible with the fixed
-/// tiles (caller responsibility; `add_hand_counts` can verify incrementally).
+fn seed_from_tuple(k0: u8, k1: u8, a: u8, b: u8, c: u64, d: u64) -> [u8; 32] {
+    Sha3_256::new()
+        .chain_update(k0.to_le_bytes())
+        .chain_update(k1.to_le_bytes())
+        .chain_update([a, b])
+        .chain_update(c.to_le_bytes())
+        .chain_update(d.to_le_bytes())
+        .finalize()
+        .into()
+}
+
+/// Forward Native Rollout: Sample initial haipai and construct the prefix game
+/// directly in O(1) without rejection sampling or synthetic shanten priors.
+pub fn sample_prefix_game(
+    target_seat: u8,
+    oya: u8,
+    x: u8,
+    target_14: &[Tile; 14],
+    target_past: &[DiscardSpec],
+    opponent_rivers: &[Vec<DiscardSpec>; 4],
+    dora_marker: Tile,
+    kyoku: u8,
+    honba: u8,
+    kyotaku: u8,
+    scores: [i32; 4],
+    seed: (u64, u64),
+) -> Result<PrefixGameSpec> {
+    validate_inputs(target_seat, oya, x, target_14, target_past, opponent_rivers, dora_marker)?;
+
+    // 1. Available Pool = 136 - target_14 - dora - all rivers.
+    let mut pool: Vec<Tile> = UNSHUFFLED.to_vec();
+    for &t in target_14 {
+        remove_tile(&mut pool, t)?;
+    }
+    remove_tile(&mut pool, dora_marker)?;
+    for d in target_past {
+        remove_tile(&mut pool, d.tile)?;
+    }
+    for p in 0..4usize {
+        if p as u8 != target_seat {
+            for d in &opponent_rivers[p] {
+                remove_tile(&mut pool, d.tile)?;
+            }
+        }
+    }
+    ensure!(pool.len() >= 39, "insufficient tiles in pool to deal opponents");
+
+    let sb: [u8; 32] = seed_from_tuple(kyoku, honba, target_seat, x, seed.0, seed.1);
+    let mut rng = ChaCha12Rng::from_seed(sb);
+    pool.shuffle(&mut rng);
+
+    // 2. Build initial 13 haipai for all 4 players (Forward Haipai)
+    let mut hands: [HandAssignment; 4] = [
+        HandAssignment { initial_13: [Tile::new_unchecked(0); 13] },
+        HandAssignment { initial_13: [Tile::new_unchecked(0); 13] },
+        HandAssignment { initial_13: [Tile::new_unchecked(0); 13] },
+        HandAssignment { initial_13: [Tile::new_unchecked(0); 13] },
+    ];
+
+    // Target player: k_target tedashi discards + (13 - k_target) tiles from target_14[..13]
+    let target_tedashis: Vec<Tile> = target_past
+        .iter()
+        .filter(|d| !d.tsumogiri)
+        .map(|d| d.tile)
+        .collect();
+    let k_target = target_tedashis.len();
+    ensure!(k_target <= 13, "target tedashis ({}) exceed 13", k_target);
+
+    let mut target_initial_vec = target_tedashis;
+    target_initial_vec.extend_from_slice(&target_14[..13 - k_target]);
+    let target_initial: [Tile; 13] = target_initial_vec.try_into().unwrap();
+    hands[target_seat as usize] = HandAssignment { initial_13: target_initial };
+
+    // Opponents: k tedashi discards + (13 - k) uniform random draws from pool
+    for p in 0..4u8 {
+        if p == target_seat {
+            continue;
+        }
+        let river = &opponent_rivers[p as usize];
+        let tedashis: Vec<Tile> = river
+            .iter()
+            .filter(|d| !d.tsumogiri)
+            .map(|d| d.tile)
+            .collect();
+        let k = tedashis.len();
+        ensure!(k <= 13, "opponent {} tedashis ({}) exceed 13", p, k);
+        let needed = 13 - k;
+        ensure!(pool.len() >= needed, "insufficient pool for opponent {}", p);
+
+        let mut opp_initial = tedashis;
+        for _ in 0..needed {
+            opp_initial.push(pool.pop().unwrap());
+        }
+        let initial_13: [Tile; 13] = opp_initial.try_into().unwrap();
+        hands[p as usize] = HandAssignment { initial_13 };
+    }
+
+    build_prefix_game_from_hands(
+        target_seat,
+        oya,
+        x,
+        target_14,
+        target_past,
+        opponent_rivers,
+        dora_marker,
+        kyoku,
+        honba,
+        kyotaku,
+        scores,
+        &hands,
+        seed,
+    )
+}
+
+/// Rebuild the prefix game from explicit per-seat initial hand assignments.
 pub fn build_prefix_game_from_hands(
     target_seat: u8,
     oya: u8,
@@ -209,75 +322,85 @@ pub fn build_prefix_game_from_hands(
 ) -> Result<PrefixGameSpec> {
     validate_inputs(target_seat, oya, x, target_14, target_past, opponent_rivers, dora_marker)?;
 
-    // Reconstruct each player's initial 13-tile hand from
-    // current_13 - kept_draws + tedashi discards.
-    let mut haipai: [[Tile; 13]; 4] = [[Tile::new_unchecked(0); 13]; 4];
-    let mut player_draws: HashMap<(u8, usize), Tile> = HashMap::new();
+    let haipai: [[Tile; 13]; 4] = [
+        hands[0].initial_13,
+        hands[1].initial_13,
+        hands[2].initial_13,
+        hands[3].initial_13,
+    ];
 
-    for p in 0..4u8 {
-        let river: &[DiscardSpec] = if p == target_seat {
-            target_past
-        } else {
-            &opponent_rivers[p as usize]
-        };
-        let mut tedashis = Vec::new();
-        let mut tsumogiris = Vec::new();
-        for (i, d) in river.iter().enumerate() {
-            if d.tsumogiri {
-                tsumogiris.push((i, d.tile));
-            } else {
-                tedashis.push(d.tile);
+    let target_tedashis: Vec<Tile> = target_past
+        .iter()
+        .filter(|d| !d.tsumogiri)
+        .map(|d| d.tile)
+        .collect();
+    let k_target = target_tedashis.len();
+
+    // Reconstruct available pool from 136
+    let mut pool: Vec<Tile> = UNSHUFFLED.to_vec();
+    for p in 0..4usize {
+        for &t in &haipai[p] {
+            remove_tile(&mut pool, t)?;
+        }
+    }
+    remove_tile(&mut pool, dora_marker)?;
+
+    // Remove target's kept draw tiles (which enter hand during prefix) and target 14th tile
+    for &t in &target_14[13 - k_target..14] {
+        remove_tile(&mut pool, t)?;
+    }
+
+    // Remove all tsumogiri discards in all rivers
+    for d in target_past {
+        if d.tsumogiri {
+            remove_tile(&mut pool, d.tile)?;
+        }
+    }
+    for p in 0..4usize {
+        if p as u8 != target_seat {
+            for d in &opponent_rivers[p] {
+                if d.tsumogiri {
+                    remove_tile(&mut pool, d.tile)?;
+                }
             }
-        }
-
-        let assignment = &hands[p as usize];
-        let mut initial_13 = assignment.current_13.to_vec();
-        // Remove kept draws (they were drawn later, not in the initial hand).
-        for tile in &assignment.kept_draws {
-            let idx = initial_13.iter().position(|&t| t == *tile).ok_or_else(|| {
-                anyhow!("kept draw {:?} not found in current hand of player {}", tile, p)
-            })?;
-            initial_13.swap_remove(idx);
-        }
-        // Tedashi discards were in the initial hand.
-        for t in tedashis {
-            initial_13.push(t);
-        }
-        ensure!(
-            initial_13.len() == 13,
-            "initial hand length for player {} is {}, expected 13",
-            p,
-            initial_13.len()
-        );
-        haipai[p as usize] = initial_13.try_into().unwrap();
-
-        // Assign draw tiles: tsumogiri from the river, tedashi draws = kept tiles.
-        let mut kept_iter = assignment.kept_draws.iter();
-        for (turn_idx, d) in river.iter().enumerate() {
-            if d.tsumogiri {
-                player_draws.insert((p, turn_idx), d.tile);
-            } else {
-                let tile = *kept_iter.next().context("kept draws exhausted")?;
-                player_draws.insert((p, turn_idx), tile);
-            }
-        }
-        if p == target_seat && target_past.len() < x as usize {
-            // The target's decision-point draw (14th tile) in discard timing.
-            player_draws.insert((target_seat, (x - 1) as usize), target_14[13]);
         }
     }
 
-    // Build the chronological timeline (draws + forced discards).
-    // Build the chronological timeline (draws + forced discards).
-    let mut scripted_draws: Vec<Tile> = Vec::new();
-    let mut forced_steps: Vec<PrefixStep> = Vec::new();
-    let mut player_draw_counters = [0usize; 4];
+    let sb: [u8; 32] = seed_from_tuple(kyoku, honba, target_seat, x, seed.0 ^ 0x9e3779b97f4a7c15, seed.1 ^ 0xbf58476d1ce4e5b9);
+    let mut rng = ChaCha12Rng::from_seed(sb);
+    pool.shuffle(&mut rng);
 
-    let oya_draw_0 = *player_draws
-        .get(&(oya, 0))
-        .context("oya initial 14th draw missing")?;
-    scripted_draws.push(oya_draw_0);
-    player_draw_counters[oya as usize] += 1;
+    // Build timeline draws
+    let mut timeline_draws: Vec<Tile> = Vec::new();
+    let mut forced_steps: Vec<PrefixStep> = Vec::new();
+    let mut target_tedashi_draw_idx = 0usize;
+
+    if oya == target_seat {
+        if x == 1 && target_past.is_empty() {
+            timeline_draws.push(target_14[13]);
+        } else {
+            let d0 = target_past[0];
+            if d0.tsumogiri {
+                timeline_draws.push(d0.tile);
+            } else {
+                timeline_draws.push(target_14[13 - k_target + target_tedashi_draw_idx]);
+                target_tedashi_draw_idx += 1;
+            }
+        }
+    } else {
+        if opponent_rivers[oya as usize].is_empty() {
+            let t = pool.pop().context("insufficient pool for oya initial draw")?;
+            timeline_draws.push(t);
+        } else {
+            let d0 = opponent_rivers[oya as usize][0];
+            if d0.tsumogiri {
+                timeline_draws.push(d0.tile);
+            } else {
+                let t = pool.pop().context("insufficient pool for oya initial draw")?;
+                timeline_draws.push(t);
+            }
+        }
+    }
 
     let is_post_discard_reaction = target_past.len() == x as usize;
 
@@ -294,11 +417,7 @@ pub fn build_prefix_game_from_hands(
 
             if !has_discard {
                 if p == target_seat && !is_post_discard_reaction && r == x {
-                    // Standard turn x discard decision point reached!
-                    let draw_tile = *player_draws
-                        .get(&(p, (x - 1) as usize))
-                        .context("target turn x draw missing")?;
-                    scripted_draws.push(draw_tile);
+                    timeline_draws.push(target_14[13]);
                     break 'outer;
                 }
                 let remaining_any = (0..4u8).any(|check_p| {
@@ -315,10 +434,22 @@ pub fn build_prefix_game_from_hands(
             }
 
             if !(r == 1 && p == oya) {
-                let d_idx = player_draw_counters[p as usize];
-                if let Some(&draw_tile) = player_draws.get(&(p, d_idx)) {
-                    scripted_draws.push(draw_tile);
-                    player_draw_counters[p as usize] += 1;
+                if p == target_seat {
+                    let d = target_past[river_idx];
+                    if d.tsumogiri {
+                        timeline_draws.push(d.tile);
+                    } else {
+                        timeline_draws.push(target_14[13 - k_target + target_tedashi_draw_idx]);
+                        target_tedashi_draw_idx += 1;
+                    }
+                } else {
+                    let d = opponent_rivers[p as usize][river_idx];
+                    if d.tsumogiri {
+                        timeline_draws.push(d.tile);
+                    } else {
+                        let t = pool.pop().context("insufficient pool for opponent draw")?;
+                        timeline_draws.push(t);
+                    }
                 }
             }
 
@@ -337,38 +468,14 @@ pub fn build_prefix_game_from_hands(
         }
     }
 
-    // Assemble Board.
-    // Wall at deal = 136 - initial haipai (52) - dead wall (14, incl. dora marker).
-    // The river tiles / kept draws / target 14th are all drawn DURING the
-    // prefix, so they must still be in the live wall at deal. scripted_draws
-    // are therefore removed from the shuffled remainder and re-inserted at the
-    // draw positions (end of yama, popped first).
-    let mut pool: Vec<Tile> = UNSHUFFLED.to_vec();
-    for p in 0..4usize {
-        for &t in &haipai[p] {
-            remove_tile(&mut pool, t)?;
-        }
-    }
-    remove_tile(&mut pool, dora_marker)?;
-
-    // Prefix draws must strictly come from the live wall, not the dead wall.
-    // Remove scripted_draws first before drawing the dead wall from the pool.
-    for &t in &scripted_draws {
-        remove_tile(&mut pool, t)?;
-    }
     ensure!(pool.len() >= 13, "insufficient tiles for dead wall");
-
-    let sb: [u8; 32] = seed_from_tuple(kyoku, honba, target_seat, x, seed.0, seed.1);
-    let mut rng = ChaCha12Rng::from_seed(sb);
-    pool.shuffle(&mut rng);
-
     let mut di: Vec<Tile> = pool.drain(pool.len() - 4..).collect();
     di.push(dora_marker);
     let rinshan: Vec<Tile> = pool.drain(pool.len() - 4..).collect();
     let ura_indicators: Vec<Tile> = pool.drain(pool.len() - 5..).collect();
 
     let mut yama = pool;
-    for &t in scripted_draws.iter().rev() {
+    for &t in timeline_draws.iter().rev() {
         yama.push(t);
     }
 
@@ -393,351 +500,7 @@ pub fn build_prefix_game_from_hands(
     })
 }
 
-
-/// Helper to convert a 13-tile array to counts for shanten calculator
-fn hand_to_counts_34(tiles: &[Tile; 13]) -> [u8; 34] {
-    let mut c = [0u8; 34];
-    for &t in tiles {
-        c[t.deaka().as_usize()] += 1;
-    }
-    c
-}
-
-/// Sample 13 tiles from `pool` for player `p`, prioritizing 0-shanten if Riichi
-/// or 0..=2 shanten if late turns (x >= 6).
-
-
-
-/// Synthetic Tenpai/Shanten Builder: Constructs a realistic 13-tile mahjong hand from available pool.
-/// Supports all 3 fundamental Japanese Mahjong forms (Tenhou Rules):
-/// 1. Standard Normal Form (4面子1雀头: 3 complete melds + 1 pair + 1 taatsu/shanpon wait)
-/// 2. Chiitoitsu Form (七对子: 6 distinct pairs + 1 single wait tile)
-/// 3. Kokushi Musou Form (国士无双: 12 yaojiu + 1 pair, or 13 distinct yaojiu)
-fn sample_target_shanten_from_multidim_prior(
-    turn: u8,
-    is_riichi: bool,
-    furo_type: usize,
-    is_oya: usize,
-    mid_var: usize,
-    rng: &mut ChaCha12Rng,
-) -> i8 {
-    if is_riichi {
-        return 0; // Riichi opponent is ALWAYS in tenpai (0-shanten)
-    }
-    let t_idx = (turn as usize).clamp(1, 18);
-    let f_idx = furo_type.min(3);
-    let o_idx = is_oya.min(1);
-    let m_idx = mid_var.min(2);
-
-    let prior_bps = super::shanten_priors::TENHOU_MULTIDIM_SHANTEN_PRIORS[t_idx][f_idx][o_idx][m_idx];
-    let roll: u16 = rng.gen_range(0..10000);
-    let mut cum = 0u16;
-    for (sh, &bps) in prior_bps.iter().enumerate() {
-        cum += bps;
-        if roll < cum {
-            return sh as i8;
-        }
-    }
-    1
-}
-
-fn synthesize_shanten_hand_multidim(
-    pool: &mut Vec<Tile>,
-    target_shanten: i8,
-    rng: &mut ChaCha12Rng,
-) -> Result<[Tile; 13]> {
-    ensure!(pool.len() >= 13, "pool underflow");
-
-    // 采用自然蒙特卡洛拒绝抽样：保持真实手牌的自然愚形与真实进张面
-    let mut best_candidate: Option<([Tile; 13], i8)> = None;
-
-    for _ in 0..120 {
-        pool.shuffle(rng);
-        let candidate: [Tile; 13] = pool[pool.len() - 13..].try_into().unwrap();
-        let counts = hand_to_counts_34(&candidate);
-        let sh = crate::algo::shanten::calc_all(&counts, 4);
-
-        let match_ok = match target_shanten {
-            0 => sh == 0,
-            1 => sh == 1,
-            2 => sh == 2,
-            _ => sh >= 3,
-        };
-
-        if match_ok {
-            let h: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
-            return Ok(h);
-        }
-
-        match best_candidate {
-            None => best_candidate = Some((candidate, sh)),
-            Some((_, best_sh)) if (sh - target_shanten).abs() < (best_sh - target_shanten).abs() => {
-                best_candidate = Some((candidate, sh));
-            }
-            _ => {}
-        }
-    }
-
-    // 针对 0/1 向听在自然洗牌中极难直接抽中的极少数情况，允许进行积木组合
-    if target_shanten <= 1 {
-        let mut pool_counts = [0u8; 34];
-        for &t in pool.iter() {
-            pool_counts[t.deaka().as_usize()] += 1;
-        }
-
-        for _ in 0..80 {
-            let mut trial_counts = pool_counts;
-            // 雀头
-            let mut possible_pairs: Vec<usize> = (0..34).filter(|&k| trial_counts[k] >= 2).collect();
-            if !possible_pairs.is_empty() {
-                possible_pairs.shuffle(rng);
-                trial_counts[possible_pairs[0]] -= 2;
-            }
-            // 面子
-            let mut melds_found = 0;
-            let mut all_indices: Vec<usize> = (0..34).collect();
-            all_indices.shuffle(rng);
-            for &base in &all_indices {
-                if melds_found >= (if target_shanten == 0 { 3 } else { 2 }) { break; }
-                if base < 27 {
-                    let num = base % 9;
-                    if num <= 6 && trial_counts[base] >= 1 && trial_counts[base + 1] >= 1 && trial_counts[base + 2] >= 1 {
-                        trial_counts[base] -= 1; trial_counts[base + 1] -= 1; trial_counts[base + 2] -= 1;
-                        melds_found += 1;
-                        continue;
-                    }
-                }
-                if trial_counts[base] >= 3 {
-                    trial_counts[base] -= 3;
-                    melds_found += 1;
-                }
-            }
-            if melds_found >= (if target_shanten == 0 { 3 } else { 2 }) {
-                let mut assembled_indices = [0u8; 34];
-                for i in 0..34 { assembled_indices[i] = pool_counts[i] - trial_counts[i]; }
-                let mut extracted: Vec<Tile> = Vec::with_capacity(13);
-                for i in 0..34 {
-                    let needed = assembled_indices[i];
-                    let mut got = 0;
-                    let mut p_idx = 0;
-                    while p_idx < pool.len() && got < needed {
-                        if pool[p_idx].deaka().as_usize() == i {
-                            extracted.push(pool.swap_remove(p_idx));
-                            got += 1;
-                        } else {
-                            p_idx += 1;
-                        }
-                    }
-                }
-                while extracted.len() < 13 && !pool.is_empty() {
-                    extracted.push(pool.pop().unwrap());
-                }
-                if extracted.len() == 13 {
-                    let h: [Tile; 13] = extracted.try_into().unwrap();
-                    let counts = hand_to_counts_34(&h);
-                    let sh = crate::algo::shanten::calc_all(&counts, 4);
-                    if (target_shanten == 0 && sh == 0) || (target_shanten == 1 && sh == 1) {
-                        return Ok(h);
-                    }
-                    for t in h { pool.push(t); }
-                }
-            }
-        }
-    }
-
-    let h: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
-    Ok(h)
-}
-
-fn sample_structured_hand_for_opponent(
-    pool: &mut Vec<Tile>,
-    target_shanten: i8,
-    rng: &mut ChaCha12Rng,
-) -> Result<[Tile; 13]> {
-    ensure!(pool.len() >= 13, "insufficient tiles in pool");
-    let mut best_hand: Option<([Tile; 13], i8)> = None;
-
-    for _ in 0..80 {
-        pool.shuffle(rng);
-        let candidate: [Tile; 13] = pool[pool.len() - 13..].try_into().unwrap();
-        let counts = hand_to_counts_34(&candidate);
-        let sh = crate::algo::shanten::calc_all(&counts, 4);
-        let match_ok = match target_shanten {
-            0 => sh == 0,
-            1 => sh == 1,
-            2 => sh == 2,
-            _ => sh >= 3,
-        };
-        if match_ok {
-            let current_13: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
-            return Ok(current_13);
-        }
-        match best_hand {
-            None => best_hand = Some((candidate, sh)),
-            Some((_, best_sh)) if (sh - target_shanten).abs() < (best_sh - target_shanten).abs() => {
-                best_hand = Some((candidate, sh));
-            }
-            _ => {}
-        }
-    }
-
-    let current_13: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
-    Ok(current_13)
-}
-
-fn seed_from_tuple(k0: u8, k1: u8, a: u8, b: u8, c: u64, d: u64) -> [u8; 32] {
-    Sha3_256::new()
-        .chain_update(k0.to_le_bytes())
-        .chain_update(k1.to_le_bytes())
-        .chain_update([a, b])
-        .chain_update(c.to_le_bytes())
-        .chain_update(d.to_le_bytes())
-        .finalize()
-        .into()
-}
-
-/// Uniform joint proposal: sample current hands + kept-draw assignments for all
-/// four players from the shared pool, then build the full prefix game.
-pub fn sample_prefix_game(
-    target_seat: u8,
-    oya: u8,
-    x: u8,
-    target_14: &[Tile; 14],
-    target_past: &[DiscardSpec],
-    opponent_rivers: &[Vec<DiscardSpec>; 4],
-    dora_marker: Tile,
-    kyoku: u8,
-    honba: u8,
-    kyotaku: u8,
-    scores: [i32; 4],
-    seed: (u64, u64),
-) -> Result<PrefixGameSpec> {
-    validate_inputs(target_seat, oya, x, target_14, target_past, opponent_rivers, dora_marker)?;
-
-    // Pool = 136 - target14 - dora - all rivers.
-    let mut pool: Vec<Tile> = UNSHUFFLED.to_vec();
-    for &t in target_14 {
-        remove_tile(&mut pool, t)?;
-    }
-    remove_tile(&mut pool, dora_marker)?;
-    for d in target_past {
-        remove_tile(&mut pool, d.tile)?;
-    }
-    for p in 0..4usize {
-        if p as u8 != target_seat {
-            for d in &opponent_rivers[p] {
-                remove_tile(&mut pool, d.tile)?;
-            }
-        }
-    }
-    ensure!(pool.len() >= 39, "insufficient tiles in pool to deal opponents");
-
-    let sb: [u8; 32] = seed_from_tuple(kyoku, honba, target_seat, x, seed.0, seed.1);
-    let mut rng = ChaCha12Rng::from_seed(sb);
-    pool.shuffle(&mut rng);
-
-    let mut hands: [HandAssignment; 4] = [
-        HandAssignment { current_13: [Tile::new_unchecked(0); 13], kept_draws: vec![] },
-        HandAssignment { current_13: [Tile::new_unchecked(0); 13], kept_draws: vec![] },
-        HandAssignment { current_13: [Tile::new_unchecked(0); 13], kept_draws: vec![] },
-        HandAssignment { current_13: [Tile::new_unchecked(0); 13], kept_draws: vec![] },
-    ];
-
-        // Opponents: draw current 13 from pool with Tenhou 899k multi-dimensional joint shanten prior.
-    for p in 0..4u8 {
-        if p == target_seat {
-            continue;
-        }
-        let river = &opponent_rivers[p as usize];
-        let kp = river.len();
-        let tsumogiri_count = river.iter().filter(|d| d.tsumogiri).count();
-        let num_kept = kp - tsumogiri_count;
-        let is_riichi_opponent = river.iter().any(|d| d.is_riichi);
-
-        let current_13 = if x <= 2 && !is_riichi_opponent && river.len() <= 1 {
-            // Early turn 1..2 without riichi: purely natural uniform shuffle from remaining pool!
-            let h: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
-            h
-        } else {
-            // Mid-deep turns (x >= 3) or riichi: sample target shanten from Tenhou empirical prior
-            let is_oya = if p == oya { 1usize } else { 0usize };
-            let mut suit_m = false;
-            let mut suit_p = false;
-            let mut suit_s = false;
-            for d in river {
-                let tid = d.tile.deaka().as_usize();
-                if tid < 9 && (2..=7).contains(&tid) { suit_m = true; }
-                else if (9..18).contains(&tid) && (11..=16).contains(&tid) { suit_p = true; }
-                else if (18..27).contains(&tid) && (20..=25).contains(&tid) { suit_s = true; }
-            }
-            let mid_var = (suit_m as usize + suit_p as usize + suit_s as usize).min(2);
-            let furo_type = 0usize;
-            let target_shanten = sample_target_shanten_from_multidim_prior(x, is_riichi_opponent, furo_type, is_oya, mid_var, &mut rng);
-            synthesize_shanten_hand_multidim(&mut pool, target_shanten, &mut rng)?
-        };
-
-        let mut kept_indices: Vec<usize> = (0..13).collect();
-        kept_indices.shuffle(&mut rng);
-        let chosen = &kept_indices[..num_kept];
-        let mut kept_tiles = Vec::new();
-        let mut sorted = chosen.to_vec();
-        sorted.sort_unstable_by(|a, b| b.cmp(a));
-        let mut cur = current_13.to_vec();
-        for idx in sorted {
-            kept_tiles.push(cur.swap_remove(idx));
-        }
-
-        hands[p as usize] = HandAssignment { current_13, kept_draws: kept_tiles };
-    }
-
-    // Target: kept subset among the first 13 tiles (using actual target_past.len()).
-    {
-        let kp = target_past.len();
-        let tsumogiri_count = target_past.iter().filter(|d| d.tsumogiri).count();
-        let num_kept = (kp - tsumogiri_count).min(13);
-        let current_13: [Tile; 13] = target_14[..13].try_into().unwrap();
-
-        let mut kept_indices: Vec<usize> = (0..13).collect();
-        kept_indices.shuffle(&mut rng);
-        let chosen = &kept_indices[..num_kept];
-        let mut kept_tiles = Vec::new();
-        let mut sorted = chosen.to_vec();
-        sorted.sort_unstable_by(|a, b| b.cmp(a));
-        let mut cur = current_13.to_vec();
-        for idx in sorted {
-            kept_tiles.push(cur.swap_remove(idx));
-        }
-        hands[target_seat as usize] = HandAssignment { current_13, kept_draws: kept_tiles };
-    }
-
-    build_prefix_game_from_hands(
-        target_seat,
-        oya,
-        x,
-        target_14,
-        target_past,
-        opponent_rivers,
-        dora_marker,
-        kyoku,
-        honba,
-        kyotaku,
-        scores,
-        &hands,
-        seed,
-    )
-}
-
-/// Assembles `n_out` full hand-assignment sets from per-player marginal
-/// subfamilies (mean-field / sequential conditional scheme).
-///
-/// - For each opponent, `n_out` indices are resampled from the joint-deal pool
-///   with probability proportional to that player's marginal likelihood.
-/// - Hands are then combined sequentially (opponent by opponent) with a
-///   tile-count compatibility check against the fixed tiles and previously
-///   placed hands.
-/// - If no compatible candidate is found within the retry budget for some
-///   player, the original joint deal `i` (guaranteed compatible) is used as a
-///   fallback. Returns (assembled, fallback_count).
+/// Assembles `n_out` full hand-assignment sets from per-player marginal subfamilies.
 pub fn assemble_marginal_games(
     sub_hands: &[[HandAssignment; 4]],
     log_likelihoods: &[[f64; 4]],
@@ -758,7 +521,6 @@ pub fn assemble_marginal_games(
         return (Vec::new(), 0);
     }
 
-    // Per-player deterministic resampling RNGs.
     let mut rngs: Vec<ChaCha12Rng> = opponents
         .iter()
         .map(|&p| {
@@ -776,25 +538,29 @@ pub fn assemble_marginal_games(
     let mut out = Vec::with_capacity(n_out);
     let mut fallback = 0usize;
     let empty_hand = HandAssignment {
-        current_13: [Tile::new_unchecked(0); 13],
-        kept_draws: vec![],
+        initial_13: [Tile::new_unchecked(0); 13],
     };
 
     for i in 0..n_out {
         let mut counts = fixed;
         let mut assembled: [HandAssignment; 4] = core::array::from_fn(|_| empty_hand.clone());
-        // The target's hand is fixed by the query; keep its assignment from the
-        // original joint deal (unweighted, only affects the yama script).
         assembled[target_seat as usize] = sub_hands[i % n_sub][target_seat as usize].clone();
 
         let mut ok = true;
         for (k, &p) in opponents.iter().enumerate() {
             let mut chosen: Option<usize> = None;
+            let k_tedashis = opponent_rivers[p as usize]
+                .iter()
+                .filter(|d| !d.tsumogiri)
+                .count();
+
             for d in 0..budget {
                 let idx = sub_idx[k][(i + d) % n_out];
                 let hand = &sub_hands[idx][p as usize];
                 let mut trial = counts;
-                if add_hand_counts(&mut trial, &hand.current_13) {
+                // Check pool tiles in opponent's initial haipai (elements after the k tedashis)
+                let pool_tiles = &hand.initial_13[k_tedashis..13];
+                if add_tiles_count(&mut trial, pool_tiles) {
                     chosen = Some(idx);
                     counts = trial;
                     break;
@@ -814,7 +580,6 @@ pub fn assemble_marginal_games(
         if ok {
             out.push(assembled);
         } else {
-            // Fallback to the original joint deal (compatible by construction).
             out.push(sub_hands[i % n_sub].clone());
             fallback += 1;
         }
@@ -822,7 +587,6 @@ pub fn assemble_marginal_games(
 
     (out, fallback)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -846,15 +610,15 @@ mod tests {
             parse_tile("1p"), parse_tile("2p"), parse_tile("3p"),
             parse_tile("4p"), parse_tile("5p"),
         ];
-        let target_past = vec![DiscardSpec { tile: parse_tile("9s"), tsumogiri: false }];
+        let target_past = vec![DiscardSpec { tile: parse_tile("9s"), tsumogiri: false, is_riichi: false }];
         let opponent_rivers = [
             vec![
-                DiscardSpec { tile: parse_tile("E"), tsumogiri: false },
-                DiscardSpec { tile: parse_tile("S"), tsumogiri: true },
+                DiscardSpec { tile: parse_tile("E"), tsumogiri: false, is_riichi: false },
+                DiscardSpec { tile: parse_tile("S"), tsumogiri: true, is_riichi: false },
             ],
             vec![],
-            vec![DiscardSpec { tile: parse_tile("W"), tsumogiri: false }],
-            vec![DiscardSpec { tile: parse_tile("N"), tsumogiri: false }],
+            vec![DiscardSpec { tile: parse_tile("W"), tsumogiri: false, is_riichi: false }],
+            vec![DiscardSpec { tile: parse_tile("N"), tsumogiri: false, is_riichi: false }],
         ];
         sample_prefix_game(
             1, 0, 2, &target_14, &target_past, &opponent_rivers,
@@ -921,15 +685,15 @@ mod tests {
             parse_tile("1p"), parse_tile("2p"), parse_tile("3p"),
             parse_tile("4p"), parse_tile("5p"),
         ];
-        let target_past = vec![DiscardSpec { tile: parse_tile("9s"), tsumogiri: false }];
+        let target_past = vec![DiscardSpec { tile: parse_tile("9s"), tsumogiri: false, is_riichi: false }];
         let opponent_rivers = [
             vec![
-                DiscardSpec { tile: parse_tile("E"), tsumogiri: false },
-                DiscardSpec { tile: parse_tile("S"), tsumogiri: true },
+                DiscardSpec { tile: parse_tile("E"), tsumogiri: false, is_riichi: false },
+                DiscardSpec { tile: parse_tile("S"), tsumogiri: true, is_riichi: false },
             ],
             vec![],
-            vec![DiscardSpec { tile: parse_tile("W"), tsumogiri: false }],
-            vec![DiscardSpec { tile: parse_tile("N"), tsumogiri: false }],
+            vec![DiscardSpec { tile: parse_tile("W"), tsumogiri: false, is_riichi: false }],
+            vec![DiscardSpec { tile: parse_tile("N"), tsumogiri: false, is_riichi: false }],
         ];
         let spec2 = build_prefix_game_from_hands(
             1, 0, 2, &target_14, &target_past, &opponent_rivers,
@@ -952,8 +716,6 @@ mod tests {
 
     #[test]
     fn test_assemble_marginal_games_compatible() {
-        // Reuse the sampled spec hands as the pool of size 1 and verify the
-        // assembly returns compatible hands with fallback=0.
         let spec = sample_spec();
         let sub_hands = vec![spec.hands.clone()];
         let log_likes = vec![[0.0f64, 0.0, 0.0, 0.0]];
@@ -964,15 +726,15 @@ mod tests {
             parse_tile("1p"), parse_tile("2p"), parse_tile("3p"),
             parse_tile("4p"), parse_tile("5p"),
         ];
-        let target_past = vec![DiscardSpec { tile: parse_tile("9s"), tsumogiri: false }];
+        let target_past = vec![DiscardSpec { tile: parse_tile("9s"), tsumogiri: false, is_riichi: false }];
         let opponent_rivers = [
             vec![
-                DiscardSpec { tile: parse_tile("E"), tsumogiri: false },
-                DiscardSpec { tile: parse_tile("S"), tsumogiri: true },
+                DiscardSpec { tile: parse_tile("E"), tsumogiri: false, is_riichi: false },
+                DiscardSpec { tile: parse_tile("S"), tsumogiri: true, is_riichi: false },
             ],
             vec![],
-            vec![DiscardSpec { tile: parse_tile("W"), tsumogiri: false }],
-            vec![DiscardSpec { tile: parse_tile("N"), tsumogiri: false }],
+            vec![DiscardSpec { tile: parse_tile("W"), tsumogiri: false, is_riichi: false }],
+            vec![DiscardSpec { tile: parse_tile("N"), tsumogiri: false, is_riichi: false }],
         ];
         let (assembled, fallback) = assemble_marginal_games(
             &sub_hands,
@@ -986,8 +748,7 @@ mod tests {
             (7, 8),
         );
         assert_eq!(assembled.len(), 5);
-        assert_eq!(fallback, 0); // single-deal pool is self-compatible
-        // Every assembled triple must be tile-compatible with fixed tiles.
+        assert_eq!(fallback, 0);
         let fixed = fixed_tile_counts(&target_14, &target_past, &opponent_rivers, parse_tile("8s"));
         for hands in &assembled {
             let mut counts = fixed;
@@ -995,14 +756,14 @@ mod tests {
                 if p == 1 {
                     continue;
                 }
-                assert!(add_hand_counts(&mut counts, &hands[p as usize].current_13));
+                let k = opponent_rivers[p as usize].iter().filter(|d| !d.tsumogiri).count();
+                assert!(add_tiles_count(&mut counts, &hands[p as usize].initial_13[k..13]));
             }
         }
     }
 
     #[test]
     fn repro_qq_cmd() {
-        // QQ: 234699m24789s336p seat=南(1) x=2 河=东:4z,1s;南:2zt;西:4z;北:9m
         let target_14: [Tile; 14] = [
             parse_tile("2m"), parse_tile("3m"), parse_tile("4m"),
             parse_tile("6m"), parse_tile("9m"), parse_tile("9m"),
@@ -1010,15 +771,15 @@ mod tests {
             parse_tile("8s"), parse_tile("9s"), parse_tile("3p"),
             parse_tile("3p"), parse_tile("6p"),
         ];
-        let target_past = vec![DiscardSpec { tile: parse_tile("S"), tsumogiri: true }];
+        let target_past = vec![DiscardSpec { tile: parse_tile("S"), tsumogiri: true, is_riichi: false }];
         let opponent_rivers = [
             vec![
-                DiscardSpec { tile: parse_tile("N"), tsumogiri: false },
-                DiscardSpec { tile: parse_tile("1s"), tsumogiri: true },
+                DiscardSpec { tile: parse_tile("N"), tsumogiri: false, is_riichi: false },
+                DiscardSpec { tile: parse_tile("1s"), tsumogiri: true, is_riichi: false },
             ],
             vec![],
-            vec![DiscardSpec { tile: parse_tile("N"), tsumogiri: false }],
-            vec![DiscardSpec { tile: parse_tile("9m"), tsumogiri: false }],
+            vec![DiscardSpec { tile: parse_tile("N"), tsumogiri: false, is_riichi: false }],
+            vec![DiscardSpec { tile: parse_tile("9m"), tsumogiri: false, is_riichi: false }],
         ];
         for i in 0..5000u64 {
             let res = sample_prefix_game(
@@ -1035,5 +796,4 @@ mod tests {
         }
         eprintln!("repro OK: all 5000 seeds passed");
     }
-
 }

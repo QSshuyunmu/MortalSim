@@ -26,7 +26,7 @@ use tinyvec::ArrayVec;
 /// 1. No triple-ron ryukyoku.
 /// 2. Tenhou (the yaku) and chihou do not accumulate with other yakus; they are
 ///    always 1x yakuman.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Board {
     /// Counts from 0
     pub kyoku: u8,
