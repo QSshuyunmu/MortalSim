@@ -643,7 +643,7 @@ pub fn sample_prefix_game(
         HandAssignment { current_13: [Tile::new_unchecked(0); 13], kept_draws: vec![] },
     ];
 
-    // Opponents: draw current 13 from pool with Tenhou 899k multi-dimensional joint shanten prior.
+        // Opponents: draw current 13 from pool with Tenhou 899k multi-dimensional joint shanten prior.
     for p in 0..4u8 {
         if p == target_seat {
             continue;
@@ -654,30 +654,27 @@ pub fn sample_prefix_game(
         let num_kept = kp - tsumogiri_count;
         let is_riichi_opponent = river.iter().any(|d| d.is_riichi);
 
-        // 1. 亲子身份
-        let is_oya = if p == oya { 1usize } else { 0usize };
-
-        // 2. 中张切出多样性 (Middle Suit Variety 0, 1, 2+)
-        let mut suit_m = false;
-        let mut suit_p = false;
-        let mut suit_s = false;
-        for d in river {
-            let tid = d.tile.deaka().as_usize();
-            if tid < 9 && (2..=7).contains(&tid) { suit_m = true; }
-            else if (9..18).contains(&tid) && (11..=16).contains(&tid) { suit_p = true; }
-            else if (18..27).contains(&tid) && (20..=25).contains(&tid) { suit_s = true; }
-        }
-        let mid_var = (suit_m as usize + suit_p as usize + suit_s as usize).min(2);
-
-        // 3. 副露状态 (0=门清, 1=数牌吃, 2=役牌碰, 3=2+副露)
-        // 从已知的副露或河中标记识别
-        let furo_type = 0usize; // 门清基准 (后续有 prefix_melds 时从 prefix_melds 计算)
-
-        // 4. 从天凤多维联合先验中精确采样目标向听度 S_target
-        let target_shanten = sample_target_shanten_from_multidim_prior(x, is_riichi_opponent, furo_type, is_oya, mid_var, &mut rng);
-
-        // 5. 组装符合目标向听度的对手手牌
-        let current_13 = synthesize_shanten_hand_multidim(&mut pool, target_shanten, &mut rng)?;
+        let current_13 = if x <= 2 && !is_riichi_opponent && river.len() <= 1 {
+            // Early turn 1..2 without riichi: purely natural uniform shuffle from remaining pool!
+            let h: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
+            h
+        } else {
+            // Mid-deep turns (x >= 3) or riichi: sample target shanten from Tenhou empirical prior
+            let is_oya = if p == oya { 1usize } else { 0usize };
+            let mut suit_m = false;
+            let mut suit_p = false;
+            let mut suit_s = false;
+            for d in river {
+                let tid = d.tile.deaka().as_usize();
+                if tid < 9 && (2..=7).contains(&tid) { suit_m = true; }
+                else if (9..18).contains(&tid) && (11..=16).contains(&tid) { suit_p = true; }
+                else if (18..27).contains(&tid) && (20..=25).contains(&tid) { suit_s = true; }
+            }
+            let mid_var = (suit_m as usize + suit_p as usize + suit_s as usize).min(2);
+            let furo_type = 0usize;
+            let target_shanten = sample_target_shanten_from_multidim_prior(x, is_riichi_opponent, furo_type, is_oya, mid_var, &mut rng);
+            synthesize_shanten_hand_multidim(&mut pool, target_shanten, &mut rng)?
+        };
 
         let mut kept_indices: Vec<usize> = (0..13).collect();
         kept_indices.shuffle(&mut rng);
