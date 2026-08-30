@@ -405,44 +405,7 @@ fn hand_to_counts_34(tiles: &[Tile; 13]) -> [u8; 34] {
 
 /// Sample 13 tiles from `pool` for player `p`, prioritizing 0-shanten if Riichi
 /// or 0..=2 shanten if late turns (x >= 6).
-fn sample_structured_hand_for_opponent(
-    pool: &mut Vec<Tile>,
-    is_riichi: bool,
-    turn: u8,
-    target_shanten: i8,
-    rng: &mut ChaCha12Rng,
-) -> Result<[Tile; 13]> {
-    ensure!(pool.len() >= 13, "insufficient tiles in pool");
-    let max_shanten_target = if is_riichi {
-        0i8
-    } else {
-        target_shanten.max(0)
-    };
 
-    let mut best_hand: Option<([Tile; 13], i8)> = None;
-    // Attempt up to 80 candidate combinations from pool
-    for _ in 0..80 {
-        pool.shuffle(rng);
-        let candidate: [Tile; 13] = pool[pool.len() - 13..].try_into().unwrap();
-        let counts = hand_to_counts_34(&candidate);
-        let sh = crate::algo::shanten::calc_all(&counts, 4);
-        if sh <= max_shanten_target {
-            // Found a qualified structured hand!
-            let current_13: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
-            return Ok(current_13);
-        }
-        match best_hand {
-            None => best_hand = Some((candidate, sh)),
-            Some((_, best_sh)) if sh < best_sh => best_hand = Some((candidate, sh)),
-            _ => {}
-        }
-    }
-
-    // If exact target not met after 80 tries, take the lowest shanten hand found
-    pool.shuffle(rng);
-    let current_13: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
-    Ok(current_13)
-}
 
 
 /// Synthetic Tenpai/Shanten Builder: Constructs a realistic 13-tile mahjong hand from available pool.
@@ -450,13 +413,23 @@ fn sample_structured_hand_for_opponent(
 /// 1. Standard Normal Form (4面子1雀头: 3 complete melds + 1 pair + 1 taatsu/shanpon wait)
 /// 2. Chiitoitsu Form (七对子: 6 distinct pairs + 1 single wait tile)
 /// 3. Kokushi Musou Form (国士无双: 12 yaojiu + 1 pair, or 13 distinct yaojiu)
-fn sample_target_shanten_from_prior(turn: u8, is_riichi: bool, furo_level: usize, rng: &mut ChaCha12Rng) -> i8 {
+fn sample_target_shanten_from_multidim_prior(
+    turn: u8,
+    is_riichi: bool,
+    furo_type: usize,
+    is_oya: usize,
+    mid_var: usize,
+    rng: &mut ChaCha12Rng,
+) -> i8 {
     if is_riichi {
-        return 0; // Riichi always 0-shanten (tenpai)
+        return 0; // Riichi opponent is ALWAYS in tenpai (0-shanten)
     }
     let t_idx = (turn as usize).clamp(1, 18);
-    let f_idx = furo_level.min(2);
-    let prior_bps = super::shanten_priors::TENHOU_SHANTEN_PRIORS[f_idx][t_idx];
+    let f_idx = furo_type.min(3);
+    let o_idx = is_oya.min(1);
+    let m_idx = mid_var.min(2);
+
+    let prior_bps = super::shanten_priors::TENHOU_MULTIDIM_SHANTEN_PRIORS[t_idx][f_idx][o_idx][m_idx];
     let roll: u16 = rng.gen_range(0..10000);
     let mut cum = 0u16;
     for (sh, &bps) in prior_bps.iter().enumerate() {
@@ -468,29 +441,26 @@ fn sample_target_shanten_from_prior(turn: u8, is_riichi: bool, furo_level: usize
     1
 }
 
-fn synthesize_shanten_hand(
+fn synthesize_shanten_hand_multidim(
     pool: &mut Vec<Tile>,
-    is_riichi: bool,
-    turn: u8,
-    rng: &mut ChaCha12Rng,
-) -> Result<[Tile; 13]> {
-    synthesize_shanten_hand_with_furo(pool, is_riichi, turn, 0, rng)
-}
-
-fn synthesize_shanten_hand_with_furo(
-    pool: &mut Vec<Tile>,
-    is_riichi: bool,
-    turn: u8,
-    furo_level: usize,
+    target_shanten: i8,
     rng: &mut ChaCha12Rng,
 ) -> Result<[Tile; 13]> {
     ensure!(pool.len() >= 13, "pool underflow");
-    let target_shanten = sample_target_shanten_from_prior(turn, is_riichi, furo_level, rng);
 
-    if turn < 3 && target_shanten >= 3 {
-        // Early turns with loose shanten: uniform draw
-        let h: [Tile; 13] = pool[pool.len() - 13..].try_into().unwrap();
-        pool.truncate(pool.len() - 13);
+    // 1. If target shanten >= 3 (loose/early hand), do natural draw from pool and verify shanten >= 3
+    if target_shanten >= 3 {
+        for _ in 0..50 {
+            pool.shuffle(rng);
+            let candidate: [Tile; 13] = pool[pool.len() - 13..].try_into().unwrap();
+            let counts = hand_to_counts_34(&candidate);
+            let sh = crate::algo::shanten::calc_all(&counts, 4);
+            if sh >= 3 {
+                let h: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
+                return Ok(h);
+            }
+        }
+        let h: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
         return Ok(h);
     }
 
@@ -499,12 +469,12 @@ fn synthesize_shanten_hand_with_furo(
         pool_counts[t.deaka().as_usize()] += 1;
     }
 
-    // Pattern 1: Chiitoitsu (七对子) path if 0/1 shanten targeted and pairs available
+    // 2. Pattern: Chiitoitsu (七对子) path if 0 or 1 shanten targeted and pairs available
     if target_shanten <= 1 {
         let available_pairs: Vec<usize> = (0..34).filter(|&k| pool_counts[k] >= 2).collect();
         if available_pairs.len() >= 6 {
             let p_roll: u32 = rng.gen_range(0..100);
-            if (available_pairs.len() >= 7 && p_roll < 35) || (available_pairs.len() == 6 && p_roll < 15) {
+            if (available_pairs.len() >= 7 && p_roll < 30) || (available_pairs.len() == 6 && p_roll < 10) {
                 let mut chitoi_pairs = available_pairs.clone();
                 chitoi_pairs.shuffle(rng);
                 let mut used_counts = [0u8; 34];
@@ -535,7 +505,7 @@ fn synthesize_shanten_hand_with_furo(
                     let h: [Tile; 13] = extracted.try_into().unwrap();
                     let counts = hand_to_counts_34(&h);
                     let sh = crate::algo::shanten::calc_all(&counts, 4);
-                    if sh <= target_shanten {
+                    if (target_shanten == 0 && sh == 0) || (target_shanten == 1 && sh == 1) {
                         return Ok(h);
                     }
                     for t in h { pool.push(t); }
@@ -544,10 +514,11 @@ fn synthesize_shanten_hand_with_furo(
         }
     }
 
-    // Pattern 2: Standard 4面子1雀头 Guided Skeletal Assembly (Target-Shanten Driven)
-    // 目标向听 0: 3面子 + 1雀头 + 1搭子/两面 (需4组积木)
-    // 目标向听 1: 2~3面子 + 1雀头 + 1~2搭子 (需3~4组积木)
-    // 目标向听 2: 1~2面子 + 1雀头 + 2搭子 (需2~3组积木)
+    // 3. Pattern: Standard 4面子1雀头 Guided Skeletal Assembly (Target-Shanten Driven)
+    // 严格按照目标向听度组装：
+    // target_shanten == 0 -> 3 面子 + 1 雀头 + 1 听牌搭子 (sh == 0)
+    // target_shanten == 1 -> 2 面子 + 1 雀头 + 2 搭子 (sh == 1)
+    // target_shanten == 2 -> 1 面子 + 1 雀头 + 2 搭子 (sh == 2)
     let min_melds_needed = match target_shanten {
         0 => 3,
         1 => 2,
@@ -575,7 +546,7 @@ fn synthesize_shanten_hand_with_furo(
         all_indices.shuffle(rng);
 
         for &base in &all_indices {
-            if melds_found >= 3 {
+            if melds_found >= min_melds_needed {
                 break;
             }
             if base < 27 {
@@ -595,18 +566,29 @@ fn synthesize_shanten_hand_with_furo(
         }
 
         // 3. Try picking Wait / Taatsu (搭子)
+        let max_taatsu = match target_shanten {
+            0 => 1,
+            1 => 2,
+            2 => 2,
+            _ => 1,
+        };
+        let mut taatsu_found = 0;
         for &base in &all_indices {
+            if taatsu_found >= max_taatsu {
+                break;
+            }
             if base < 27 {
                 let num = base % 9;
                 if num <= 7 && trial_counts[base] >= 1 && trial_counts[base + 1] >= 1 {
                     trial_counts[base] -= 1;
                     trial_counts[base + 1] -= 1;
-                    break;
+                    taatsu_found += 1;
+                    continue;
                 }
             }
             if trial_counts[base] >= 2 {
                 trial_counts[base] -= 2;
-                break;
+                taatsu_found += 1;
             }
         }
 
@@ -636,7 +618,13 @@ fn synthesize_shanten_hand_with_furo(
                 let h: [Tile; 13] = extracted.try_into().unwrap();
                 let counts = hand_to_counts_34(&h);
                 let sh = crate::algo::shanten::calc_all(&counts, 4);
-                if sh <= target_shanten {
+                let match_ok = match target_shanten {
+                    0 => sh == 0,
+                    1 => sh == 1,
+                    2 => sh == 2,
+                    _ => sh >= 3,
+                };
+                if match_ok {
                     return Ok(h);
                 }
                 for t in h {
@@ -647,7 +635,43 @@ fn synthesize_shanten_hand_with_furo(
     }
 
     // Fallback: fast structured sample matching target_shanten
-    sample_structured_hand_for_opponent(pool, is_riichi, turn, target_shanten, rng)
+    sample_structured_hand_for_opponent(pool, target_shanten, rng)
+}
+
+fn sample_structured_hand_for_opponent(
+    pool: &mut Vec<Tile>,
+    target_shanten: i8,
+    rng: &mut ChaCha12Rng,
+) -> Result<[Tile; 13]> {
+    ensure!(pool.len() >= 13, "insufficient tiles in pool");
+    let mut best_hand: Option<([Tile; 13], i8)> = None;
+
+    for _ in 0..80 {
+        pool.shuffle(rng);
+        let candidate: [Tile; 13] = pool[pool.len() - 13..].try_into().unwrap();
+        let counts = hand_to_counts_34(&candidate);
+        let sh = crate::algo::shanten::calc_all(&counts, 4);
+        let match_ok = match target_shanten {
+            0 => sh == 0,
+            1 => sh == 1,
+            2 => sh == 2,
+            _ => sh >= 3,
+        };
+        if match_ok {
+            let current_13: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
+            return Ok(current_13);
+        }
+        match best_hand {
+            None => best_hand = Some((candidate, sh)),
+            Some((_, best_sh)) if (sh - target_shanten).abs() < (best_sh - target_shanten).abs() => {
+                best_hand = Some((candidate, sh));
+            }
+            _ => {}
+        }
+    }
+
+    let current_13: [Tile; 13] = pool.drain(pool.len() - 13..).collect::<Vec<_>>().try_into().unwrap();
+    Ok(current_13)
 }
 
 fn seed_from_tuple(k0: u8, k1: u8, a: u8, b: u8, c: u64, d: u64) -> [u8; 32] {
@@ -708,7 +732,7 @@ pub fn sample_prefix_game(
         HandAssignment { current_13: [Tile::new_unchecked(0); 13], kept_draws: vec![] },
     ];
 
-    // Opponents: draw current 13 from pool with shanten/meld bias; pick kept subset.
+    // Opponents: draw current 13 from pool with Tenhou 899k multi-dimensional joint shanten prior.
     for p in 0..4u8 {
         if p == target_seat {
             continue;
@@ -719,7 +743,30 @@ pub fn sample_prefix_game(
         let num_kept = kp - tsumogiri_count;
         let is_riichi_opponent = river.iter().any(|d| d.is_riichi);
 
-        let current_13 = synthesize_shanten_hand(&mut pool, is_riichi_opponent, x, &mut rng)?;
+        // 1. 亲子身份
+        let is_oya = if p == oya { 1usize } else { 0usize };
+
+        // 2. 中张切出多样性 (Middle Suit Variety 0, 1, 2+)
+        let mut suit_m = false;
+        let mut suit_p = false;
+        let mut suit_s = false;
+        for d in river {
+            let tid = d.tile.deaka().as_usize();
+            if tid < 9 && (2..=7).contains(&tid) { suit_m = true; }
+            else if (9..18).contains(&tid) && (11..=16).contains(&tid) { suit_p = true; }
+            else if (18..27).contains(&tid) && (20..=25).contains(&tid) { suit_s = true; }
+        }
+        let mid_var = (suit_m as usize + suit_p as usize + suit_s as usize).min(2);
+
+        // 3. 副露状态 (0=门清, 1=数牌吃, 2=役牌碰, 3=2+副露)
+        // 从已知的副露或河中标记识别
+        let furo_type = 0usize; // 门清基准 (后续有 prefix_melds 时从 prefix_melds 计算)
+
+        // 4. 从天凤多维联合先验中精确采样目标向听度 S_target
+        let target_shanten = sample_target_shanten_from_multidim_prior(x, is_riichi_opponent, furo_type, is_oya, mid_var, &mut rng);
+
+        // 5. 组装符合目标向听度的对手手牌
+        let current_13 = synthesize_shanten_hand_multidim(&mut pool, target_shanten, &mut rng)?;
 
         let mut kept_indices: Vec<usize> = (0..13).collect();
         kept_indices.shuffle(&mut rng);
