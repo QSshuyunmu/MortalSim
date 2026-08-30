@@ -77,15 +77,37 @@ def normalize_tile_text(text: str) -> str:
                     out.append(f"{n}{suit}")
         return "".join(out)
 
+    # 检查是否全部字符都能被麻将语法解释
+    compact_matches = re.findall(r"[0-9]+[mpszMPSZ]|[东南西北白发發中]+", t)
+    if compact_matches:
+        # 如果存在未被识别的非空白字符，且不纯粹是麻将牌，严格返回原串供上层报错
+        parsed_len = sum(len(m) for m in compact_matches)
+        cleaned_t = t.replace(" ", "").replace(",", "").replace("，", "")
+        if parsed_len == len(cleaned_t):
+            out = []
+            for tok in compact_matches:
+                if tok[0] in "东南西北白发發中":
+                    for ch in tok:
+                        out.append(HONOR_MAP.get(ch, ch))
+                else:
+                    suit = tok[-1].lower()
+                    nums = tok[:-1]
+                    for n in nums:
+                        out.append(f"{n}{suit}")
+            return "".join(out)
+
     explicit = re.findall(r"[0-9][mpszMPSZ]|[东南西北白发發中]", t)
     if explicit:
-        out = []
-        for item in explicit:
-            if item in HONOR_MAP:
-                out.append(HONOR_MAP[item])
-            else:
-                out.append(item.lower())
-        return "".join(out)
+        parsed_len = sum(len(m) for m in explicit)
+        cleaned_t = t.replace(" ", "")
+        if parsed_len == len(cleaned_t):
+            out = []
+            for item in explicit:
+                if item in HONOR_MAP:
+                    out.append(HONOR_MAP[item])
+                else:
+                    out.append(item.lower())
+            return "".join(out)
 
     return t
 
@@ -327,7 +349,7 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
 
     rest = raw
 
-    # 0a. 提取巡目 x (支持 1..18)
+    # 1. 提取巡目 x (支持 1..18)
     x_val = 1
     x_m = re.search(r"(?i)(?:^|(?<=[\s,;]))x[:：=]?(\d{1,2})\b", rest)
     if x_m:
@@ -336,7 +358,7 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
             return None, f"巡目参数 x 不合法：{x_val}（必须在 1..18 范围内）"
         rest = rest[:x_m.start()] + " " + rest[x_m.end():]
 
-    # 0b. 提取自身座位 seat
+    # 2. 提取自身座位 seat
     target_seat_val = None
     seat_m = re.search(r"(?i)(?:^|(?<=[\s,;]))(?:seat|座位)[:：=]?([0-3]|east|south|west|north|[eswn东南西北])\b", rest)
     if seat_m:
@@ -345,42 +367,14 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
             target_seat_val = SEAT_MAP[s_tok]
         rest = rest[:seat_m.start()] + " " + rest[seat_m.end():]
 
-    # 0c. 提取温度 tau
+    # 3. 提取温度 tau
     tau_val = 1.0
     tau_m = re.search(r"(?i)(?:^|(?<=[\s,;]))(?:tau|温度)[:：=]?(\d+(?:\.\d+)?)\b", rest)
     if tau_m:
         tau_val = float(tau_m.group(1))
         rest = rest[:tau_m.start()] + " " + rest[tau_m.end():]
 
-    # 0d. 提取牌河 river
-    river_raw = None
-    river_m = re.search(r"(?i)(?:^|(?<=[\s,;]))(?:river|河|牌河)[:：=]?([0-9mpszzt\^rR立\(（\)）\u4e00-\u9fa5,，:：;；/|／｜\s\-_东南西北ESWN]+?)(?=\s+[pPdDcCeEwWsS]|\s*$)", rest)
-    if river_m:
-        river_raw = river_m.group(1).strip()
-        rest = rest[:river_m.start()] + " " + rest[river_m.end():]
-
-    # 1. 提取点数 P...
-    scores_raw = None
-    scores_m = re.search(r"(?i)\b[pP][:：\s]?([-0-9,\.kK\s，、]+?)(?=\s+[cdCD\d]|\s*$)", rest)
-    if scores_m:
-        scores_raw = scores_m.group(1).strip()
-        rest = rest[:scores_m.start()] + " " + rest[scores_m.end():]
-
-    # 2. 提取宝牌 d...
-    dora_m = re.search(r'(?i)\b[dD][:：\s]?([0-9mpszrKR]{2,4})\b', rest)
-    if not dora_m:
-        return None, "缺少宝牌参数，例：d8p 或 d4m"
-    dora_raw = dora_m.group(1).strip()
-    rest = rest[:dora_m.start()] + " " + rest[dora_m.end():]
-
-    # 3. 提取候选 c... (若未提供，后续自动从手牌提取切牌候选)
-    cand_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[cC][:：=]?([a-zA-Z0-9mpszkrKR>:\-_,，、\u4e00-\u9fa5]+?)(?=\s+[pPdDeEwWsSxX]|\s+\d+\b|\s*$)', rest)
-    cand_raw = None
-    if cand_m:
-        cand_raw = cand_m.group(1).strip()
-        rest = rest[:cand_m.start()] + " " + rest[cand_m.end():]
-
-    # 4. 提取局与本场
+    # 4. 提取局与本场 (E1-0, S4-1, E4) - 优先提取以避免其数字被当作点数
     round_raw = "E1"
     honba_raw = "0"
     round_m = re.search(r'(?i)\b([EWSews][1-4])(?:-(\d+))?\b', rest)
@@ -389,13 +383,47 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         honba_raw = round_m.group(2) or "0"
         rest = rest[:round_m.start()] + " " + rest[round_m.end():]
 
-    # 5. 提取模拟局数
-    runs_raw = 500
-    runs_m = re.search(r'\b(\d{2,6})\b', rest)
-    if runs_m:
-        runs_raw = int(runs_m.group(1))
-        rest = rest[:runs_m.start()] + " " + rest[runs_m.end():]
+    # 5. 提取宝牌 d...
+    dora_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[dD][:：\s]?([0-9mpszrKR]{2,4})\b', rest)
+    if not dora_m:
+        return None, "缺少宝牌参数，例：d8p 或 d4m"
+    dora_raw = dora_m.group(1).strip()
+    rest = rest[:dora_m.start()] + " " + rest[dora_m.end():]
 
+    # 6. 提取牌河 river
+    river_raw = None
+    river_m = re.search(r"(?i)(?:^|(?<=[\s,;]))(?:river|河|牌河)[:：=]?([0-9mpszzt\^rR立\(（\)）\u4e00-\u9fa5,，:：;；/|／｜\s\-_东南西北ESWN]+?)(?=\s+[pPdDcCeEwWsS]|\s*$)", rest)
+    if river_m:
+        river_raw = river_m.group(1).strip()
+        rest = rest[:river_m.start()] + " " + rest[river_m.end():]
+
+    # 7. 提取候选 c... (支持 c=... 或 ctsumo,...)
+    cand_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[cC][:：=]?([a-zA-Z0-9mpszkrKR>:\-_,，、\u4e00-\u9fa5]+?)(?=\s+[pPdDeEwWsSxX]|\s+\d+\b|\s*$)', rest)
+    cand_raw = None
+    if cand_m:
+        cand_raw = cand_m.group(1).strip()
+        rest = rest[:cand_m.start()] + " " + rest[cand_m.end():]
+
+    # 8. 提取点数 (支持 P250,250,250,250 / P25000,25000 / 无P前缀的 4 段点数如 62,526,304,108)
+    scores_raw = None
+    scores_m = re.search(r'(?i)(?:[pP点点数][:：\s]?\s*((?:-?\d+(?:\.\d+)?k?[\s,，、]+){3}-?\d+(?:\.\d+)?k?)\b|(?<![0-9a-zA-Z])((?:-?\d+(?:\.\d+)?k?[\s,，、]+){3}-?\d+(?:\.\d+)?k?)(?![0-9a-zA-Z]))', rest)
+    if scores_m:
+        scores_raw = (scores_m.group(1) or scores_m.group(2)).strip()
+        rest = rest[:scores_m.start()] + " " + rest[scores_m.end():]
+
+    # 9. 提取模拟局数 (支持 runs=100 / 局数:100 / 尾随数字 10 等)
+    runs_raw = 500
+    runs_named_m = re.search(r'(?i)(?:^|(?<=[\s,;]))(?:runs?|局数|次数)[:：=]?(\d{1,6})\b', rest)
+    if runs_named_m:
+        runs_raw = int(runs_named_m.group(1))
+        rest = rest[:runs_named_m.start()] + " " + rest[runs_named_m.end():]
+    else:
+        runs_trail_m = re.search(r'(?:^|\s+)(\d{1,6})\s*$', rest)
+        if runs_trail_m:
+            runs_raw = int(runs_trail_m.group(1))
+            rest = rest[:runs_trail_m.start()] + " " + rest[runs_trail_m.end():]
+
+    # 10. 主手牌
     # 6. 主手牌
     hand_raw = rest.strip()
     if not hand_raw:
