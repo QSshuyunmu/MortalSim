@@ -373,6 +373,7 @@ pub fn build_prefix_game_from_hands(
     // Build timeline draws
     let mut timeline_draws: Vec<Tile> = Vec::new();
     let mut forced_steps: Vec<PrefixStep> = Vec::new();
+    let mut target_decision_point_drawn = false;
     let mut target_tedashi_draw_idx = 0usize;
 
     if oya == target_seat {
@@ -416,8 +417,9 @@ pub fn build_prefix_game_from_hands(
             };
 
             if !has_discard {
-                if p == target_seat && !is_post_discard_reaction && r == x {
+                if p == target_seat && !target_decision_point_drawn {
                     timeline_draws.push(target_14[13]);
+                    target_decision_point_drawn = true;
                     break 'outer;
                 }
                 let remaining_any = (0..4u8).any(|check_p| {

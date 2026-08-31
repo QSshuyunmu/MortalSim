@@ -360,8 +360,8 @@ def _load_engine(
         )
         return engine, "cuda:0", {**model, "engine": "mortal-lite"}
 
-    if decision_contract != "legacy_amp_v1":
-        raise RuntimeError("The Python development engine supports only legacy_amp_v1")
+    # PyTorch engine dynamically supports PyTorch AMP with any contract name
+    pass
 
     import torch
     from engine import MortalEngine

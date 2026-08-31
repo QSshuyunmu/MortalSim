@@ -41,6 +41,8 @@ hiddenimports = list(torch_hidden) + list(excel_hidden) + [
     "mortal_app.model_registry",
     "mortal_app.gpu_monitor",
     "numpy",
+    "scipy",
+    "scipy.sparse",
     "tkinter",
 ]
 
@@ -56,7 +58,6 @@ excluded_optional_stacks = [
     "onnxruntime",
     "pandas",
     "pyarrow",
-    "scipy",
     "matplotlib",
     "numba",
     "llvmlite",

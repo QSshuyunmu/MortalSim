@@ -12,6 +12,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+import scipy.sparse
+if not hasattr(scipy.sparse, "spmatrix"):
+    try:
+        from scipy.sparse._base import _spbase
+        scipy.sparse.spmatrix = _spbase
+    except Exception:
+        pass
 import numpy as np
 
 HOUOU_PT_TABLES = {

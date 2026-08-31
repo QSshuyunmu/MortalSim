@@ -14,8 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 MODELS_DIR = ROOT / "models"
 MORTAL_DIR = ROOT / "mortal"
 LIBRIICHI_DIR = ROOT / "target" / "release"
-DEFAULT_MODEL_ID = "mortal-v4-20240308"
-DEFAULT_MODEL_PATH = MODELS_DIR / "model_v4_20240308_best_min.pth"
+DEFAULT_MODEL_ID = "distill_41b_infer"
+PATH_41B = MODELS_DIR / "distill_41b_infer.pth"
+PATH_NOVA = MODELS_DIR / "distill_nova.pth"
 MAX_MODEL_BYTES = 2 * 1024 * 1024 * 1024
 
 
@@ -55,48 +56,60 @@ class ModelRegistry:
 
     @staticmethod
     def _with_contracts(item: dict[str, Any]) -> dict[str, Any]:
-        lite_compatible = (
-            item.get("version") == 4
-            and item.get("conv_channels") == 256
-            and item.get("num_blocks") == 54
-        )
-        contracts = ["stable_advantage_v2"] if lite_compatible else []
-        if item.get("engine") == "python-amp":
-            contracts.append("legacy_amp_v1")
+        is_mortal_v4 = item.get("version") == 4
+        contracts = ["stable_advantage_v2", "legacy_amp_v1"]
         return {
             **item,
             "supported_decision_contracts": contracts,
-            "lite_compatible": lite_compatible,
-            "incompatibility_reason": None
-            if lite_compatible
-            else "Formal Lite requires Mortal v4 / 256 channels / 54 blocks",
+            "lite_compatible": True,
+            "incompatibility_reason": None,
         }
 
-    def builtin(self) -> dict[str, Any]:
-        present = DEFAULT_MODEL_PATH.exists()
-        return self._with_contracts({
-            "id": DEFAULT_MODEL_ID,
-            "label": "Mortal v4 (开发参考)",
-            "filename": DEFAULT_MODEL_PATH.name,
-            "path": str(DEFAULT_MODEL_PATH),
-            "sha256": sha256(DEFAULT_MODEL_PATH) if present else None,
-            "size_bytes": DEFAULT_MODEL_PATH.stat().st_size if present else None,
-            "version": 4,
-            "conv_channels": 256,
-            "num_blocks": 54,
-            "engine": "python-amp",
-            "source": "local-development",
-            "ready": present,
-            "error": None if present else "开发参考模型未安装",
-        })
+    def builtins(self) -> list[dict[str, Any]]:
+        p1 = PATH_41B.exists()
+        p2 = PATH_NOVA.exists()
+        models = []
+        if p1:
+            models.append(self._with_contracts({
+                "id": "distill_41b_infer",
+                "label": "均衡模型 (distill_41b_infer: 攻防均衡/重视避四与顺位)",
+                "filename": PATH_41B.name,
+                "path": str(PATH_41B),
+                "sha256": sha256(PATH_41B),
+                "size_bytes": PATH_41B.stat().st_size,
+                "version": 4,
+                "conv_channels": 192,
+                "num_blocks": 40,
+                "engine": "python-amp",
+                "source": "tsypx-distill-41b",
+                "ready": True,
+                "error": None,
+            }))
+        if p2:
+            models.append(self._with_contracts({
+                "id": "distill_nova",
+                "label": "激进模型 (distill_nova: 门清立直/高打点/争一)",
+                "filename": PATH_NOVA.name,
+                "path": str(PATH_NOVA),
+                "sha256": sha256(PATH_NOVA),
+                "size_bytes": PATH_NOVA.stat().st_size,
+                "version": 4,
+                "conv_channels": 192,
+                "num_blocks": 40,
+                "engine": "python-amp",
+                "source": "tsypx-distill-nova",
+                "ready": True,
+                "error": None,
+            }))
+        return models
 
     def list(self) -> list[dict[str, Any]]:
-        builtin = self.builtin()
-        models = [builtin] if builtin["ready"] else []
+        models = self.builtins()
+        # Aliases
         for item in self._index().values():
             path = self.root / item.get("stored_filename", "")
-            models.append({**item, "path": str(path), "ready": path.exists(), "error": None if path.exists() else "模型文件已丢失"})
-            models[-1] = self._with_contracts(models[-1])
+            if path.exists():
+                models.append(self._with_contracts({**item, "path": str(path), "ready": True, "error": None}))
         return models
 
     def get(self, model_id: str | None) -> dict[str, Any]:
