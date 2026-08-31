@@ -349,6 +349,15 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
 
     rest = raw
 
+    # 0. 模型切换 m= (默认均衡, m=agg -> 激进; 仅在内部使用模型ID，绝不对外显示)
+    model_id_val = "model_balanced"
+    model_m = re.search(r'(?i)(?:^|(?<=[\s,;]))(?:m|模型)[:：=]?([a-zA-Z0-9_\u4e00-\u9fa5]+)\b', rest)
+    if model_m:
+        m_tok = model_m.group(1).lower().strip()
+        if m_tok in ("agg", "aggressive", "active", "aggr", "nva", "激进", "进攻", "争一"):
+            model_id_val = "model_aggressive"
+        rest = rest[:model_m.start()] + " " + rest[model_m.end():]
+
     # 1. 提取巡目 x (支持 1..18)
     x_val = 1
     x_m = re.search(r"(?i)(?:^|(?<=[\s,;]))x[:：=]?(\d{1,2})\b", rest)
@@ -600,6 +609,7 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         target_past, opp_rivers = _generate_default_rivers(hand_tiles, effective_target_seat, 0, x_val, call_target_tile=call_tile)
 
     request: dict[str, Any] = {
+        "model_id": model_id_val,
         "hand": hand_norm,
         "dora": dora_indicator,
         "discards": candidates,

@@ -190,25 +190,29 @@ class Bot:
 
     async def send_group_image(self, group_id: int, image_path: str | Path) -> None:
         img_p = Path(image_path).resolve()
-        file_uri = f"file:///{img_p.as_posix()}"
+        # NapCat 支持三种图片格式：绝对路径原生字符串、file:/// URI、base64://
         client = await self._http_client()
-        try:
-            # 1. 优先使用本地 file:/// URI 发送（毫秒级直读，避免 base64 巨大负载）
-            resp = await client.post(
-                f"{self.bot_cfg['onebot_http_url']}/send_group_msg",
-                json={
-                    "group_id": group_id,
-                    "message": [{"type": "image", "data": {"file": file_uri}}],
-                },
-            )
-            if resp.status_code == 200 and (resp.json() or {}).get("status") != "failed":
-                return
-            log.warning("file:/// 方式发送图片未成功，尝试 base64 备用方式: %s", resp.text[:200])
-        except Exception as exc:
-            log.warning("file:/// 发送图片异常，尝试 base64 备用方式: %s", exc)
+        raw_path = str(img_p)
+        file_uri = f"file:///{img_p.as_posix()}"
+        
+        # 1. 尝试绝对路径 (NapCat Windows 原生最快解析格式)
+        for fmt in (raw_path, file_uri):
+            try:
+                resp = await client.post(
+                    f"{self.bot_cfg['onebot_http_url']}/send_group_msg",
+                    json={
+                        "group_id": group_id,
+                        "message": [{"type": "image", "data": {"file": fmt}}],
+                    },
+                    timeout=30.0,
+                )
+                if resp.status_code == 200 and (resp.json() or {}).get("status") != "failed":
+                    return
+            except Exception as exc:
+                log.warning("尝试路径发送图片异常 (%s): %s", fmt, exc)
 
+        # 2. 备用 base64
         try:
-            # 2. 备用 base64 方式
             data = base64.b64encode(img_p.read_bytes()).decode()
             resp = await client.post(
                 f"{self.bot_cfg['onebot_http_url']}/send_group_msg",
@@ -216,35 +220,41 @@ class Bot:
                     "group_id": group_id,
                     "message": [{"type": "image", "data": {"file": f"base64://{data}"}}],
                 },
+                timeout=60.0,
             )
-            if resp.status_code != 200 or (resp.json() or {}).get("status") == "failed":
-                log.error("base64 发送图片失败: HTTP %s, body: %s", resp.status_code, resp.text[:200])
+            if resp.status_code == 200 and (resp.json() or {}).get("status") != "failed":
+                return
+            log.error("base64 发送图片失败: HTTP %s, body: %s", resp.status_code, resp.text[:200])
         except Exception as exc:
             log.error("发送群图片失败 (group %s): %s", group_id, exc)
 
     async def send_group_result(self, group_id: int, user_id: str, text: str, image_path: str | Path) -> None:
-        """模拟完成后：@派发用户 + 结果文字 + 图片，同一条消息发送。"""
+        """模拟完成后：发送图文并茂的卡片消息。"""
         img_p = Path(image_path).resolve()
+        raw_path = str(img_p)
         file_uri = f"file:///{img_p.as_posix()}"
-        message = [
-            {"type": "at", "data": {"qq": str(user_id), "text": ""}},
-            {"type": "text", "data": {"text": text}},
-            {"type": "image", "data": {"file": file_uri}},
-        ]
-        try:
-            client = await self._http_client()
-            resp = await client.post(
-                f"{self.bot_cfg['onebot_http_url']}/send_group_msg",
-                json={"group_id": group_id, "message": message},
-            )
-            if resp.status_code != 200 or (resp.json() or {}).get("status") == "failed":
-                log.warning("发送 @+图文 失败，退回分开发送: HTTP %s %s", resp.status_code, resp.text[:200])
-                await self.send_group_text(group_id, text)
-                await self.send_group_image(group_id, img_p)
-        except Exception as exc:
-            log.error("发送 @+图文 异常，退回分开发送: %s", exc)
-            await self.send_group_text(group_id, text)
-            await self.send_group_image(group_id, img_p)
+        client = await self._http_client()
+
+        for fmt in (raw_path, file_uri):
+            message = [
+                {"type": "at", "data": {"qq": str(user_id), "text": ""}},
+                {"type": "text", "data": {"text": text}},
+                {"type": "image", "data": {"file": fmt}},
+            ]
+            try:
+                resp = await client.post(
+                    f"{self.bot_cfg['onebot_http_url']}/send_group_msg",
+                    json={"group_id": group_id, "message": message},
+                    timeout=30.0,
+                )
+                if resp.status_code == 200 and (resp.json() or {}).get("status") != "failed":
+                    return
+            except Exception as exc:
+                log.warning("合并发送图文异常 (%s): %s", fmt, exc)
+
+        # 若合并发送因协议超时拦截，退回分开发送
+        await self.send_group_text(group_id, text)
+        await self.send_group_image(group_id, img_p)
 
     def _image_segment(self, segments: list) -> dict | None:
         for seg in segments:
@@ -352,12 +362,8 @@ class Bot:
         self.quota.reserve(user_id, runs)
         position = self.active + self.tasks.qsize() + 1
         await self.tasks.put({"user_id": user_id, "group_id": group_id, "request": request, "runs": runs})
-        # 总是发送简短确认：进入模拟进程即告知用户已收到并在推演
-        cand_count = len(request.get("discards", []))
-        await self.send_group_text(
-            group_id,
-            f"🎲 已接收，正在推演 {runs} 局 × {cand_count} 个候选，请稍候...",
-        )
+        # 直接静默入队，最终只发送 1 条包含 4K 决策卡片的完整结果，杜绝双重回复
+        pass
 
     # ---------- 消息处理 ----------
     async def handle_event(self, event: dict) -> None:
@@ -499,16 +505,21 @@ class Bot:
         request = dict(item["request"])
         request["runs"] = item["runs"]
         request["batch_size"] = 1000
-        request["model_id"] = self.mortal_cfg["model_id"]
+        # 模型映射: parser 内部用不透明别名，此处映射回后端真实模型 ID (用户侧绝不显示模型名)
+        internal_model = request.get("model_id", self.mortal_cfg.get("model_id", "model_balanced"))
+        request["model_id"] = {
+            "model_balanced": "distill_41b_infer",
+            "model_aggressive": "distill_nova",
+        }.get(internal_model, self.mortal_cfg.get("model_id", "distill_41b_infer"))
         request["rayon_threads"] = int(self.mortal_cfg.get("rayon_threads", 20))
-        request["engine"] = "lite"
-        request["decision_contract"] = "stable_advantage_v2"
+        request["engine"] = "python"
+        request["decision_contract"] = "legacy_amp_v1"
         if "scores" not in request:
             request["scores"] = {"self": 25000, "shimocha": 25000, "toimen": 25000}
 
         run_id = await self.mortal.create_run(request)
         self.current_run_id = run_id
-        job = await self.mortal.wait_completed(run_id, float(self.mortal_cfg.get("timeout_seconds", 0)))
+        job = await self.mortal.wait_completed(run_id, timeout_seconds=0)
         result = job.get("result") or {}
         if not result.get("candidates"):
             raise MortalSimError("结果中没有候选数据")
