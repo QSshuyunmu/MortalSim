@@ -91,89 +91,29 @@ class Bot:
             stdout=out_f,
             stderr=err_f,
             creationflags=flags,
-            close_fds=True,
         )
-        os._exit(0)
+        sys.exit(0)
 
-    async def _file_watcher(self) -> None:
-        """监听 src/ 和 config.toml 变动，自动平滑重载。"""
-        if not self.bot_cfg.get("auto_reload", True):
-            return
-        bot_root = Path(__file__).resolve().parent.parent
-        src_dir = bot_root / "src"
-        watched = [bot_root / "config.toml", *src_dir.glob("*.py")]
-        mtimes = {p: p.stat().st_mtime for p in watched if p.exists()}
+    def _is_admin(self, user_id: str) -> bool:
+        if user_id == "2361035324":
+            return True
+        admins = self.bot_cfg.get("admin_qq") or []
+        return str(user_id) in [str(x) for x in admins]
 
-        while True:
-            await asyncio.sleep(1.0)
-            if not self.bot_cfg.get("auto_reload", True):
-                continue
-            current_files = [bot_root / "config.toml", *src_dir.glob("*.py")]
-            for p in current_files:
-                if not p.exists():
-                    continue
-                try:
-                    mtime = p.stat().st_mtime
-                except OSError:
-                    continue
-                if p not in mtimes:
-                    mtimes[p] = mtime
-                elif mtime > mtimes[p] + 0.1:
-                    log.info("检测到文件变更：%s，正在自动重载 Bot...", p.name)
-                    await asyncio.sleep(0.5)
-                    self.trigger_restart(f"file_modified: {p.name}")
-                    return
-
-    # ---------- OneBot 网络 ----------
-    async def run(self) -> None:
-        loop = asyncio.get_running_loop()
-        self._http = httpx.AsyncClient(timeout=30)
-
-        def on_message(_ws, raw: str):
-            try:
-                event = json.loads(raw)
-            except Exception:
-                return
-            asyncio.run_coroutine_threadsafe(self.handle_event(event), loop)
-
-        def on_error(_ws, error):
-            log.error("OneBot WS error: %s", error)
-
-        def ws_loop() -> None:
-            while True:
-                ws = websocket.WebSocketApp(
-                    self.bot_cfg["onebot_ws_url"],
-                    on_message=on_message,
-                    on_error=on_error,
-                )
-                try:
-                    ws.run_forever(ping_interval=20)
-                except Exception:
-                    pass
-                # 确保旧连接完全关闭后再重连，避免两个连接并存导致重复事件
-                try:
-                    ws.close()
-                except Exception:
-                    pass
-                log.warning("OneBot WS disconnected; reconnecting in 3s...")
-                time.sleep(3)
-
-        thread = threading.Thread(target=ws_loop, daemon=True)
-        thread.start()
-        log.info("Bot 已启动，等待 OneBot 事件...")
-        try:
-            active = await self.mortal.get_active_runs()
-            if active:
-                log.warning("检测到 MortalSim 已有 %d 个运行/排队任务，新模拟将等待其完成后再创建: %s", len(active), active)
-        except Exception as exc:
-            log.debug("启动时查询 MortalSim 活跃任务失败: %s", exc)
-        asyncio.create_task(self.worker())
-        asyncio.create_task(self._file_watcher())
-        await asyncio.Future()
+    def _is_duplicate(self, group_id: int, user_id: str, raw_msg: str, message_id: int | None = None) -> bool:
+        now = time.time()
+        while self.seen_messages and now - self.seen_messages[0][0] > 60.0:
+            self.seen_messages.popleft()
+        sig = (group_id, user_id, raw_msg, message_id)
+        for _, existing in self.seen_messages:
+            if existing == sig:
+                return True
+        self.seen_messages.append((now, sig))
+        return False
 
     async def _http_client(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
-            self._http = httpx.AsyncClient(trust_env=False, timeout=15.0)
+            self._http = httpx.AsyncClient(trust_env=False, timeout=30.0)
         return self._http
 
     async def send_group_text(self, group_id: int, text: str) -> None:
@@ -190,7 +130,6 @@ class Bot:
 
     async def send_group_image(self, group_id: int, image_path: str | Path) -> None:
         img_p = Path(image_path).resolve()
-        # NapCat 支持三种图片格式：绝对路径原生字符串、file:/// URI、base64://
         client = await self._http_client()
         raw_path = str(img_p)
         file_uri = f"file:///{img_p.as_posix()}"
@@ -273,53 +212,27 @@ class Bot:
             f"{self.bot_cfg['onebot_http_url']}/get_image",
             json={"file": file_id},
         )
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        local = (data.get("data") or {}).get("file")
-        if local and Path(local).exists():
-            return local
+        if resp.status_code == 200:
+            return resp.json().get("data", {}).get("file")
         return None
 
-
-    def _is_duplicate(self, group_id: int, user_id: str, raw: str, message_id) -> bool:
-        now = time.time()
-        # 1) exact message_id dedup
-        if message_id is not None:
-            key_id = ("id", group_id, user_id, str(message_id))
-            for ts, k in self.seen_messages:
-                if k == key_id:
-                    log.warning("duplicate OneBot event ignored (message_id): %s", key_id)
-                    return True
-            self.seen_messages.append((now, key_id))
-        # 2) content dedup within 3s (NapCat may redeliver with a new message_id)
-        key_content = ("content", group_id, user_id, raw)
-        for ts, k in self.seen_messages:
-            if k == key_content and now - ts < 3.0:
-                log.warning("duplicate OneBot event ignored (content): %s", key_content)
-                return True
-        self.seen_messages.append((now, key_content))
-        # prune old entries
-        while self.seen_messages and now - self.seen_messages[0][0] > 10.0:
-            self.seen_messages.popleft()
-        return False
-
-    def _is_admin(self, user_id: str) -> bool:
-        admin_ids = {str(x) for x in self.bot_cfg.get("admin_qq", [])}
-        return user_id == "2361035324" or user_id in admin_ids
-
+    # ---------- 队列管理 ----------
     async def _cancel_user(self, user_id: str) -> int:
-        """移除该用户在队列中的任务；若正在运行则调用 MortalSim 取消。返回移除/取消数。"""
         removed = 0
-        q = self.tasks._queue
-        pending = list(q)
-        for item in pending:
-            if item.get("user_id") == user_id:
-                try:
-                    q.remove(item)
+        retained = []
+        while not self.tasks.empty():
+            try:
+                item = self.tasks.get_nowait()
+                self.tasks.task_done()
+                if item.get("user_id") == user_id:
+                    self.quota.release(user_id, item.get("runs", 0))
                     removed += 1
-                except ValueError:
-                    pass
+                else:
+                    retained.append(item)
+            except asyncio.QueueEmpty:
+                break
+        for item in retained:
+            await self.tasks.put(item)
         if (
             self.active_item is not None
             and self.active_item.get("user_id") == user_id
@@ -351,7 +264,8 @@ class Bot:
             await self.send_group_text(group_id, f"操作太频繁，请 {cooldown - (now - last):.0f} 秒后再试。")
             return
         self.last_request[user_id] = now
-        if self.tasks.qsize() >= int(self.quota_cfg.get("max_global_queued", 5)):
+        max_q = int(self.quota_cfg.get("max_queued_tasks", self.quota_cfg.get("max_global_queued", 8)))
+        if self.tasks.qsize() >= max_q:
             await self.send_group_text(group_id, "当前排队任务已满，请稍后再试。")
             return
         if self.quota_cfg.get("quota_enabled", False):
@@ -360,10 +274,7 @@ class Bot:
                 await self.send_group_text(group_id, reason)
                 return
         self.quota.reserve(user_id, runs)
-        position = self.active + self.tasks.qsize() + 1
         await self.tasks.put({"user_id": user_id, "group_id": group_id, "request": request, "runs": runs})
-        # 直接静默入队，最终只发送 1 条包含 4K 决策卡片的完整结果，杜绝双重回复
-        pass
 
     # ---------- 消息处理 ----------
     async def handle_event(self, event: dict) -> None:
@@ -390,8 +301,6 @@ class Bot:
         whitelist = self.bot_cfg.get("group_whitelist") or []
         if whitelist and group_id not in [int(x) for x in whitelist]:
             return
-
-
 
         # 只取纯文本段，去掉 @ / 图片 / CQ 代码
         text_parts = []
@@ -445,61 +354,48 @@ class Bot:
                     _bot_lock_path().unlink(missing_ok=True)
                 except Exception:
                     pass
-                os._exit(0)
-            else:
-                await self.send_group_text(group_id, "你没有权限执行停机命令。")
-            return
-
-        if text.startswith(("/restart", "/reload", "重启")):
-            if user_id == "2361035324" or user_id in [str(x) for x in self.bot_cfg.get("admin_qq", [])]:
-                await self.send_group_text(group_id, "收到重启指令，正在重启 Bot 进程...")
-                await asyncio.sleep(0.5)
-                self.trigger_restart(f"admin_command from {user_id}")
-            else:
-                await self.send_group_text(group_id, "你没有权限执行重启命令。")
-            return
-
-        if text.startswith(("重置额度", "清零")):
-            if user_id in [str(x) for x in self.bot_cfg.get("admin_qq", [])]:
-                target = text.replace("重置额度", "").replace("清零", "").strip()
-                if not target:
-                    target = user_id
-                self.quota.reset_user(target)
-                await self.send_group_text(group_id, f"已重置 {target} 今日额度。")
-            else:
-                await self.send_group_text(group_id, "你没有权限执行该命令。")
-            return
-
-        # 默认引导回复（精简）
-        await self.send_group_text(
-            group_id,
-            "/sim 手牌 d宝牌 c候选 [局-本场] [局数] [P点数]\n"
-            "例：/sim 123456789m789s12p d8p c1p,2p E1-0 2000\n"
-            "发送 /help 查看完整说明，/state 查看状态",
-        )
+                sys.exit(0)
 
     # ---------- 任务 Worker ----------
     async def worker(self) -> None:
         while True:
-            item = await self.tasks.get()
-            self.active = 1
-            self.active_item = item
-            self.current_run_id = None
             try:
-                await self.execute(item)
-            except Exception as exc:
-                if self.cancelled_user == item.get("user_id"):
-                    await self.send_group_text(item["group_id"], "已取消你的模拟任务。")
-                else:
-                    log.exception("task failed")
-                    self.quota.release(item["user_id"], item["runs"])
-                    await self.send_group_text(item["group_id"], f"任务失败：{exc}")
-            finally:
-                self.cancelled_user = None
-                self.active_item = None
+                item = await self.tasks.get()
+                self.active = 1
+                self.active_item = item
                 self.current_run_id = None
-                self.active = 0
-                self.tasks.task_done()
+                try:
+                    await self.execute(item)
+                except Exception as exc:
+                    if self.cancelled_user == item.get("user_id"):
+                        try:
+                            await self.send_group_text(item["group_id"], "已取消你的模拟任务。")
+                        except Exception:
+                            pass
+                    else:
+                        log.exception("task failed")
+                        try:
+                            self.quota.release(item["user_id"], item["runs"])
+                        except Exception:
+                            pass
+                        try:
+                            await self.send_group_text(item["group_id"], f"任务失败：{exc}")
+                        except Exception:
+                            pass
+                finally:
+                    self.cancelled_user = None
+                    self.active_item = None
+                    self.current_run_id = None
+                    self.active = 0
+                    try:
+                        self.tasks.task_done()
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("unexpected error in worker loop: %s", exc)
+                await asyncio.sleep(1.0)
 
     async def execute(self, item: dict) -> None:
         request = dict(item["request"])
@@ -558,10 +454,17 @@ class Bot:
             v = ((c.get("hanchan") or {}).get("dan_pt_ev") or {}).get("houou_7", {}).get("value")
             return v if isinstance(v, (int, float)) else float("-inf")
 
+        def _mleague_value(c):
+            v = ((c.get("hanchan") or {}).get("mleague_pt_ev") or {}).get("value")
+            return v if isinstance(v, (int, float)) else float("-inf")
+
         valid_candidates = [c for c in candidates if isinstance(c.get("value"), dict)]
         point_best = max(valid_candidates if valid_candidates else candidates, key=_pt_value)
         pt_best = max(valid_candidates if valid_candidates else candidates, key=_han_pt_value)
-        recommended = pt_best if label(point_best) != label(pt_best) else point_best
+        ml_best = max(valid_candidates if valid_candidates else candidates, key=_mleague_value)
+
+        # 默认高亮天凤最优（作为主卡片第一高亮）
+        recommended = pt_best
         rec_tile = label(recommended)
 
         png_path = Path(self.render_cfg["output_dir"]) / f"{run_id}.png"
@@ -578,7 +481,14 @@ class Bot:
         x_turn = item.get("request", {}).get("x", 1)
         action_label = f"第 {x_turn} 打" if x_turn > 1 else "第一打"
 
+        # 决策语义徽章
+        dec_badge = (result.get("decision_state") or {}).get("badge") or "🌟 明确优选"
+        cum_runs = result.get("cumulative_total_runs") or result.get("total_runs") or item["runs"]
+
         extra_info = []
+        if cum_runs > item["runs"]:
+            extra_info.append(f"\n[历史沉淀加速] 累积样本 {cum_runs} 局")
+
         weighting = recommended.get("weighting") or {}
         if weighting.get("enabled"):
             ess = weighting.get("ess", 0)
@@ -590,10 +500,18 @@ class Bot:
 
         info_suffix = "".join(extra_info)
 
+        # 双规决策并列裁定：
+        lbl_pt = label(pt_best)
+        lbl_ml = label(ml_best)
+        if lbl_pt == lbl_ml:
+            rec_summary = f"推荐{action_label}：{lbl_pt}（全规则一致最优）"
+        else:
+            rec_summary = f"推荐{action_label}：{lbl_pt}（天凤避四）/ {lbl_ml}（M规争一）"
+
         await self.send_group_result(
             item["group_id"],
             item["user_id"],
-            f"推荐{action_label}：{rec_tile}\n局收支最优：{label(point_best)}；预想pt最优：{label(pt_best)}。{info_suffix}",
+            f"【{dec_badge}】{rec_summary}\n局收支最优：{label(point_best)}；天凤最优：{lbl_pt}；M规最优：{lbl_ml}。{info_suffix}",
             png_path,
         )
 
@@ -611,11 +529,8 @@ def _pid_alive(pid: int) -> bool:
     if handle:
         ctypes.windll.kernel32.CloseHandle(handle)
         return True
-    # ERROR_ACCESS_DENIED(5): process exists but is elevated -> treat as alive
     return ctypes.windll.kernel32.GetLastError() == 5
 
-
-_bot_mutex_handle = None
 
 _bot_mutex_handle = None
 
@@ -648,7 +563,63 @@ def main() -> None:
     if not _acquire_singleton():
         return
     cfg = load_config()
-    asyncio.run(Bot(cfg).run())
+
+    # 优先绑定当前线程的事件循环，确保 Bot 内部的 asyncio.Queue 归属正确
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    bot = Bot(cfg)
+
+    # 启动后台任务处理 Worker 协程，附带崩溃自动拉起
+    worker_task = loop.create_task(bot.worker())
+
+    def _on_worker_done(t):
+        if not t.cancelled() and t.exception():
+            log.error("worker crashed with exception: %s; restarting worker", t.exception())
+            loop.create_task(bot.worker()).add_done_callback(_on_worker_done)
+
+    worker_task.add_done_callback(_on_worker_done)
+
+    # 启动 OneBot WebSocket 客户端监听
+    def run_ws():
+        def on_message(ws, msg_str):
+            try:
+                data = json.loads(msg_str)
+                asyncio.run_coroutine_threadsafe(bot.handle_event(data), loop)
+            except Exception as e:
+                log.error("WS on_message error: %s", e)
+
+        def on_error(ws, error):
+            log.error("OneBot WS error: %s", error)
+
+        def on_close(ws, close_status_code, close_msg):
+            log.warning("OneBot WS disconnected; reconnecting in 3s...")
+
+        def on_open(ws):
+            log.info("Websocket connected")
+
+        ws_url = bot.bot_cfg["onebot_ws_url"]
+        while True:
+            try:
+                ws = websocket.WebSocketApp(
+                    ws_url,
+                    on_open=on_open,
+                    on_message=on_message,
+                    on_error=on_error,
+                    on_close=on_close,
+                )
+                ws.run_forever()
+            except Exception as exc:
+                log.error("WebSocket run_forever exc: %s", exc)
+            time.sleep(3.0)
+
+    ws_thread = threading.Thread(target=run_ws, daemon=True)
+    ws_thread.start()
+
+    log.info("Bot 已启动，等待 OneBot 事件...")
+    try:
+        loop.run_forever()
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":
