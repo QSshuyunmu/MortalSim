@@ -12,6 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from .history_store import get_global_history_store, compute_canonical_fingerprint, CandidateAccumulator, evaluate_decision_state
 from .model_registry import DEFAULT_MODEL_ID, ModelRegistry
 
 
@@ -25,6 +26,7 @@ HANCHAN_MODEL_DIR = ROOT / "models" / "hanchan_rank"
 OUTCOMES = ("self_win", "self_deal_in", "draw", "sideways", "other_tsumo")
 MERGE_STATE_VERSION = 3
 HANCHAN_METRICS_VERSION = 3
+MLEAGUE_UMA = [50.0, 10.0, -10.0, -30.0]
 HANCHAN_PT_TABLES = {
     "houou_7": [90, 45, 0, -135],
     "houou_8": [90, 45, 0, -150],
@@ -479,9 +481,13 @@ def _parse_inputs(request: dict[str, Any]):
     complete_hand = parse_hand(request["hand"])
 
     def one_tile(value: str, label: str):
-        tiles = parse_hand(value.strip())
+        val_str = str(value).strip()
+        try:
+            tiles = parse_hand(val_str)
+        except Exception as exc:
+            raise ValueError(f"{label}格式错误（无法解析为麻将牌: '{val_str}'）: {exc}") from exc
         if len(tiles) != 1:
-            raise ValueError(f"{label}必须是单张牌: {value}")
+            raise ValueError(f"{label}必须是单张牌（解析得到 {len(tiles)} 张）: {value}")
         return tiles[0]
 
     legacy_first_tsumo = request.get("first_tsumo")
@@ -918,7 +924,7 @@ def _resolve_next_hanchan_state(
 def _load_hanchan_model():
     """Load the statistical hanchan-rank model once per worker."""
     try:
-        from .hanchan_model import HanchanRankModel
+        from .hanchan_model import MLEAGUE_UMA, HanchanRankModel
     except ImportError:
         from hanchan_model import HanchanRankModel
 
@@ -944,6 +950,7 @@ def _summarize_hanchan(
     expected_ranks: list[float] = []
     rank_prob_sums = [0.0, 0.0, 0.0, 0.0]
     pt_rows = {name: [] for name in HANCHAN_PT_TABLES}
+    mleague_rows: list[float] = []
 
     round_id = str(context.get("round", "E1")).upper()
     round_number = int(context.get("round_number", int(round_id[1]) if len(round_id) >= 2 and round_id[1].isdigit() else 1))
@@ -997,6 +1004,13 @@ def _summarize_hanchan(
         for name, table in HANCHAN_PT_TABLES.items():
             pt_rows[name].append(sum(probs[rank] * table[rank] for rank in range(4)))
 
+        # 官方 M-League PTEV: 终局素点期望 (以 30000 返点为基准) + 顺位马 (+50, +10, -10, -30)
+        # 当前局点数变动后的即时积分
+        cur_target_score = float(table_scores[target_seat]) if state else float(scores[target_seat])
+        raw_pt = (cur_target_score - 30000.0) / 1000.0
+        mleague_uma_val = sum(probs[rank] * MLEAGUE_UMA[rank] for rank in range(4))
+        mleague_rows.append(raw_pt + mleague_uma_val)
+
     n = len(expected_ranks)
     rank_rates = [
         {"rank": rank + 1, **_rate(rank_prob_sums[rank], n)}
@@ -1004,15 +1018,18 @@ def _summarize_hanchan(
     ]
     dan_pt_ev = {name: _mean(pt_rows[name]) for name in HANCHAN_PT_TABLES}
     expected_rank = _mean(expected_ranks)
+    mleague_pt_ev = _mean(mleague_rows)
 
     return {
         "expected_rank": expected_rank,
         "rank_rates": rank_rates,
         "dan_pt_ev": dan_pt_ev,
+        "mleague_pt_ev": mleague_pt_ev,
         "merge_state": {
             "expected_rank": expected_rank,
             "rank_rates": rank_rates,
             "dan_pt_ev": dan_pt_ev,
+            "mleague_pt_ev": mleague_pt_ev,
         },
         "sample": {"games": n, "completed_games": n, "errors": 0},
     }
@@ -1657,6 +1674,88 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
         _emit(emit, "candidate_completed", summary={
             key: value for key, value in _public(candidate).items() if key not in {"samples", "yaku"}
         })
+    # --- History Store Integration: Chan's Parallel Reduction & ROPE Evaluation ---
+    history_store = get_global_history_store()
+    fingerprint = compute_canonical_fingerprint(request)
+    existing_rec = history_store.get(fingerprint)
+    accumulators = dict(existing_rec["accumulators"]) if existing_rec else {}
+
+    for cand_dict in candidates:
+        c_id = cand_dict["candidate"]
+        eng_t = cand_dict.get("discard", c_id)
+        if c_id not in accumulators:
+            accumulators[c_id] = CandidateAccumulator(candidate=c_id, engine_tile=eng_t)
+
+        acc = accumulators[c_id]
+        n_c = cand_dict.get("sample", {}).get("completed_games", runs)
+        sum_sc = float(cand_dict.get("value", {}).get("point", {}).get("sum", 0.0))
+        sum_sq_sc = float(cand_dict.get("value", {}).get("point", {}).get("sum_sq", 0.0))
+        mean_sc = sum_sc / n_c if n_c > 0 else 0.0
+        m2_sc = max(0.0, sum_sq_sc - (sum_sc ** 2) / n_c) if n_c > 0 else 0.0
+
+        pt_obj = (cand_dict.get("hanchan", {}).get("dan_pt_ev", {}) or {}).get("houou_7", {})
+        mean_pt = float(pt_obj.get("value", 0.0))
+        std_pt = float(pt_obj.get("stddev", 1.0))
+        m2_pt = (std_pt ** 2) * max(1, n_c - 1)
+        sum_pt = mean_pt * n_c
+
+        # M-League stats
+        ml_obj = cand_dict.get("hanchan", {}).get("mleague_pt_ev") or {}
+        mean_ml = float(ml_obj.get("value", 0.0))
+        std_ml = float(ml_obj.get("stddev", 1.0))
+        m2_ml = (std_ml ** 2) * max(1, n_c - 1)
+        sum_ml = mean_ml * n_c
+
+        wins = int(cand_dict.get("win", {}).get("rate", {}).get("count", 0))
+        deals = int(cand_dict.get("defense", {}).get("deal_in_rate", {}).get("count", 0))
+        max_s = seed + runs
+
+        acc.reduce_with(
+            new_n=n_c, new_sum_pt=sum_pt, new_m2_pt=m2_pt,
+            new_sum_score=sum_sc, new_m2_score=m2_sc,
+            new_wins=wins, new_deals=deals, max_seed=max_s,
+            new_sum_mleague=sum_ml, new_m2_mleague=m2_ml,
+        )
+
+    # Save and evaluate decision state
+    updated_rec, dec_state = history_store.save_reduction(fingerprint, request, accumulators)
+
+    # Inject cumulative statistics back into candidates for rendering and downstream consumers
+    public_candidates = []
+    for cand_dict in candidates:
+        pub = _public(cand_dict)
+        c_id = pub.get("candidate", "")
+        if c_id in accumulators:
+            acc = accumulators[c_id]
+            pub["cumulative"] = {
+                "runs": acc.runs,
+                "mean_pt": acc.mean_pt,
+                "stddev_pt": acc.stddev_pt,
+                "mean_score": acc.mean_score,
+                "stddev_score": acc.stddev_score,
+                "mean_mleague": acc.mean_mleague,
+                "stddev_mleague": acc.stddev_mleague,
+                "win_rate": acc.win_rate,
+                "deal_in_rate": acc.deal_in_rate,
+            }
+            # Overwrite value & hanchan pt with cumulative high-precision moments
+            if "value" in pub and "point" in pub["value"]:
+                pub["value"]["point"]["value"] = acc.mean_score
+                pub["value"]["point"]["stddev"] = acc.stddev_score
+                pub["value"]["point"]["n"] = acc.runs
+            if "hanchan" in pub:
+                if "dan_pt_ev" in pub["hanchan"] and "houou_7" in pub["hanchan"]["dan_pt_ev"]:
+                    pub["hanchan"]["dan_pt_ev"]["houou_7"]["value"] = acc.mean_pt
+                    pub["hanchan"]["dan_pt_ev"]["houou_7"]["stddev"] = acc.stddev_pt
+                if "mleague_pt_ev" in pub["hanchan"]:
+                    pub["hanchan"]["mleague_pt_ev"]["value"] = acc.mean_mleague
+                    pub["hanchan"]["mleague_pt_ev"]["stddev"] = acc.stddev_mleague
+            if "win" in pub and "rate" in pub["win"]:
+                pub["win"]["rate"]["rate"] = acc.win_rate
+            if "defense" in pub and "deal_in_rate" in pub["defense"]:
+                pub["defense"]["deal_in_rate"]["rate"] = acc.deal_in_rate
+        public_candidates.append(pub)
+
     comparisons = [_compare(candidates[0], candidate) for candidate in candidates[1:]]
     return {
         "metrics_version": HANCHAN_METRICS_VERSION,
@@ -1672,7 +1771,18 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
         "device": str(device),
         "model": {key: model[key] for key in ("id", "label", "filename", "sha256", "version", "conv_channels", "num_blocks", "engine") if key in model},
         "runs": runs,
-        "total_runs": runs,
+        "total_runs": updated_rec["total_runs"],
+        "cumulative_total_runs": updated_rec["total_runs"],
+        "fingerprint": fingerprint,
+        "decision_state": {
+            "badge": dec_state.badge,
+            "status_code": dec_state.status_code,
+            "confidence_p": dec_state.confidence_p,
+            "delta_pt": dec_state.delta_pt,
+            "best_candidate": dec_state.best_candidate,
+            "second_candidate": dec_state.second_candidate,
+            "is_converged": dec_state.is_converged,
+        },
         "seed": seed,
         "resolved_context": context,
         "resolved_input": {
@@ -1680,7 +1790,7 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
             "first_tsumo": public_tile(first_tsumo),
             "dora": public_tile(dora),
         },
-        "candidates": [_public(candidate) for candidate in candidates],
+        "candidates": public_candidates,
         "comparisons": comparisons,
         "merge_state_version": MERGE_STATE_VERSION,
         "extension_history": [],

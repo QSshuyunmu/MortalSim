@@ -1,0 +1,26 @@
+[bot]
+onebot_ws_url = "ws://127.0.0.1:5701"
+onebot_http_url = "http://127.0.0.1:5700"
+reconnect_interval = 5
+command_prefix = "/sim"
+self_qq = "3983079058"
+
+[mortalsim]
+api_base = "http://127.0.0.1:50715"
+default_model_id = "distill_41b_infer"
+model_id = "distill_41b_infer"
+timeout_seconds = 0
+default_runs = 500
+rayon_threads = 20
+engine = "python"
+decision_contract = "stable_advantage_v2"
+
+[quota]
+db_path = "data/quota.db"
+max_queued_tasks = 8
+max_daily_tasks = 200
+
+[render]
+output_dir = "data/png"
+font_path = "C:/Windows/Fonts/msyh.ttc"
+tile_assets_dir = "D:/tenhoulib/MortalSim/apps/web/dist/tiles"

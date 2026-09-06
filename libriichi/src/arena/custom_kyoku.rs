@@ -488,7 +488,7 @@ impl CustomKyokuRunner {
                 })?
             };
 
-            let target_past: Vec<super::prefix::DiscardSpec> = target_past_discards
+            let target_past: Vec<super::prefix::DiscardSpec> = target_past_discards.clone()
                 .unwrap_or_default()
                 .into_iter()
                 .map(|item| parse(&item.0).map(|tile| super::prefix::DiscardSpec { tile, tsumogiri: item.1, is_riichi: item.2 }))
@@ -502,12 +502,25 @@ impl CustomKyokuRunner {
                         format!("opponent_rivers must have 4 entries (one per seat), got {}", opp_rivers.len())
                     ));
                 }
+                let target_offset = (effective_target + 4 - oya) % 4;
+                let target_past_len = target_past_discards.as_ref().map(|v| v.len()).unwrap_or(0);
                 for (p, river) in opp_rivers.into_iter().enumerate() {
-                    if p as u8 != effective_target {
-                        rivers[p] = river
+                    let p_u8 = p as u8;
+                    if p_u8 != effective_target {
+                        let parsed_river = river
                             .into_iter()
                             .map(|item| parse(&item.0).map(|tile| super::prefix::DiscardSpec { tile, tsumogiri: item.1, is_riichi: item.2 }))
                             .collect::<PyResult<Vec<_>>>()?;
+                        
+                        // 因果时序截断：若对手在当前巡目顺位晚于目标家，其在目标家决策点前最多只能舍出 target_past_len 张牌
+                        let p_offset = (p_u8 + 4 - oya) % 4;
+                        let max_allowed = if p_offset < target_offset {
+                            target_past_len + 1
+                        } else {
+                            target_past_len
+                        };
+                        let clamped_len = parsed_river.len().min(max_allowed);
+                        rivers[p] = parsed_river[..clamped_len].to_vec();
                     }
                 }
             }

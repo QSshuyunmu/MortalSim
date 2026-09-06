@@ -28,6 +28,9 @@ HOUOU_PT_TABLES = {
     "houou_10": [90, 45, 0, -180],
 }
 
+# 官方 M-League 规范顺位马: 25000起点/30000返点 (+50, +10, -10, -30)
+MLEAGUE_UMA = [50.0, 10.0, -10.0, -30.0]
+
 FEATURE_NAMES = [
     "s0_norm", "s1_norm", "s2_norm", "s3_norm",
     "kyoku_idx_norm", "honba", "kyotaku_norm",

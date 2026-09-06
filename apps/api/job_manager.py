@@ -17,6 +17,7 @@ from mortal_app.gpu_monitor import GpuMonitor
 
 from .models import DiscardCandidate, RunRequest
 from .services import SimulationService, StatisticsService
+from mortal_app.history_store import get_global_history_store, compute_canonical_fingerprint
 from mortal_app.service import candidate_id, merge_results, public_tile
 from mortal_app.model_registry import ModelRegistry
 
@@ -170,6 +171,18 @@ class JobManager:
             active = [job for job in self.jobs.values() if job.status in {"queued", "running"}]
             if active:
                 raise RuntimeError("only one simulation can run at a time")
+
+            # Seed reservation: ensure continuous non-colliding seeds for incremental rollouts
+            try:
+                fp = compute_canonical_fingerprint(request)
+                existing = get_global_history_store().get(fp)
+                if existing and existing.get("last_seed"):
+                    # Step seed forward past historical max
+                    req_seed = int(request.get("seed", 42))
+                    if req_seed <= existing["last_seed"]:
+                        request["seed"] = existing["last_seed"] + 1
+            except Exception:
+                pass
             job = Job(run_id=uuid4(), request=request, extension_of=extension_of)
             self.jobs[job.run_id] = job
             self._persist(job)
