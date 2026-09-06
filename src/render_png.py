@@ -262,7 +262,9 @@ def render_png(
     draw.text((140, 16), "日麻决策推演分析报告", fill=t_cfg["text_white"], font=f_header_lg)
     draw.text((140, 42), f"{round_zh} {honba}本场 | 巡目: 第 {x_turn} 巡 | 视角: {_seat_zh(target_seat)}家", fill=t_cfg["text_muted"], font=f_sub)
 
-    meta_right = f"蒙特卡洛物理仿真 · {runs} 局/候选"
+    cum_total = result_data.get("cumulative_total_runs") or result_data.get("total_runs") or runs
+    is_accel = cum_total > runs
+    meta_right = f"蒙特卡洛推演 · 累积 {cum_total} 局" + (" (历史沉淀加速)" if is_accel else "")
     m_bb = draw.textbbox((0, 0), meta_right, font=f_sub)
     draw.text((W - 24 - (m_bb[2] - m_bb[0]), 18), meta_right, fill=t_cfg["text_gold"], font=f_sub)
     kyotaku_str = f"场存供托: {kyotaku * 1000} 点"
@@ -478,8 +480,8 @@ def render_png(
     draw.text((p_inner_x, cur_y), "◆ 段位期待值 (含 95% CI) 与顺位分布堆叠图", fill=t_cfg["text_gold"], font=f_card_title)
     cur_y += 22
 
-    h2 = ["候选动作", "预期顺位", "凤七 pt EV / 95% CI", "1位~4位 顺位分布堆叠图 (1位/2位/3位/4位)"]
-    w2 = [95, 75, 175, 290]
+    h2 = ["候选动作", "预期顺位", "天凤凤七 pt (避四)", "M-League pt (素点+争一)", "顺位分布 (1位/2位/3位/4位)"]
+    w2 = [105, 80, 160, 165, 135]
 
     draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + 24], fill=(10, 14, 20, 255))
     draw.line([(p_inner_x, cur_y + 24), (p_inner_x + p_inner_w, cur_y + 24)], fill=t_cfg["panel_border"], width=1)
@@ -488,11 +490,6 @@ def render_png(
         draw.text((tx, cur_y + 5), title, fill=t_cfg["text_muted"], font=f_tbl_head)
         tx += col_w
     cur_y += 24
-
-    C_R1 = (46, 204, 113, 255)
-    C_R2 = (52, 152, 219, 255)
-    C_R3 = (241, 196, 15, 255)
-    C_R4 = (231, 76, 60, 255)
 
     for idx, c in enumerate(cands):
         c_lbl = _label_zh(c)
@@ -503,50 +500,55 @@ def render_png(
         han = c.get("hanchan") or {}
         rr = han.get("rank_rates", [])
         er = han.get("expected_rank", {}).get("value")
+        
+        # 天凤凤七
         pt7_obj = (han.get("dan_pt_ev") or {}).get("houou_7", {})
         pt7 = pt7_obj.get("value")
         pt7_ci = pt7_obj.get("ci95")
+        
+        # M-League pt EV (支持原生字段与 cumulative 回退保护)
+        ml_obj = han.get("mleague_pt_ev") or {}
+        ml_pt = ml_obj.get("value")
+        ml_ci = ml_obj.get("ci95")
+        if ml_pt is None and "cumulative" in c:
+            ml_pt = c["cumulative"].get("mean_mleague")
+            std_ml = c["cumulative"].get("stddev_mleague", 1.0)
+            n_runs = max(2, c["cumulative"].get("runs", 100))
+            se_ml = 1.96 * (std_ml / (n_runs ** 0.5))
+            if ml_pt is not None:
+                ml_ci = [ml_pt - se_ml, ml_pt + se_ml]
+        
+        # 四位概率
         r1 = rr[0].get("rate") or 0.0 if len(rr) > 0 else 0.0
         r2 = rr[1].get("rate") or 0.0 if len(rr) > 1 else 0.0
         r3 = rr[2].get("rate") or 0.0 if len(rr) > 2 else 0.0
         r4 = rr[3].get("rate") or 0.0 if len(rr) > 3 else 0.0
 
         tx = p_inner_x + 6
+        # Col 0: 候选动作
         draw.text((tx, cur_y + 8), c_lbl + (" ★" if is_rec else ""), fill=t_cfg["rec_emerald"] if is_rec else t_cfg["text_white"], font=f_tbl_bold if is_rec else f_tbl_cell)
         tx += w2[0]
 
+        # Col 1: 预期顺位
         draw.text((tx, cur_y + 8), f"{er:.3f} 位" if er is not None else "—", fill=t_cfg["rec_emerald"] if is_rec else t_cfg["text_white"], font=f_tbl_cell)
         tx += w2[1]
 
-        # PT EV with CI
+        # Col 2: 天凤凤七 pt with CI95
         draw.text((tx, cur_y + 2), _fmt_signed(pt7, 1) + " pt", fill=t_cfg["text_gold"] if pt7 and pt7 > 0 else (t_cfg["rec_emerald"] if is_rec else t_cfg["text_white"]), font=f_tbl_bold if is_rec else f_tbl_cell)
         pt7_ci_str = f"CI {_fmt_ci95(pt7_ci, 1)}"
         draw.text((tx, cur_y + 17), pt7_ci_str, fill=t_cfg["text_muted"], font=f_ci95)
         tx += w2[2]
 
-        # Stacked bar
-        sbar_w = 175
-        sbar_h = 12
-        sbar_x = tx
-        sbar_y = cur_y + 10
+        # Col 3: M-League pt with CI95
+        draw.text((tx, cur_y + 2), _fmt_signed(ml_pt, 1) + " pt", fill=t_cfg["text_gold"] if ml_pt and ml_pt > 0 else (t_cfg["rec_emerald"] if is_rec else t_cfg["text_white"]), font=f_tbl_bold if is_rec else f_tbl_cell)
+        ml_ci_str = f"CI {_fmt_ci95(ml_ci, 1)}"
+        draw.text((tx, cur_y + 17), ml_ci_str, fill=t_cfg["text_muted"], font=f_ci95)
+        tx += w2[3]
 
-        total_r = r1 + r2 + r3 + r4
-        if total_r > 0:
-            w_r1 = int((r1 / total_r) * sbar_w)
-            w_r2 = int((r2 / total_r) * sbar_w)
-            w_r3 = int((r3 / total_r) * sbar_w)
-            w_r4 = sbar_w - w_r1 - w_r2 - w_r3
-
-            curr_bx = sbar_x
-            if w_r1 > 0: draw.rectangle([curr_bx, sbar_y, curr_bx + w_r1, sbar_y + sbar_h], fill=C_R1); curr_bx += w_r1
-            if w_r2 > 0: draw.rectangle([curr_bx, sbar_y, curr_bx + w_r2, sbar_y + sbar_h], fill=C_R2); curr_bx += w_r2
-            if w_r3 > 0: draw.rectangle([curr_bx, sbar_y, curr_bx + w_r3, sbar_y + sbar_h], fill=C_R3); curr_bx += w_r3
-            if w_r4 > 0: draw.rectangle([curr_bx, sbar_y, curr_bx + w_r4, sbar_y + sbar_h], fill=C_R4)
-
-        r1_val = (r1 * 100) if isinstance(r1, (int, float)) else 0.0
-        r4_val = (r4 * 100) if isinstance(r4, (int, float)) else 0.0
-        pct_text = f"1位{r1_val:.0f}% / 4位{r4_val:.0f}%"
-        draw.text((sbar_x + sbar_w + 10, cur_y + 9), pct_text, fill=t_cfg["text_muted"], font=f_foot)
+        # Col 4: 顺位分布纯数字排布 (1位 / 2位 / 3位 / 4位)
+        r1_val, r2_val, r3_val, r4_val = r1 * 100, r2 * 100, r3 * 100, r4 * 100
+        dist_str = f"{r1_val:.0f}% / {r2_val:.0f}% / {r3_val:.0f}% / {r4_val:.0f}%"
+        draw.text((tx, cur_y + 8), dist_str, fill=t_cfg["text_muted"], font=f_foot)
 
         draw.line([(p_inner_x, cur_y + 32), (p_inner_x + p_inner_w, cur_y + 32)], fill=(30, 40, 50, 255), width=1)
         cur_y += 32
@@ -606,7 +608,24 @@ def render_png(
     hand_bar_h = 95
     draw.rounded_rectangle([24, hand_bar_y, W - 24, hand_bar_y + hand_bar_h], radius=6, fill=t_cfg["panel_bg"], outline=t_cfg["panel_border"], width=1)
 
-    draw.text((38, hand_bar_y + 28), f"◆ 自家手牌\n  ({_seat_zh(target_seat)}家)", fill=t_cfg["text_gold"], font=f_card_title)
+    draw.text((38, hand_bar_y + 18), f"◆ 自家手牌\n  ({_seat_zh(target_seat)}家)", fill=t_cfg["text_gold"], font=f_card_title)
+
+    # Decision convergence badge (🌟 明确优选 / ⚖️ 伯仲均可 / ⚠️ 尚不明确)
+    dec_state = result_data.get("decision_state") or {}
+    badge_text = str(dec_state.get("badge") or "🌟 明确优选")
+    if "明确" in badge_text or "唯一" in badge_text:
+        badge_fill, badge_border, badge_fg = (20, 55, 35, 255), t_cfg["rec_emerald"], t_cfg["rec_emerald"]
+    elif "伯仲" in badge_text or "均势" in badge_text:
+        badge_fill, badge_border, badge_fg = (35, 40, 50, 255), (140, 160, 180, 255), (200, 215, 230, 255)
+    else:
+        badge_fill, badge_border, badge_fg = (55, 45, 15, 255), (220, 160, 40, 255), (245, 190, 60, 255)
+
+    badge_w = 100
+    badge_x = W - 24 - badge_w - 14
+    badge_y = hand_bar_y + 16
+    draw.rounded_rectangle([badge_x, badge_y, badge_x + badge_w, badge_y + 24], radius=3, fill=badge_fill, outline=badge_border, width=1)
+    b_bb = draw.textbbox((0, 0), badge_text, font=f_tbl_head)
+    draw.text((badge_x + (badge_w - (b_bb[2] - b_bb[0])) // 2, badge_y + 4), badge_text, fill=badge_fg, font=f_tbl_head)
 
     hand_tiles = [hand_str[i:i+2] for i in range(0, len(hand_str), 2)]
     tile_w, tile_h = 36, 50

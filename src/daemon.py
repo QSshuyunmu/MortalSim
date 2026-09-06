@@ -35,7 +35,7 @@ def is_bot_running() -> bool:
             if not cmd_list:
                 continue
             cmd_str = " ".join(cmd_list)
-            if "bot.py" in cmd_str and "daemon.py" not in cmd_str:
+            if "MortalSim-Bot" in cmd_str and "bot.py" in cmd_str and "daemon.py" not in cmd_str:
                 return True
         except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
             continue

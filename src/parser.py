@@ -48,7 +48,10 @@ def dora_to_indicator(dora: str) -> str:
     return dora
 
 def normalize_tile_text(text: str) -> str:
-    """将各种手牌写法归一化为标准的 compact 格式（如 '123m456p789s11222z'）。"""
+    """将各种手牌写法归一化为标准的 compact 格式（如 '123m456p789s11222z'）。
+    如果包含无法合法识别为麻将牌的字符或格式，返回原串或空串。
+    对于单个单牌（如宝牌指示），只有符合合法的数字+花色或字牌时才属于合法牌。
+    """
     t = text.strip()
     if not t:
         return ""
@@ -80,7 +83,6 @@ def normalize_tile_text(text: str) -> str:
     # 检查是否全部字符都能被麻将语法解释
     compact_matches = re.findall(r"[0-9]+[mpszMPSZ]|[东南西北白发發中]+", t)
     if compact_matches:
-        # 如果存在未被识别的非空白字符，且不纯粹是麻将牌，严格返回原串供上层报错
         parsed_len = sum(len(m) for m in compact_matches)
         cleaned_t = t.replace(" ", "").replace(",", "").replace("，", "")
         if parsed_len == len(cleaned_t):
@@ -392,8 +394,10 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         honba_raw = round_m.group(2) or "0"
         rest = rest[:round_m.start()] + " " + rest[round_m.end():]
 
-    # 5. 提取宝牌 d...
-    dora_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[dD][:：\s]?([0-9mpszrKR]{2,4})\b', rest)
+    # 5. 提取宝牌 d... (支持 d8p, d4m, d东, d白 等)
+    dora_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[dD][:：\s]?([0-9mpszrKR]{2,4}|[东南西北白发發中])\b', rest)
+    if not dora_m:
+        dora_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[dD][:：\s]?([0-9mpszrKR]{2,4}|[东南西北白发發中])', rest)
     if not dora_m:
         return None, "缺少宝牌参数，例：d8p 或 d4m"
     dora_raw = dora_m.group(1).strip()
@@ -444,8 +448,17 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         return None, f"手牌张数不合法（必须为 3n+1 或 3n+2 张），当前识别 {len(hand_tiles)} 张：{hand_norm or '(未识别)'}"
 
     dora_norm = normalize_tile_text(dora_raw)
-    if len(dora_norm) != 2:
-        return None, f"宝牌格式错误：{dora_raw}，应为 1 张牌（如 d8p、d4m、d5z）。"
+    valid_suits = ("m", "p", "s", "z")
+    is_valid_tile = (
+        len(dora_norm) == 2
+        and dora_norm[1] in valid_suits
+        and (
+            (dora_norm[1] in ("m", "p", "s") and dora_norm[0] in "0123456789")
+            or (dora_norm[1] == "z" and dora_norm[0] in "1234567")
+        )
+    )
+    if not is_valid_tile:
+        return None, f"宝牌格式错误：{dora_raw}，应为 1 张合法麻将牌（如 d8p、d4m、d5z、d南 等）。"
     # 用户输入 d<宝牌>，将其转换为对应的宝牌指示牌 (dora_marker)
     dora_indicator = dora_to_indicator(dora_norm)
 
