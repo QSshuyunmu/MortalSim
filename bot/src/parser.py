@@ -297,28 +297,77 @@ def _generate_default_rivers(
             t = "5s"
         tile_used_counts[t] = tile_used_counts.get(t, 0) + 1
 
+    rivers: list[list[tuple[str, bool, bool]]] = [[], [], [], []]
+
+    # 每张牌被各家切出的历史记录（避免一家频繁来回切相同牌）
+    player_discard_history: list[list[str]] = [[], [], [], []]
+
     def pick_tile_for_player(p_idx: int, turn_idx: int, used_this_turn: set[str]) -> str:
-        # 首选：从未在当巡出现过的 allowed_pool 中挑选
-        for t in allowed_pool:
-            if t not in used_this_turn and tile_used_counts.get(t, 0) < 4:
-                tile_used_counts[t] = tile_used_counts.get(t, 0) + 1
-                used_this_turn.add(t)
-                return t
-        for t in allowed_pool:
-            if tile_used_counts.get(t, 0) < 4:
-                tile_used_counts[t] = tile_used_counts.get(t, 0) + 1
-                used_this_turn.add(t)
-                return t
+        # 该玩家上一巡打出的牌（严禁连续手切同一张牌）
+        last_discard = rivers[p_idx][-1][0] if rivers[p_idx] else None
+        p_history = player_discard_history[p_idx]
+
+        def can_pick(candidate: str) -> bool:
+            if tile_used_counts.get(candidate, 0) >= 4:
+                return False
+            if last_discard is not None and candidate == last_discard:
+                return False
+            if turn_idx == 1 and candidate in used_this_turn:
+                return False
+            return True
+
+        # 打分原则：
+        # 1. 优先从没打过的牌中选；
+        # 2. 其次选打过次数最少的牌；
+        # 3. 距上次打出该牌的巡目间隔越长越好（避免来回交替同两张牌）
+        # 4. 遵守 TILES_BY_PRIORITY 的字牌->幺九->中张顺序
+        def penalty_score(candidate: str) -> tuple[int, int, int]:
+            in_turn = 1 if candidate in used_this_turn else 0
+            times_discarded = p_history.count(candidate)
+            # 最近一次打出的索引越近，recency 惩罚越大
+            last_idx = -1
+            for idx in range(len(p_history) - 1, -1, -1):
+                if p_history[idx] == candidate:
+                    last_idx = idx
+                    break
+            recency = (len(p_history) - last_idx) if last_idx >= 0 else 999
+            # 排序元组：(本巡是否出现, 该家打过该牌的次数, -间隔巡数)
+            return (in_turn, times_discarded, -recency)
+
+        valid_candidates = [t for t in allowed_pool if can_pick(t)]
+        if valid_candidates:
+            # 稳定排序：优先度高的牌池顺序由 Python 保证稳定性
+            best_tile = min(valid_candidates, key=penalty_score)
+            tile_used_counts[best_tile] = tile_used_counts.get(best_tile, 0) + 1
+            used_this_turn.add(best_tile)
+            p_history.append(best_tile)
+            return best_tile
+
+        # 候选不足时，从全局合法牌池补充
+        valid_fallback = [t for t in TILES_BY_PRIORITY if t not in hand_tiles and can_pick(t)]
+        if valid_fallback:
+            best_tile = min(valid_fallback, key=penalty_score)
+            tile_used_counts[best_tile] = tile_used_counts.get(best_tile, 0) + 1
+            used_this_turn.add(best_tile)
+            p_history.append(best_tile)
+            return best_tile
+
+        # 终极保底：未满 4 张且非上一打
         for t in TILES_BY_PRIORITY:
-            if t not in hand_tiles and tile_used_counts.get(t, 0) < 4:
+            if tile_used_counts.get(t, 0) < 4 and (last_discard is None or t != last_discard):
                 tile_used_counts[t] = tile_used_counts.get(t, 0) + 1
                 used_this_turn.add(t)
+                p_history.append(t)
                 return t
-        return "1z"
+
+        fallback = "2z" if last_discard == "1z" else "1z"
+        tile_used_counts[fallback] = tile_used_counts.get(fallback, 0) + 1
+        used_this_turn.add(fallback)
+        p_history.append(fallback)
+        return fallback
 
     pos_target = (target_seat + 4 - oya) % 4
     preceding_player = (target_seat + 3) % 4
-    rivers: list[list[tuple[str, bool, bool]]] = [[], [], [], []]
 
     for r in range(1, x + 1):
         used_this_turn: set[str] = set()
