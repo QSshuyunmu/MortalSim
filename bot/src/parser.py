@@ -473,6 +473,28 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         scores_raw = (scores_m.group(1) or scores_m.group(2)).strip()
         rest = rest[:scores_m.start()] + " " + rest[scores_m.end():]
 
+    scores_val = None
+    if scores_raw:
+        scores_parts = [s.strip().lower() for s in re.split(r'[,，、\s]+', scores_raw) if s.strip()]
+        if len(scores_parts) == 4:
+            try:
+                parsed_scores = []
+                for p in scores_parts:
+                    if p.endswith("k"):
+                        val = int(float(p[:-1]) * 1000)
+                    else:
+                        val = int(float(p))
+                        if abs(val) < 1000:
+                            val *= 100
+                    parsed_scores.append(val)
+                target_p = target_seat_val if target_seat_val is not None else 0
+                rel_self = parsed_scores[target_p]
+                rel_shimo = parsed_scores[(target_p + 1) % 4]
+                rel_toimen = parsed_scores[(target_p + 2) % 4]
+                scores_val = {"self": rel_self, "shimocha": rel_shimo, "toimen": rel_toimen}
+            except Exception:
+                return None, f"点数格式错误：{scores_raw}（支持 P180,200,390,230 或 P18k,20k,39k,23k）"
+
     # 9. 提取模拟局数 (支持 runs=100 / 局数:100 / 尾随数字 10 等)
     runs_raw = 500
     runs_named_m = re.search(r'(?i)(?:^|(?<=[\s,;]))(?:runs?|局数|次数)[:：=]?(\d{1,6})\b', rest)
@@ -520,10 +542,29 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         if cnt > 4:
             return None, f"手牌违背规则：同种牌【{base_t}】在手牌中出现了 {cnt} 张（麻将中同种牌最多 4 张）"
 
+    effective_target_seat = target_seat_val if target_seat_val is not None else 0
+
     if cand_raw is None:
-        unique_hand = list(dict.fromkeys(hand_tiles))
-        for tile in unique_hand[:4]:
-            candidates.append({"tile": tile, "riichi": False, "kan": False})
+        # 当用户未提供 c 候选时，调用 Mortal 神经网络模型前向推断获取 Q 值最高的前 3 个切牌候选
+        from model_eval import get_top_model_discards
+        real_model_id = "distill_nova" if model_id_val == "model_aggressive" else "distill_41b_infer"
+        top3_tiles = get_top_model_discards(
+            hand_str=hand_norm,
+            dora_indicator=dora_indicator,
+            round_str=round_raw,
+            target_seat=effective_target_seat,
+            scores=scores_val,
+            model_id=real_model_id,
+            k=3,
+        )
+        if top3_tiles:
+            for tile in top3_tiles:
+                candidates.append({"tile": tile, "riichi": False, "kan": False, "candidate": tile})
+        else:
+            # 兜底保底策略
+            unique_hand = list(dict.fromkeys(hand_tiles))
+            for tile in unique_hand[:3]:
+                candidates.append({"tile": tile, "riichi": False, "kan": False, "candidate": tile})
     else:
         for part in re.split(r'[,，、\s]+', cand_raw):
             if not part:
@@ -653,7 +694,6 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
     if not candidates:
         return None, "没有识别到候选。"
 
-    effective_target_seat = target_seat_val if target_seat_val is not None else 0
     target_past = None
     opp_rivers = None
     prefix_melds = []
@@ -688,27 +728,8 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         "weighted": opp_rivers is not None,
     }
 
-    if scores_raw:
-        scores_parts = [s.strip().lower() for s in re.split(r'[,，、\s]+', scores_raw) if s.strip()]
-        if len(scores_parts) == 4:
-            try:
-                parsed_scores = []
-                for p in scores_parts:
-                    if p.endswith("k"):
-                        val = int(float(p[:-1]) * 1000)
-                    else:
-                        val = int(float(p))
-                        if abs(val) < 1000:
-                            val *= 100
-                    parsed_scores.append(val)
-                target_p = target_seat_val if target_seat_val is not None else 0
-                rel_self = parsed_scores[target_p]
-                rel_shimo = parsed_scores[(target_p + 1) % 4]
-                rel_toimen = parsed_scores[(target_p + 2) % 4]
-                rel_kami = parsed_scores[(target_p + 3) % 4]
-                request["scores"] = {"self": rel_self, "shimocha": rel_shimo, "toimen": rel_toimen}
-            except Exception:
-                return None, f"点数格式错误：{scores_raw}（支持 P180,200,390,230 或 P18k,20k,39k,23k）"
+    if scores_val:
+        request["scores"] = scores_val
 
     if target_past is not None and x_val >= 1:
         tp_len = len(target_past)
