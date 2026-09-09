@@ -1693,16 +1693,20 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
         mean_sc = sum_sc / n_c if n_c > 0 else 0.0
         m2_sc = max(0.0, sum_sq_sc - (sum_sc ** 2) / n_c) if n_c > 0 else 0.0
 
-        pt_obj = (cand_dict.get("hanchan", {}).get("dan_pt_ev", {}) or {}).get("houou_7", {})
-        mean_pt = float(pt_obj.get("value", 0.0))
-        std_pt = float(pt_obj.get("stddev", 1.0))
+        pt_obj = (cand_dict.get("hanchan", {}).get("dan_pt_ev", {}) or {}).get("houou_7")
+        pt_val = pt_obj.get("value") if isinstance(pt_obj, dict) else None
+        mean_pt = float(pt_val) if pt_val is not None else 0.0
+        std_val = pt_obj.get("stddev") if isinstance(pt_obj, dict) else None
+        std_pt = float(std_val) if std_val is not None else 1.0
         m2_pt = (std_pt ** 2) * max(1, n_c - 1)
         sum_pt = mean_pt * n_c
 
         # M-League stats
-        ml_obj = cand_dict.get("hanchan", {}).get("mleague_pt_ev") or {}
-        mean_ml = float(ml_obj.get("value", 0.0))
-        std_ml = float(ml_obj.get("stddev", 1.0))
+        ml_obj = cand_dict.get("hanchan", {}).get("mleague_pt_ev")
+        ml_val = ml_obj.get("value") if isinstance(ml_obj, dict) else ml_obj
+        mean_ml = float(ml_val) if ml_val is not None else 0.0
+        ml_std = ml_obj.get("stddev") if isinstance(ml_obj, dict) else None
+        std_ml = float(ml_std) if ml_std is not None else 1.0
         m2_ml = (std_ml ** 2) * max(1, n_c - 1)
         sum_ml = mean_ml * n_c
 

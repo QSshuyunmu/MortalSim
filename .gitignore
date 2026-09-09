@@ -45,3 +45,5 @@
 /docs/css
 /docs/book.toml
 /libriichi/test_write.txt
+data/
+*.db
