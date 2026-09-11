@@ -10,7 +10,9 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
+from logging.handlers import RotatingFileHandler
 import tomllib
 from pathlib import Path
 
@@ -47,6 +49,11 @@ class Bot:
         self.cancelled_user: str | None = None
         self.last_request: dict[str, float] = {}
         self._http: httpx.AsyncClient | None = None
+        # 队列落盘：进程重启（守护进程强杀/升级代码）时不丢用户任务
+        self.data_dir = Path(__file__).resolve().parent.parent / "data"
+        self.queue_file = self.data_dir / "queue.json"
+        self.spool_dir = self.data_dir / "pending_results"
+        self.pending: list[dict] = []
 
     def _apply_config(self, cfg: dict) -> None:
         self.cfg = cfg
@@ -125,8 +132,11 @@ class Bot:
             )
             if resp.status_code != 200 or (resp.json() or {}).get("status") == "failed":
                 log.warning("发送群文字消息响应异常: HTTP %s, body: %s", resp.status_code, resp.text[:200])
+                return False
+            return True
         except Exception as exc:
             log.error("发送群文字消息失败 (group %s): %s", group_id, exc)
+            return False
 
     async def send_group_image(self, group_id: int, image_path: str | Path) -> None:
         img_p = Path(image_path).resolve()
@@ -146,7 +156,7 @@ class Bot:
                     timeout=30.0,
                 )
                 if resp.status_code == 200 and (resp.json() or {}).get("status") != "failed":
-                    return
+                    return True
             except Exception as exc:
                 log.warning("尝试路径发送图片异常 (%s): %s", fmt, exc)
 
@@ -162,16 +172,19 @@ class Bot:
                 timeout=60.0,
             )
             if resp.status_code == 200 and (resp.json() or {}).get("status") != "failed":
-                return
+                return True
             log.error("base64 发送图片失败: HTTP %s, body: %s", resp.status_code, resp.text[:200])
         except Exception as exc:
             log.error("发送群图片失败 (group %s): %s", group_id, exc)
+        return False
 
-    async def send_group_result(self, group_id: int, user_id: str, text: str, image_path: str | Path) -> None:
-        """模拟完成后：发送图文并茂的卡片消息。"""
-        img_p = Path(image_path).resolve()
-        raw_path = str(img_p)
-        file_uri = f"file:///{img_p.as_posix()}"
+    async def _try_send_group_result(self, group_id: int, user_id: str, text: str, image_path: str | Path) -> bool:
+        """单次投递尝试：合并发送，失败退化为分开发送。返回是否成功。"""
+        img_p = Path(image_path)
+        if not img_p.exists():
+            return await self.send_group_text(group_id, text)
+        raw_path = str(img_p.resolve())
+        file_uri = f"file:///{img_p.resolve().as_posix()}"
         client = await self._http_client()
 
         for fmt in (raw_path, file_uri):
@@ -187,13 +200,80 @@ class Bot:
                     timeout=30.0,
                 )
                 if resp.status_code == 200 and (resp.json() or {}).get("status") != "failed":
-                    return
+                    return True
             except Exception as exc:
                 log.warning("合并发送图文异常 (%s): %s", fmt, exc)
 
         # 若合并发送因协议超时拦截，退回分开发送
-        await self.send_group_text(group_id, text)
-        await self.send_group_image(group_id, img_p)
+        ok_text = await self.send_group_text(group_id, text)
+        ok_img = await self.send_group_image(group_id, img_p)
+        return bool(ok_text and ok_img)
+
+    def _spool_result(self, group_id: int, user_id: str, text: str, image_path: str | Path) -> None:
+        """投递彻底失败时把结果落盘，等 NapCat 恢复后补发（绝不静默吞结果）。"""
+        try:
+            self.spool_dir.mkdir(parents=True, exist_ok=True)
+            name = f"{int(time.time())}_{uuid.uuid4().hex[:8]}.json"
+            (self.spool_dir / name).write_text(
+                json.dumps(
+                    {
+                        "group_id": group_id,
+                        "user_id": str(user_id),
+                        "text": text,
+                        "image_path": str(Path(image_path)),
+                        "created_at": time.time(),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            log.error("结果已转入补发队列: %s (group=%s)", name, group_id)
+        except Exception as exc:
+            log.error("结果落盘失败（本次结果丢失）: %s", exc)
+
+    async def flush_spooled_results(self) -> None:
+        """周期性补发积压结果（NapCat 重启、网络抖动恢复后自动补齐）。"""
+        if not self.spool_dir.exists():
+            return
+        for f in sorted(self.spool_dir.glob("*.json")):
+            try:
+                payload = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                f.unlink(missing_ok=True)
+                continue
+            if time.time() - float(payload.get("created_at", 0)) < 15:
+                continue  # 刚入队，先让主路径重试完
+            try:
+                ok = await self._try_send_group_result(
+                    int(payload["group_id"]),
+                    str(payload.get("user_id", "")),
+                    payload.get("text", ""),
+                    payload.get("image_path", ""),
+                )
+                if ok:
+                    f.unlink(missing_ok=True)
+                    log.info("补发积压结果成功: %s", f.name)
+            except Exception as exc:
+                log.warning("补发结果异常 (%s): %s", f.name, exc)
+
+    async def send_group_result(self, group_id: int, user_id: str, text: str, image_path: str | Path) -> None:
+        """模拟完成后：发送图文并茂的卡片消息。
+
+        NapCat/OneBot 可能正在重启（守护进程会主动重启它），因此这里必须重试；
+        重试仍失败则落盘到 data/pending_results 由后台补发 —— 结果绝不静默丢失。
+        """
+        for attempt, delay in enumerate((0.0, 3.0, 8.0, 20.0), start=1):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                if await self._try_send_group_result(group_id, user_id, text, image_path):
+                    if attempt > 1:
+                        log.info("结果第 %d 次尝试发送成功 (group=%s)", attempt, group_id)
+                    return
+            except Exception as exc:
+                log.warning("发送结果异常（第 %d 次尝试, group=%s）: %s", attempt, group_id, exc)
+        log.error("结果发送连续 %d 次失败，转入补发队列 (group=%s user=%s)", 4, group_id, user_id)
+        self._spool_result(group_id, user_id, text, image_path)
 
     def _image_segment(self, segments: list) -> dict | None:
         for seg in segments:
@@ -217,6 +297,59 @@ class Bot:
         return None
 
     # ---------- 队列管理 ----------
+    def _save_pending(self) -> None:
+        """原子写 data/queue.json（队列的持久化镜像）。"""
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self.queue_file.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self.pending, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self.queue_file)
+        except Exception as exc:
+            log.warning("写入队列文件失败: %s", exc)
+
+    def _load_pending(self) -> list[dict]:
+        try:
+            if not self.queue_file.exists():
+                return []
+            data = json.loads(self.queue_file.read_text(encoding="utf-8"))
+            return [it for it in data if isinstance(it, dict) and it.get("request")]
+        except Exception as exc:
+            log.warning("读取队列文件失败（按空队列处理）: %s", exc)
+            return []
+
+    def _drop_pending(self, item: dict) -> None:
+        before = len(self.pending)
+        self.pending = [x for x in self.pending if x.get("id") != item.get("id")]
+        if len(self.pending) != before:
+            self._save_pending()
+
+    async def _enqueue_item(self, item: dict) -> None:
+        """入队 = 内存队列 + 落盘，两者保持一致。"""
+        item.setdefault("id", uuid.uuid4().hex[:12])
+        item.setdefault("submitted_at", time.time())
+        self.pending.append(item)
+        self._save_pending()
+        await self.tasks.put(item)
+
+    async def restore_pending(self) -> None:
+        """启动时恢复重启前未完成的任务，并明确告知用户（不再静默清空队列）。"""
+        items = self._load_pending()
+        if not items:
+            return
+        log.warning("发现重启前未完成的任务 %d 个，重新入队", len(items))
+        for item in items:
+            self.pending.append(item)
+            await self.tasks.put(item)
+        self._save_pending()
+        for idx, item in enumerate(items, start=1):
+            try:
+                await self.send_group_text(
+                    item["group_id"],
+                    f"机器人刚重启，你的任务（{item.get('runs')} 局）已自动重新排队，当前第 {idx} 位。",
+                )
+            except Exception:
+                pass
+
     async def _cancel_user(self, user_id: str) -> int:
         removed = 0
         retained = []
@@ -233,6 +366,9 @@ class Bot:
                 break
         for item in retained:
             await self.tasks.put(item)
+        if removed:
+            self.pending = [x for x in self.pending if x.get("user_id") != user_id]
+            self._save_pending()
         if (
             self.active_item is not None
             and self.active_item.get("user_id") == user_id
@@ -274,7 +410,7 @@ class Bot:
                 await self.send_group_text(group_id, reason)
                 return
         self.quota.reserve(user_id, runs)
-        await self.tasks.put({"user_id": user_id, "group_id": group_id, "request": request, "runs": runs})
+        await self._enqueue_item({"user_id": user_id, "group_id": group_id, "request": request, "runs": runs})
 
     # ---------- 消息处理 ----------
     async def handle_event(self, event: dict) -> None:
@@ -371,6 +507,7 @@ class Bot:
         while True:
             try:
                 item = await self.tasks.get()
+                self._drop_pending(item)
                 self.active = 1
                 self.active_item = item
                 self.current_run_id = None
@@ -568,8 +705,31 @@ def _acquire_singleton() -> bool:
         return True
 
 
+def _setup_logging() -> None:
+    """控制台 + logs/bot.log 双写。
+
+    守护进程以 DEVNULL 方式拉起本进程，若只配 basicConfig（仅 stderr），
+    线上出问题时将完全不可观测——历史上"队列静默清空"就是这么被埋掉的。
+    """
+    log_dir = Path(__file__).resolve().parent.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    root.addHandler(console)
+    file_handler = RotatingFileHandler(
+        log_dir / "bot.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    file_handler.setFormatter(fmt)
+    root.addHandler(file_handler)
+
+
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    _setup_logging()
     if not _acquire_singleton():
         return
     cfg = load_config()
@@ -588,6 +748,19 @@ def main() -> None:
             loop.create_task(bot.worker()).add_done_callback(_on_worker_done)
 
     worker_task.add_done_callback(_on_worker_done)
+
+    # 恢复重启前未完成的任务（并告知用户），彻底消除"队列被静默清空"
+    loop.create_task(bot.restore_pending())
+
+    async def _flush_spooled_loop() -> None:
+        while True:
+            await asyncio.sleep(30.0)
+            try:
+                await bot.flush_spooled_results()
+            except Exception as exc:
+                log.warning("补发循环异常: %s", exc)
+
+    loop.create_task(_flush_spooled_loop())
 
     # 启动 OneBot WebSocket 客户端监听
     def run_ws():
