@@ -9,3 +9,4 @@ napcat_shell/
 *.zip
 .vscode/
 .idea/
+napcat_login.env

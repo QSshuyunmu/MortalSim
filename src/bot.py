@@ -625,6 +625,19 @@ def main() -> None:
     ws_thread = threading.Thread(target=run_ws, daemon=True)
     ws_thread.start()
 
+    async def _heartbeat_loop() -> None:
+        """向 data/bot.heartbeat 写入存活心跳，供守护进程判定 Bot 是否假死。"""
+        hb = Path(__file__).resolve().parent.parent / "data" / "bot.heartbeat"
+        while True:
+            try:
+                hb.parent.mkdir(parents=True, exist_ok=True)
+                hb.write_text(f"{int(time.time())} pid={os.getpid()}\n", encoding="utf-8")
+            except Exception as exc:
+                log.warning("heartbeat write failed: %s", exc)
+            await asyncio.sleep(10.0)
+
+    loop.create_task(_heartbeat_loop())
+
     log.info("Bot 已启动，等待 OneBot 事件...")
     try:
         loop.run_forever()
