@@ -180,68 +180,85 @@ def _parse_river_spec(river_raw: str, target_seat: int, x: int = 1, oya: int = 0
     melds: list[dict[str, Any]] = []
     river_raw = river_raw.strip()
 
+    # 1. 检查是否存在按座位命名的分段（如 东:1m,2p / 南:9s 或 0:1m 1:2p）
+    seat_name_pattern = r"东|南|西|北|0|1|2|3|[eswnESWN]"
+    splits = list(re.finditer(rf'(?:^|[;；/|／｜\s,，])(?=({seat_name_pattern})[:：=])', river_raw))
+    if splits:
+        indices = [m.end() for m in splits]
+        indices.append(len(river_raw))
+        sections = []
+        for i in range(len(indices) - 1):
+            sec = river_raw[indices[i]:indices[i+1]].strip().rstrip(';；/|／｜,， ')
+            if sec:
+                sections.append(sec)
+
+        for sec in sections:
+            parts = re.split(r'[:：=]', sec, maxsplit=1)
+            if len(parts) != 2:
+                continue
+            seat_token = parts[0].strip().lower()
+            if seat_token not in SEAT_MAP:
+                return [], None, [], f"未知座位编号 '{parts[0]}'，支持 0-3 / E,S,W,N / 东南西北"
+            seat_idx = SEAT_MAP[seat_token]
+            tokens = _parse_river_tokens_string(parts[1])
+            for tok in tokens:
+                tile_s, ts, is_r, m_info = tok
+                if m_info:
+                    m_info["target"] = seat_idx
+                    m_info["pai"] = tile_s
+                    melds.append(m_info)
+                if seat_idx == target_seat:
+                    target_past.append((tile_s, ts, is_r))
+                else:
+                    opponent_rivers[seat_idx].append((tile_s, ts, is_r))
+
+        has_opp = any(len(r) > 0 for i, r in enumerate(opponent_rivers) if i != target_seat)
+        return target_past, opponent_rivers if has_opp else None, melds, None
+
+    # 2. 无命名分段：按斜杠 '/' 分隔
     slash_sections = [s.strip() for s in re.split(r'[/|／｜]+', river_raw) if s.strip()]
-    if not any(":" in s or "：" in s or "=" in s for s in slash_sections):
-        if len(slash_sections) == 4:
-            for seat_idx, sec in enumerate(slash_sections):
-                tokens = _parse_river_tokens_string(sec)
-                for tok in tokens:
-                    tile_s, ts, is_r, m_info = tok
-                    if m_info:
-                        m_info["target"] = seat_idx
-                        m_info["pai"] = tile_s
-                        melds.append(m_info)
-                    if seat_idx == target_seat:
-                        target_past.append((tile_s, ts, is_r))
-                    else:
-                        opponent_rivers[seat_idx].append((tile_s, ts, is_r))
-            has_opp = any(len(r) > 0 for i, r in enumerate(opponent_rivers) if i != target_seat)
-            return target_past, opponent_rivers if has_opp else None, melds, None
+    if len(slash_sections) == 4:
+        for seat_idx, sec in enumerate(slash_sections):
+            tokens = _parse_river_tokens_string(sec)
+            for tok in tokens:
+                tile_s, ts, is_r, m_info = tok
+                if m_info:
+                    m_info["target"] = seat_idx
+                    m_info["pai"] = tile_s
+                    melds.append(m_info)
+                if seat_idx == target_seat:
+                    target_past.append((tile_s, ts, is_r))
+                else:
+                    opponent_rivers[seat_idx].append((tile_s, ts, is_r))
+        has_opp = any(len(r) > 0 for i, r in enumerate(opponent_rivers) if i != target_seat)
+        return target_past, opponent_rivers if has_opp else None, melds, None
+    elif len(slash_sections) < 4:
+        prec_seats = []
+        cur = oya
+        while cur != target_seat:
+            prec_seats.append(cur)
+            cur = (cur + 1) % 4
+        if len(slash_sections) == len(prec_seats) and len(prec_seats) > 0:
+            assigned_seats = prec_seats
         else:
-            prec_seats = []
-            cur = oya
-            while cur != target_seat:
-                prec_seats.append(cur)
-                cur = (cur + 1) % 4
-            if len(slash_sections) == len(prec_seats):
-                for idx, seat_idx in enumerate(prec_seats):
-                    tokens = _parse_river_tokens_string(slash_sections[idx])
-                    for tok in tokens:
-                        tile_s, ts, is_r, m_info = tok
-                        if m_info:
-                            m_info["target"] = seat_idx
-                            m_info["pai"] = tile_s
-                            melds.append(m_info)
-                        opponent_rivers[seat_idx].append((tile_s, ts, is_r))
-                has_opp = any(len(r) > 0 for i, r in enumerate(opponent_rivers) if i != target_seat)
-                return target_past, opponent_rivers if has_opp else None, melds, None
-            return [], None, [], f"牌河分段数量 ({len(slash_sections)}) 与前置出牌玩家数 ({len(prec_seats)}) 或四家总数 (4) 不符"
+            assigned_seats = list(range(len(slash_sections)))
 
-    sections = [s.strip() for s in re.split(r'[;；/|／｜\s]+', river_raw) if s.strip()]
-    for sec in sections:
-        if ":" not in sec and "：" not in sec and "=" not in sec:
-            continue
-        parts = re.split(r'[:：=]', sec, maxsplit=1)
-        if len(parts) != 2:
-            continue
-        seat_token = parts[0].strip().lower()
-        if seat_token not in SEAT_MAP:
-            return [], None, [], f"未知座位编号 '{parts[0]}'，支持 0-3 / E,S,W,N / 东南西北"
-        seat_idx = SEAT_MAP[seat_token]
-        tokens = _parse_river_tokens_string(parts[1])
-        for tok in tokens:
-            tile_s, ts, is_r, m_info = tok
-            if m_info:
-                m_info["target"] = seat_idx
-                m_info["pai"] = tile_s
-                melds.append(m_info)
-            if seat_idx == target_seat:
-                target_past.append((tile_s, ts, is_r))
-            else:
-                opponent_rivers[seat_idx].append((tile_s, ts, is_r))
+        for idx, seat_idx in enumerate(assigned_seats):
+            tokens = _parse_river_tokens_string(slash_sections[idx])
+            for tok in tokens:
+                tile_s, ts, is_r, m_info = tok
+                if m_info:
+                    m_info["target"] = seat_idx
+                    m_info["pai"] = tile_s
+                    melds.append(m_info)
+                if seat_idx == target_seat:
+                    target_past.append((tile_s, ts, is_r))
+                else:
+                    opponent_rivers[seat_idx].append((tile_s, ts, is_r))
+        has_opp = any(len(r) > 0 for i, r in enumerate(opponent_rivers) if i != target_seat)
+        return target_past, opponent_rivers if has_opp else None, melds, None
 
-    has_opp = any(len(r) > 0 for i, r in enumerate(opponent_rivers) if i != target_seat)
-    return target_past, opponent_rivers if has_opp else None, melds, None
+    return [], None, [], f"牌河分段数量 ({len(slash_sections)}) 超过四家总数 (4)"
 
 
 
@@ -251,6 +268,8 @@ def _generate_default_rivers(
     oya: int,
     x: int,
     call_target_tile: str | None = None,
+    partial_target_past: list[tuple[str, bool, bool]] | None = None,
+    partial_opp_rivers: list[list[tuple[str, bool, bool]]] | None = None,
 ) -> tuple[list[tuple[str, bool, bool]], list[list[tuple[str, bool, bool]]]]:
     """当巡目 x >= 2 且用户未提供牌河时，自动生成四家物理合法、无冲突且符合牌理的牌河：
        1. 严格按 字牌 -> 幺九 -> 28 -> 37 -> 456 优先级出牌；
@@ -298,9 +317,24 @@ def _generate_default_rivers(
         tile_used_counts[t] = tile_used_counts.get(t, 0) + 1
 
     rivers: list[list[tuple[str, bool, bool]]] = [[], [], [], []]
+    if partial_target_past:
+        rivers[target_seat] = list(partial_target_past)
+    if partial_opp_rivers:
+        for p in range(4):
+            if p != target_seat and p < len(partial_opp_rivers):
+                rivers[p] = list(partial_opp_rivers[p] or [])
+
+    # 预先将用户已指定牌河中的牌计入使用计数
+    for p in range(4):
+        for tok in rivers[p]:
+            t = tok[0]
+            if t in ("0m", "5mr"): t = "5m"
+            elif t in ("0p", "5pr"): t = "5p"
+            elif t in ("0s", "5sr"): t = "5s"
+            tile_used_counts[t] = tile_used_counts.get(t, 0) + 1
 
     # 每张牌被各家切出的历史记录（避免一家频繁来回切相同牌）
-    player_discard_history: list[list[str]] = [[], [], [], []]
+    player_discard_history: list[list[str]] = [[tok[0] for tok in rivers[p]] for p in range(4)]
 
     def pick_tile_for_player(p_idx: int, turn_idx: int, used_this_turn: set[str]) -> str:
         # 该玩家上一巡打出的牌（严禁连续手切同一张牌）
@@ -379,6 +413,13 @@ def _generate_default_rivers(
             if r == x and pos_p > pos_target:
                 continue
 
+            # 若玩家 p 在此巡已有用户指定的舍牌，则直接沿用，不重复生成
+            if len(rivers[p]) >= r:
+                t = rivers[p][r - 1][0]
+                norm_t = "5m" if t in ("0m", "5mr") else ("5p" if t in ("0p", "5pr") else ("5s" if t in ("0s", "5sr") else t))
+                used_this_turn.add(norm_t)
+                continue
+
             # 若此切是目标前驱在目标反应点前的最后一打，且指定了碰/吃目标牌：
             if call_target_tile and r == x and p == preceding_player:
                 tile = call_target_tile
@@ -454,7 +495,7 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
 
     # 6. 提取牌河 river
     river_raw = None
-    river_m = re.search(r"(?i)(?:^|(?<=[\s,;]))(?:river|河|牌河)[:：=]?([0-9mpszzt\^rR立\(（\)）\u4e00-\u9fa5,，:：;；/|／｜\s\-_东南西北ESWN]+?)(?=\s+[pPdDcCeEwWsS]|\s*$)", rest)
+    river_m = re.search(r"(?i)(?:^|(?<=[\s,;]))(?:river|河|牌河)[:：=]?([0-9mpszzt\^rR立\(（\)）\u4e00-\u9fa5,，:：;；/|／｜\s\-_东南西北ESWN]+?)(?=\s+[pPdDcCeEwWsSxX]|\s+(?:runs?|局数)[:：=]?\d+|\s+\d+\b|\s*$)", rest)
     if river_m:
         river_raw = river_m.group(1).strip()
         rest = rest[:river_m.start()] + " " + rest[river_m.end():]
@@ -545,25 +586,27 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
     effective_target_seat = target_seat_val if target_seat_val is not None else 0
 
     if cand_raw is None:
-        # 当用户未提供 c 候选时，调用 Mortal 神经网络模型前向推断获取 Q 值最高的前 3 个切牌候选
+        # 当用户未提供 c 候选时，调用 Mortal 模型前向推断：支持立直切牌与无压倒性差异时的自适应 x 选 (x>=2)
         from model_eval import get_top_model_discards
         real_model_id = "distill_nova" if model_id_val == "model_aggressive" else "distill_41b_infer"
-        top3_tiles = get_top_model_discards(
+        model_candidates = get_top_model_discards(
             hand_str=hand_norm,
             dora_indicator=dora_indicator,
             round_str=round_raw,
             target_seat=effective_target_seat,
             scores=scores_val,
             model_id=real_model_id,
-            k=3,
+            min_k=2,
+            max_k=4,
         )
-        if top3_tiles:
-            for tile in top3_tiles:
-                candidates.append({"tile": tile, "riichi": False, "kan": False, "candidate": tile})
+        if model_candidates:
+            for tile, is_riichi in model_candidates:
+                c_name = f"riichi:{tile}" if is_riichi else tile
+                candidates.append({"tile": tile, "riichi": is_riichi, "kan": False, "candidate": c_name})
         else:
             # 兜底保底策略
             unique_hand = list(dict.fromkeys(hand_tiles))
-            for tile in unique_hand[:3]:
+            for tile in unique_hand[:2]:
                 candidates.append({"tile": tile, "riichi": False, "kan": False, "candidate": tile})
     else:
         for part in re.split(r'[,，、\s]+', cand_raw):
@@ -697,18 +740,34 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
     target_past = None
     opp_rivers = None
     prefix_melds = []
+    call_tile = None
+    for cand in candidates:
+        if cand.get("call_tile"):
+            call_tile = cand["call_tile"]
+            break
+
     if river_raw:
-        target_past, opp_rivers, prefix_melds, river_err = _parse_river_spec(river_raw, effective_target_seat, x_val, 0)
+        parsed_target_past, parsed_opp_rivers, prefix_melds, river_err = _parse_river_spec(river_raw, effective_target_seat, x_val, 0)
         if river_err:
             return None, river_err
+        # 增量自动补齐其余未指定或张数不足的玩家牌河
+        target_past, opp_rivers = _generate_default_rivers(
+            hand_tiles,
+            effective_target_seat,
+            0,
+            x_val,
+            call_target_tile=call_tile,
+            partial_target_past=parsed_target_past,
+            partial_opp_rivers=parsed_opp_rivers,
+        )
     elif x_val >= 2 or (x_val >= 1 and effective_target_seat != 0):
-        # 提取副露目标牌
-        call_tile = None
-        for cand in candidates:
-            if cand.get("call_tile"):
-                call_tile = cand["call_tile"]
-                break
-        target_past, opp_rivers = _generate_default_rivers(hand_tiles, effective_target_seat, 0, x_val, call_target_tile=call_tile)
+        target_past, opp_rivers = _generate_default_rivers(
+            hand_tiles,
+            effective_target_seat,
+            0,
+            x_val,
+            call_target_tile=call_tile,
+        )
 
     request: dict[str, Any] = {
         "model_id": model_id_val,
