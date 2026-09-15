@@ -17,6 +17,7 @@ LIBRIICHI_DIR = ROOT / "target" / "release"
 DEFAULT_MODEL_ID = "distill_41b_infer"
 PATH_41B = MODELS_DIR / "distill_41b_infer.pth"
 PATH_NOVA = MODELS_DIR / "distill_nova.pth"
+PATH_AEGIS = MODELS_DIR / "Bin_0910.pth"
 MAX_MODEL_BYTES = 2 * 1024 * 1024 * 1024
 
 
@@ -68,6 +69,7 @@ class ModelRegistry:
     def builtins(self) -> list[dict[str, Any]]:
         p1 = PATH_41B.exists()
         p2 = PATH_NOVA.exists()
+        p3 = PATH_AEGIS.exists()
         models = []
         if p1:
             models.append(self._with_contracts({
@@ -98,6 +100,22 @@ class ModelRegistry:
                 "num_blocks": 40,
                 "engine": "python-amp",
                 "source": "tsypx-distill-nova",
+                "ready": True,
+                "error": None,
+            }))
+        if p3:
+            models.append(self._with_contracts({
+                "id": "bin_0910",
+                "label": "神盾模型 (Aegis / Bin_0910: 极致避四/铁壁防守/速攻)",
+                "filename": PATH_AEGIS.name,
+                "path": str(PATH_AEGIS),
+                "sha256": sha256(PATH_AEGIS),
+                "size_bytes": PATH_AEGIS.stat().st_size,
+                "version": 4,
+                "conv_channels": 192,
+                "num_blocks": 40,
+                "engine": "python-amp",
+                "source": "tsypx-bin-0910",
                 "ready": True,
                 "error": None,
             }))
