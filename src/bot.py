@@ -54,6 +54,9 @@ class Bot:
         self.queue_file = self.data_dir / "queue.json"
         self.spool_dir = self.data_dir / "pending_results"
         self.pending: list[dict] = []
+        # 独立 ReviewQueue 物理隔离：跑谱任务不阻塞即时 /sim
+        self.review_tasks: asyncio.Queue = asyncio.Queue()
+        self.review_active: int = 0
 
     def _apply_config(self, cfg: dict) -> None:
         self.cfg = cfg
@@ -122,6 +125,30 @@ class Bot:
         if self._http is None or self._http.is_closed:
             self._http = httpx.AsyncClient(trust_env=False, timeout=30.0)
         return self._http
+
+    async def send_group_file(self, group_id: int, file_path: str | Path, file_name: str | None = None) -> bool:
+        """使用 OneBot 11 upload_group_file API 上传文件至 QQ 群（独立 120s 超时）。"""
+        p_obj = Path(file_path).resolve()
+        fname = file_name or p_obj.name
+        try:
+            client = await self._http_client()
+            resp = await client.post(
+                f"{self.bot_cfg['onebot_http_url']}/upload_group_file",
+                json={
+                    "group_id": group_id,
+                    "file": str(p_obj),
+                    "name": fname,
+                },
+                timeout=120.0,
+            )
+            if resp.status_code == 200 and (resp.json() or {}).get("status") == "ok":
+                log.info("上传群文件成功: %s -> group %s", fname, group_id)
+                return True
+            log.warning("上传群文件响应异常: HTTP %s, body: %s", resp.status_code, resp.text[:200])
+            return False
+        except Exception as exc:
+            log.error("上传群文件失败 (group %s): %s", group_id, exc)
+            return False
 
     async def send_group_text(self, group_id: int, text: str) -> None:
         try:
@@ -456,10 +483,19 @@ class Bot:
             usage = self.quota.usage(user_id)
             await self.send_group_text(
                 group_id,
-                f"模拟队列：活跃 {self.active} / 排队 {self.tasks.qsize()}\n"
+                f"推演队列：活跃 {self.active} / 排队 {self.tasks.qsize()}\n"
+                f"跑谱队列：活跃 {self.review_active} / 排队 {self.review_tasks.qsize()}\n"
                 f"今日模拟统计：共 {usage['requests']} 次，{usage['games']} 局（已取消每日上限）\n"
                 f"单次限制：局数 <= 10000，候选 <= 4",
             )
+            return
+
+        if text.startswith(("/review", "跑谱", "复盘")):
+            sub_text = re.sub(r"^/review\s*|^跑谱\s*|^复盘\s*", "", text).strip()
+            if not sub_text:
+                await self.send_group_text(group_id, "请提供天凤或雀魂牌谱链接，例如：\n/review https://tenhou.net/0/?log=...")
+                return
+            await self._enqueue_review(group_id, user_id, sub_text)
             return
 
         if text.startswith("/sim"):
@@ -486,6 +522,114 @@ class Bot:
                 except Exception:
                     pass
                 sys.exit(0)
+
+    async def _enqueue_review(self, group_id: int, user_id: str, source_str: str) -> None:
+        if self.review_tasks.qsize() >= 3:
+            await self.send_group_text(group_id, "当前跑谱审查队列已满 (最多排队 3 场)，请稍候再试。")
+            return
+        await self.send_group_text(group_id, "已收到牌谱审查任务，正在抓取对局并调用 Aegis/Sol/Logos 三大模型深度推演...")
+        await self.review_tasks.put({"group_id": group_id, "user_id": user_id, "source": source_str})
+
+    async def review_worker(self) -> None:
+        """独立的牌谱审查工作线程，完全物理隔离，不阻塞即时 /sim。"""
+        while True:
+            try:
+                task = await self.review_tasks.get()
+                self.review_active = 1
+                group_id = task["group_id"]
+                user_id = task["user_id"]
+                source = task["source"]
+
+                try:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, self._execute_review_sync, group_id, user_id, source)
+                except Exception as exc:
+                    log.exception("跑谱审查执行异常: %s", exc)
+                    await self.send_group_text(group_id, f"牌谱审查失败：{exc}")
+                finally:
+                    self.review_active = 0
+                    self.review_tasks.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("review_worker 出现未捕获异常: %s", exc)
+                await asyncio.sleep(1.0)
+
+    def _execute_review_sync(self, group_id: int, user_id: str, source_str: str) -> None:
+        """同步执行审查、生成 HTML 并双通道交付。"""
+        import sys, time
+        from pathlib import Path
+        for p_dir in [r"D:\tenhoulib\MortalSim", r"D:\tenhoulib"]:
+            if p_dir not in sys.path: sys.path.insert(0, p_dir)
+        from mortal_app.reviewer.fetcher import load_replay_to_mjai
+        from mortal_app.reviewer.engine import run_multi_model_review
+        from mortal_app.reviewer.web.packager import generate_standalone_review_html
+
+        events, err, meta = load_replay_to_mjai(source_str)
+        if err or not events:
+            asyncio.run(self.send_group_text(group_id, err or "牌谱获取失败"))
+            return
+
+        target_seat = meta.get("target_seat", 0)
+        review_result = run_multi_model_review(events, target_seat=target_seat)
+
+        paipu_id = meta.get("id") or "replay"
+        ts = int(time.time())
+        out_dir = Path(self.render_cfg["output_dir"]) / "reviews"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        html_file = out_dir / f"review_{paipu_id}_{ts}.html"
+
+        generate_standalone_review_html(review_result, html_file)
+
+        total_dec = review_result.get("total_decisions", 0)
+        timeline = review_result.get("timeline", [])
+        conflicts = sum(1 for d in timeline if d.get("has_conflict"))
+        conflict_rate = (conflicts / total_dec * 100) if total_dec else 0.0
+
+        summary_msg = (
+            f"【Mortal Reviewer 牌谱审查完成】\n"
+            f"• 审查视角：{target_seat} 号位 (共 {total_dec} 巡决策)\n"
+            f"• 三神一致率：{100 - conflict_rate:.1f}%\n"
+            f"• 战术分歧点：{conflicts} 处 (Aegis避四 / Sol争一 / Logos理性)\n"
+            f"正在发送完全离线 HTML 报告..."
+        )
+        # 在同步工作线程中通过标准 HTTP post 投递，杜绝跨线程 asyncio.run 关闭共享连接池
+        self._post_group_msg_sync(group_id, summary_msg)
+        upload_ok = self._upload_group_file_sync(group_id, html_file, f"review_{paipu_id}.html")
+        if not upload_ok:
+            self._post_group_msg_sync(group_id, f"QQ群文件上传受限，报告已保存在本地服务器：\n{html_file.name}")
+
+    def _post_group_msg_sync(self, group_id: int, text: str) -> None:
+        try:
+            import requests
+            requests.post(
+                f"{self.bot_cfg['onebot_http_url']}/send_group_msg",
+                json={"group_id": group_id, "message": text},
+                timeout=15.0,
+            )
+        except Exception as exc:
+            log.warning("同步发送群消息异常: %s", exc)
+
+    def _upload_group_file_sync(self, group_id: int, file_path: Path, file_name: str) -> bool:
+        try:
+            import requests
+            resp = requests.post(
+                f"{self.bot_cfg['onebot_http_url']}/upload_group_file",
+                json={
+                    "group_id": group_id,
+                    "file": str(file_path.resolve()),
+                    "name": file_name,
+                },
+                timeout=120.0,
+            )
+            if resp.status_code == 200 and (resp.json() or {}).get("status") == "ok":
+                log.info("同步上传群文件成功: %s -> group %s", file_name, group_id)
+                return True
+            log.warning("同步上传群文件返回状态异常: %s", resp.text[:200])
+            return False
+        except Exception as exc:
+            log.warning("同步上传群文件异常: %s", exc)
+            return False
 
     # ---------- 任务 Worker ----------
     async def worker(self) -> None:
@@ -726,6 +870,13 @@ def main() -> None:
 
     # 启动后台任务处理 Worker 协程，附带崩溃自动拉起
     worker_task = loop.create_task(bot.worker())
+    review_worker_task = loop.create_task(bot.review_worker())
+
+    def _on_review_worker_done(t):
+        if not t.cancelled() and t.exception():
+            log.error("review_worker crashed: %s; restarting", t.exception())
+            loop.create_task(bot.review_worker()).add_done_callback(_on_review_worker_done)
+    review_worker_task.add_done_callback(_on_review_worker_done)
 
     def _on_worker_done(t):
         if not t.cancelled() and t.exception():
