@@ -1,12 +1,12 @@
-"""完全离线单文件 HTML 牌谱复盘报告编译器 (Client-Side State Engine).
+"""完全离线单文件 HTML 牌谱复盘报告编译器 (Complete Mahjong Replayer Packager).
 
-彻底解决五大痛点并控制体积在 500KB~700KB 之间：
-1. 四家手牌理牌排序（支持伏牌透视一键开启上帝视角）；左右两家手牌横置展示；
-2. 动作空间全覆盖：吃、碰、大明杠、加杠、暗杠、荣和/见逃、自摸/拒胡全量展示；
-3. 牌河标准 6 列宽（6 张一行折行，绝不 4 列截断）；
-4. 双播放模式：【仅自家决策 (Focused)】与【逐全局事件流 (Global)】无缝切换；
-5. 明确的小局结算弹窗：胜者、役种明细清单、番符点数、点数转移；
-6. 纯离线 IIFE 架构，双击秒开，零外部 CDN 依赖。
+解决所有体验缺陷：
+1. 终局结算展示和牌方完整真实牌姿（纯手牌 + 副露组合 + 和了牌独立隔开高亮）；
+2. 左右他家副露紧贴手牌并排展示，绝对不遗漏任何一家副露；
+3. 四家全量理牌（万筒索字精准顺序，赤牌归位到对应数牌旁边）；
+4. 标准 6 列牌河，不发生 4 列截断；
+5. 双模式无缝切换（逐自家决策 Focused / 逐全局事件流 Global）；
+6. 象牙白瓷纯白高反差牌面，完全离线单文件 IIFE 打包（<800KB）。
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def get_base64_tiles(assets_dir: str | Path | None = None) -> dict[str, str]:
     return _CACHED_TILE_MAP
 
 
-FULL_ENGINE_TEMPLATE = """<!DOCTYPE html>
+COMPLETE_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -118,7 +118,7 @@ header {
   position: relative;
 }
 
-/* 牌桌网格与牌河区 */
+/* 牌桌中央网格与牌河区 */
 .board-middle {
   flex: 1;
   display: grid;
@@ -190,16 +190,53 @@ header {
 .river-left   { grid-row: 2; grid-column: 1; transform: rotate(90deg); }
 .river-right  { grid-row: 2; grid-column: 3; transform: rotate(-90deg); }
 
-/* 左右对手手牌横向排列 */
-.player-tehai-top   { display: flex; justify-content: center; gap: 2px; transform: rotate(180deg); }
-.player-tehai-left  { display: flex; flex-direction: row; gap: 2px; position: absolute; left: 16px; top: 50%; transform: translateY(-50%) rotate(90deg); transform-origin: center center; }
-.player-tehai-right { display: flex; flex-direction: row; gap: 2px; position: absolute; right: 16px; top: 50%; transform: translateY(-50%) rotate(-90deg); transform-origin: center center; }
-.player-tehai-bottom { display: flex; justify-content: center; align-items: flex-end; gap: 2px; min-height: 60px; }
+/* 四家手牌与副露区域定位 */
+.player-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform: rotate(180deg);
+  gap: 8px;
+}
+.player-row-left {
+  display: flex;
+  align-items: center;
+  position: absolute;
+  left: 20px;
+  top: 50%;
+  transform: translateY(-50%) rotate(90deg);
+  transform-origin: center center;
+  gap: 8px;
+}
+.player-row-right {
+  display: flex;
+  align-items: center;
+  position: absolute;
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%) rotate(-90deg);
+  transform-origin: center center;
+  gap: 8px;
+}
+.player-row-bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 12px;
+}
 
-.meld-container { display: flex; gap: 4px; margin-left: 12px; }
-.meld-group { display: flex; gap: 1px; background: rgba(0,0,0,0.3); padding: 2px; border-radius: 3px; }
+.tehai-box { display: flex; gap: 2px; align-items: flex-end; }
+.meld-box  { display: flex; gap: 4px; align-items: flex-end; }
+.meld-group {
+  display: flex;
+  gap: 1px;
+  background: rgba(0,0,0,0.45);
+  padding: 2px 3px;
+  border-radius: 3px;
+  border: 1px solid rgba(255,255,255,0.12);
+}
 
-/* 象牙纯白高保真底色 */
+/* 象牙白瓷纯白高保真底色 */
 .tile-img {
   background-color: var(--tile-white) !important;
   border: 1px solid var(--tile-border);
@@ -225,27 +262,50 @@ header {
   border-bottom: 2px solid #3d0a0a;
 }
 .tile-mini { width: 22px; height: 30px; }
+.tile-meld-sideways {
+  transform: rotate(90deg);
+  margin: 0 4px;
+}
+.kakan-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
 
-/* 终局弹窗 (役种、番符、点数清单) */
+/* 终局弹窗 (役种、番符、点数清单 + 和牌方完整手牌姿) */
 .result-overlay {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: rgba(8, 26, 30, 0.96);
+  background: rgba(6, 20, 24, 0.98);
   border: 2px solid #5bc0be;
   border-radius: 8px;
-  padding: 16px 24px;
-  box-shadow: 0 8px 30px rgba(0,0,0,0.8);
+  padding: 18px 26px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.85);
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 8px;
   z-index: 100;
-  max-width: 380px;
+  min-width: 360px;
+  max-width: 500px;
 }
 .result-title { font-size: 18px; font-weight: bold; color: #f1c40f; }
 .result-points { font-size: 22px; font-weight: 800; color: #fff; }
+.result-hand-display {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(0,0,0,0.5);
+  border-radius: 6px;
+  margin: 6px 0;
+  width: 100%;
+}
+.winning-tile { margin-left: 10px; box-shadow: 0 0 0 2px #f1c40f; }
 .result-yaku-list { font-size: 12px; color: var(--text-main); display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
 .yaku-pill { background: rgba(91, 192, 190, 0.2); padding: 2px 6px; border-radius: 4px; border: 1px solid rgba(91, 192, 190, 0.4); }
 
@@ -355,18 +415,19 @@ header {
 <div class="workspace">
   <!-- 牌桌 -->
   <div class="board-container">
-    <!-- 终了弹层 -->
+    <!-- 终局弹窗 -->
     <div class="result-overlay" id="end-overlay" style="display:none;">
       <div class="result-title" id="res-title">和了 (荣和)</div>
       <div class="result-points" id="res-points">3900 点 (30符 2番)</div>
+      <div class="result-hand-display" id="res-hand-box"></div>
       <div class="result-yaku-list" id="res-yaku"></div>
-      <button class="btn-ctl" style="margin-top:6px; width:100px;" onclick="closeOverlay()">关闭</button>
+      <button class="btn-ctl" style="margin-top:8px; width:100px;" onclick="closeOverlay()">关闭</button>
     </div>
 
     <!-- 对家 (上) -->
-    <div style="display:flex; justify-content:center; align-items:center;">
-      <div class="player-tehai-top" id="hand-2"></div>
-      <div class="meld-container" id="melds-2"></div>
+    <div class="player-row-top">
+      <div class="tehai-box" id="hand-2"></div>
+      <div class="meld-box" id="melds-2"></div>
     </div>
 
     <!-- 中间：标准 6 列牌河与中心点数盘 -->
@@ -391,16 +452,22 @@ header {
       <div class="river-area river-bottom" id="river-0"></div>
     </div>
 
-    <!-- 左右对手手牌 (横置排列) -->
-    <div class="player-tehai-left" id="hand-3"></div>
-    <div class="player-tehai-right" id="hand-1"></div>
+    <!-- 左右对手手牌 (横置紧贴副露) -->
+    <div class="player-row-left">
+      <div class="tehai-box" id="hand-3"></div>
+      <div class="meld-box" id="melds-3"></div>
+    </div>
+    <div class="player-row-right">
+      <div class="tehai-box" id="hand-1"></div>
+      <div class="meld-box" id="melds-1"></div>
+    </div>
 
     <!-- 自家手牌 (下) -->
     <div style="display:flex; flex-direction:column; align-items:center; gap:4px;">
       <div style="font-size:11px; color:var(--text-dim);" id="hand-info-text">自家手牌 (已理牌)</div>
-      <div style="display:flex; align-items:flex-end;">
-        <div class="player-tehai-bottom" id="hand-0"></div>
-        <div class="meld-container" id="melds-0"></div>
+      <div class="player-row-bottom">
+        <div class="tehai-box" id="hand-0"></div>
+        <div class="meld-box" id="melds-0"></div>
       </div>
     </div>
   </div>
@@ -469,7 +536,7 @@ function sortTiles(tiles) {
   return (tiles || []).slice().sort(function(a, b) { return tileSortKey(a) - tileSortKey(b); });
 }
 
-/* 客户端轻量极速状态机：根据事件索引重建牌桌瞬时物理世界 */
+/* 客户端轻量状态机：重建牌桌瞬时物理世界 */
 function reconstructBoardState(targetEvIdx) {
   var events = PAYLOAD.events || [];
   var state = {
@@ -582,6 +649,7 @@ function reconstructBoardState(targetEvIdx) {
       for (var s = 0; s < 4; s++) {
         if (s < deltas.length) state.scores[s] += deltas[s];
       }
+      // 保存和牌方的真实纯手牌、副露与和了牌
       state.endInfo = {
         type: 'hora',
         actor: ev.actor,
@@ -592,6 +660,8 @@ function reconstructBoardState(targetEvIdx) {
         ten_fu: ev.ten_fu || 0,
         yaku: ev.yaku_names || [],
         deltas: deltas,
+        winner_hand: sortTiles(state.hands[ev.actor]),
+        winner_melds: state.melds[ev.actor] ? state.melds[ev.actor].slice() : [],
       };
     } else if (t === 'ryukyoku') {
       var deltas2 = ev.deltas || [0, 0, 0, 0];
@@ -656,6 +726,16 @@ function selectStepByEventIdx(evIdx) {
   var board = reconstructBoardState(evIdx);
   var targetSeat = PAYLOAD.target_seat || 0;
 
+  // 更新局选择下拉
+  var kyokuSelect = document.getElementById('kyoku-selector');
+  var bestKVal = 0;
+  for (var o = 0; o < kyokuSelect.options.length; o++) {
+    if (parseInt(kyokuSelect.options[o].value) <= evIdx) {
+      bestKVal = kyokuSelect.options[o].value;
+    }
+  }
+  kyokuSelect.value = bestKVal;
+
   // 1. 渲染中心盘
   document.getElementById('box-round-title').innerText = board.title.split(' ')[0];
   document.getElementById('box-sticks').innerText = board.honba + ' 本场 · 供托 ' + board.kyotaku;
@@ -712,15 +792,15 @@ function selectStepByEventIdx(evIdx) {
     handHtml += getTileImg(tsumoActual, 'tile-hand tile-tsumo');
   }
   document.getElementById('hand-0').innerHTML = handHtml;
+  renderMelds('melds-0', board.melds[targetSeat], targetSeat);
 
   var actLabel = board.lastAction ? (seatNames[board.lastAction.actor] + '家 ' + board.lastAction.type + ' ' + (board.lastAction.pai || '')) : '';
   document.getElementById('hand-info-text').innerText = actLabel;
 
-  // 4. 渲染三家对手手牌 (已理牌 + 横置排列)
-  renderOpponent('hand-2', 'melds-2', sortTiles(board.hands[(targetSeat + 2) % 4]), board.melds[(targetSeat + 2) % 4]);
-  renderOpponent('hand-3', 'melds-3', sortTiles(board.hands[(targetSeat + 3) % 4]), board.melds[(targetSeat + 3) % 4]);
-  renderOpponent('hand-1', 'melds-1', sortTiles(board.hands[(targetSeat + 1) % 4]), board.melds[(targetSeat + 1) % 4]);
-  renderMelds('melds-0', board.melds[targetSeat]);
+  // 4. 渲染三家对手手牌与副露 (理牌 + 横置排列紧贴副露)
+  renderOpponent('hand-2', 'melds-2', sortTiles(board.hands[(targetSeat + 2) % 4]), board.melds[(targetSeat + 2) % 4], (targetSeat + 2) % 4);
+  renderOpponent('hand-3', 'melds-3', sortTiles(board.hands[(targetSeat + 3) % 4]), board.melds[(targetSeat + 3) % 4], (targetSeat + 3) % 4);
+  renderOpponent('hand-1', 'melds-1', sortTiles(board.hands[(targetSeat + 1) % 4]), board.melds[(targetSeat + 1) % 4], (targetSeat + 1) % 4);
 
   // 5. 终局结算面板
   if (board.endInfo) {
@@ -733,7 +813,7 @@ function selectStepByEventIdx(evIdx) {
   renderDetailDrawer(evIdx);
 }
 
-function renderOpponent(handContainerId, meldContainerId, tiles, melds) {
+function renderOpponent(handContainerId, meldContainerId, tiles, melds, actorSeat) {
   var hEl = document.getElementById(handContainerId);
   if (!hEl) return;
   var html = '';
@@ -742,20 +822,110 @@ function renderOpponent(handContainerId, meldContainerId, tiles, melds) {
     else html += getTileBack('tile-mini');
   }
   hEl.innerHTML = html;
-  renderMelds(meldContainerId, melds);
+  renderMelds(meldContainerId, melds, actorSeat);
 }
 
-function renderMelds(meldContainerId, melds) {
+function arrangeMeldTiles(meld, actorSeat) {
+  var mType = meld.type;
+  var pai = meld.pai;
+  var consumed = (meld.consumed || []).slice();
+  var target = meld.target;
+
+  if (mType === 'ankan') {
+    return [
+      { tile: consumed[0], isBack: true, isSideways: false },
+      { tile: consumed[1], isBack: false, isSideways: false },
+      { tile: consumed[2], isBack: false, isSideways: false },
+      { tile: consumed[3], isBack: true, isSideways: false }
+    ];
+  }
+
+  // 严格日麻被鸣者相对座次：
+  // rel == 3: 上家 (左侧牌横置)
+  // rel == 2: 对家 (中间牌横置)
+  // rel == 1: 下家 (右侧牌横置)
+  var rel = (target !== undefined && target !== null) ? (target - actorSeat + 4) % 4 : 3;
+
+  if (mType === 'chi') {
+    // 吃牌固定来自上家，左边第一张横置 [8m(横), 6m, 7m]
+    return [
+      { tile: pai, isBack: false, isSideways: true },
+      { tile: consumed[0], isBack: false, isSideways: false },
+      { tile: consumed[1], isBack: false, isSideways: false }
+    ];
+  }
+
+  if (mType === 'pon') {
+    if (rel === 3) {
+      // 上家: [横, c0, c1]
+      return [
+        { tile: pai, isBack: false, isSideways: true },
+        { tile: consumed[0], isBack: false, isSideways: false },
+        { tile: consumed[1], isBack: false, isSideways: false }
+      ];
+    } else if (rel === 2) {
+      // 对家: [c0, 横, c1]
+      return [
+        { tile: consumed[0], isBack: false, isSideways: false },
+        { tile: pai, isBack: false, isSideways: true },
+        { tile: consumed[1], isBack: false, isSideways: false }
+      ];
+    } else {
+      // 下家: [c0, c1, 横]
+      return [
+        { tile: consumed[0], isBack: false, isSideways: false },
+        { tile: consumed[1], isBack: false, isSideways: false },
+        { tile: pai, isBack: false, isSideways: true }
+      ];
+    }
+  }
+
+  if (mType === 'daiminkan' || mType === 'kakan') {
+    var c0 = consumed[0] || pai;
+    var c1 = consumed[1] || pai;
+    var c2 = consumed[2] || pai;
+    if (rel === 3) {
+      return [
+        { tile: pai, isBack: false, isSideways: true, isKakan: (mType==='kakan') },
+        { tile: c0, isBack: false, isSideways: false },
+        { tile: c1, isBack: false, isSideways: false },
+        { tile: c2, isBack: false, isSideways: false }
+      ];
+    } else if (rel === 2) {
+      return [
+        { tile: c0, isBack: false, isSideways: false },
+        { tile: pai, isBack: false, isSideways: true, isKakan: (mType==='kakan') },
+        { tile: c1, isBack: false, isSideways: false },
+        { tile: c2, isBack: false, isSideways: false }
+      ];
+    } else {
+      return [
+        { tile: c0, isBack: false, isSideways: false },
+        { tile: c1, isBack: false, isSideways: false },
+        { tile: c2, isBack: false, isSideways: false },
+        { tile: pai, isBack: false, isSideways: true, isKakan: (mType==='kakan') }
+      ];
+    }
+  }
+
+  return [];
+}
+
+function renderMelds(meldContainerId, melds, actorSeat) {
   var mEl = document.getElementById(meldContainerId);
   if (!mEl) return;
   if (!melds || !melds.length) { mEl.innerHTML = ''; return; }
   var h = '';
   for (var i = 0; i < melds.length; i++) {
     var m = melds[i];
+    var arranged = arrangeMeldTiles(m, actorSeat);
     h += '<div class="meld-group">';
-    if (m.pai) h += getTileImg(m.pai, 'tile-mini');
-    for (var c = 0; c < (m.consumed || []).length; c++) {
-      h += getTileImg(m.consumed[c], 'tile-mini');
+    for (var a = 0; a < arranged.length; a++) {
+      var item = arranged[a];
+      var cls = 'tile-mini';
+      if (item.isSideways) cls += ' tile-meld-sideways';
+      if (item.isBack) h += getTileBack(cls);
+      else h += getTileImg(item.tile, cls);
     }
     h += '</div>';
   }
@@ -774,6 +944,41 @@ function showEndOverlay(endInfo) {
     document.getElementById('res-title').innerText = title;
     document.getElementById('res-points').innerText = endInfo.ten_points + ' 点 (' + endInfo.ten_fu + '符)';
 
+    // 渲染和牌方完整真实牌姿：纯手牌 + 副露 + 和了牌独立隔开
+    var handBox = document.getElementById('res-hand-box');
+    var hHtml = '<div style="display:flex; gap:2px; align-items:center;">';
+    var wHand = endInfo.winner_hand || [];
+    for (var i = 0; i < wHand.length; i++) {
+      hHtml += getTileImg(wHand[i], 'tile-hand');
+    }
+    // 和了牌独立高亮
+    if (endInfo.pai) {
+      hHtml += getTileImg(endInfo.pai, 'tile-hand winning-tile');
+    }
+    hHtml += '</div>';
+
+    // 和牌方副露：同样按照标准朝向指向摆放
+    var wMelds = endInfo.winner_melds || [];
+    if (wMelds.length) {
+      hHtml += '<div style="display:flex; gap:4px; margin-left:8px;">';
+      for (var m = 0; m < wMelds.length; m++) {
+        var meld = wMelds[m];
+        var arranged = arrangeMeldTiles(meld, endInfo.actor);
+        hHtml += '<div class="meld-group">';
+        for (var ma = 0; ma < arranged.length; ma++) {
+          var aItem = arranged[ma];
+          var aCls = 'tile-mini';
+          if (aItem.isSideways) aCls += ' tile-meld-sideways';
+          if (aItem.isBack) hHtml += getTileBack(aCls);
+          else hHtml += getTileImg(aItem.tile, aCls);
+        }
+        hHtml += '</div>';
+      }
+      hHtml += '</div>';
+    }
+    handBox.innerHTML = hHtml;
+
+    // 役种标签
     var yakuHtml = '';
     for (var y = 0; y < (endInfo.yaku || []).length; y++) {
       yakuHtml += '<span class="yaku-pill">' + endInfo.yaku[y] + '</span>';
@@ -782,6 +987,7 @@ function showEndOverlay(endInfo) {
   } else {
     document.getElementById('res-title').innerText = endInfo.name || '荒凉流局';
     document.getElementById('res-points').innerText = '流局听牌罚符结算';
+    document.getElementById('res-hand-box').innerHTML = '';
     document.getElementById('res-yaku').innerHTML = '';
   }
 }
@@ -934,7 +1140,6 @@ def generate_standalone_review_html(
     output_path: str | Path,
     assets_dir: str | Path | None = None,
 ) -> Path:
-    """生成完全离线、支持双模式与全动作空间的单文件 HTML。"""
     out_p = Path(output_path).resolve()
     out_p.parent.mkdir(parents=True, exist_ok=True)
 
@@ -946,7 +1151,7 @@ def generate_standalone_review_html(
     assets_json = json.dumps(tile_assets, ensure_ascii=False)
     assets_json_safe = assets_json.replace("</script>", "<\\/script>").replace("<!--", "<\\!--")
 
-    html_content = FULL_ENGINE_TEMPLATE.replace("__REVIEW_DATA_PLACEHOLDER__", data_json_safe).replace("__TILE_ASSETS_PLACEHOLDER__", assets_json_safe)
+    html_content = COMPLETE_TEMPLATE.replace("__REVIEW_DATA_PLACEHOLDER__", data_json_safe).replace("__TILE_ASSETS_PLACEHOLDER__", assets_json_safe)
 
     out_p.write_text(html_content, encoding="utf-8")
     return out_p
