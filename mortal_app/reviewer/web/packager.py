@@ -254,6 +254,11 @@ header {
 .tile-river { width: 24px; height: 32px; }
 .tile-river.tsumogiri { opacity: 0.72; filter: brightness(0.92); }
 .tile-river.riichi { transform: rotate(90deg); margin: 0 4px; box-shadow: 0 0 0 2px #f1c40f; }
+.tile-river.called {
+  border: 1.5px solid #e74c3c !important;
+  box-shadow: 0 0 0 1.5px rgba(231, 76, 60, 0.85) !important;
+  position: relative;
+}
 
 /* 背竹暗牌 */
 .tile-back {
@@ -624,6 +629,10 @@ function reconstructBoardState(targetEvIdx) {
           consumed: consumed,
           target: ev.target,
         });
+        // 关键标注：被鸣牌者 (ev.target) 牌河中的最后一张舍牌被他人副露吃碰走，打上 is_called 标记！
+        if (ev.target !== undefined && state.rivers[ev.target] && state.rivers[ev.target].length) {
+          state.rivers[ev.target][state.rivers[ev.target].length - 1].is_called = true;
+        }
       }
     } else if (t === 'ankan' || t === 'kakan') {
       if (ev.actor !== undefined) {
@@ -769,6 +778,7 @@ function selectStepByEventIdx(evIdx) {
       var cls = 'tile-river';
       if (item.is_tsumogiri) cls += ' tsumogiri';
       if (item.is_riichi) cls += ' riichi';
+      if (item.is_called) cls += ' called';
       rHtml += getTileImg(item.tile, cls);
     }
     var relP = (p - targetSeat + 4) % 4;
