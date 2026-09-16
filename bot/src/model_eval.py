@@ -83,6 +83,8 @@ def get_top_model_discards(
     hand_str: str,
     dora_indicator: str,
     round_str: str = "E1",
+    honba: int = 0,
+    kyotaku: int = 0,
     target_seat: int = 0,
     scores: dict[str, int] | list[int] | None = None,
     model_id: str = "distill_41b_infer",
@@ -106,7 +108,7 @@ def get_top_model_discards(
             s_self = scores.get("self", 25000)
             s_shimo = scores.get("shimocha", 25000)
             s_toi = scores.get("toimen", 25000)
-            s_kami = 100000 - s_self - s_shimo - s_toi
+            s_kami = 100000 - kyotaku * 1000 - s_self - s_shimo - s_toi
             score_list = [25000, 25000, 25000, 25000]
             score_list[target_seat] = s_self
             score_list[(target_seat + 1) % 4] = s_shimo
@@ -158,8 +160,8 @@ def get_top_model_discards(
             "type": "start_kyoku",
             "bakaze": bakaze,
             "kyoku": kyoku_num,
-            "honba": 0,
-            "kyotaku": 0,
+            "honba": honba,
+            "kyotaku": kyotaku,
             "oya": oya,
             "dora_marker": eval_dora,
             "scores": score_list,
