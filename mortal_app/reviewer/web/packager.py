@@ -458,10 +458,11 @@ function tileSortKey(t) {
   var suitOrder = { 'm': 0, 'p': 100, 's': 200, 'z': 300 };
   var zMap = { 'E': 1, 'S': 2, 'W': 3, 'N': 4, 'P': 5, 'F': 6, 'C': 7 };
   if (zMap[t]) return suitOrder.z + zMap[t];
-  var suit = t[t.length - 1];
-  var num = parseInt(t[0]);
-  if (t.indexOf('r') !== -1) return (suitOrder[suit] || 0) + 55;
-  return (suitOrder[suit] || 0) + num * 10;
+  var isAka = (t.indexOf('r') !== -1);
+  var suit = isAka ? t.charAt(1) : t.charAt(t.length - 1);
+  var num = parseInt(t.charAt(0));
+  var sub = isAka ? 51 : num * 10;
+  return (suitOrder[suit] !== undefined ? suitOrder[suit] : 999) + sub;
 }
 
 function sortTiles(tiles) {
