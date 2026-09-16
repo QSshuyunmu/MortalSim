@@ -475,14 +475,45 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         tau_val = float(tau_m.group(1))
         rest = rest[:tau_m.start()] + " " + rest[tau_m.end():]
 
-    # 4. 提取局与本场 (E1-0, S4-1, E4) - 优先提取以避免其数字被当作点数
+    # 4. 提取显式供托 kyotaku (支持 kyotaku=1, kt=1, 供托=1, 场供=1, 1供, 1供托, 1000供托 等)
+    kyotaku_explicit = None
+    kt_m = re.search(r'(?i)(?:^|(?<=[\s,;]))(?:kyotaku|kt|供托|场供|场存供托|立直棒)[:：=]?(\d+(?:k|000)?)\b', rest)
+    if not kt_m:
+        kt_m = re.search(r'(?i)(?:^|(?<=[\s,;]))(\d+)(?:供|供托|根立直棒)\b', rest)
+    if kt_m:
+        kt_str = (kt_m.group(1) or "").lower()
+        if kt_str.endswith("k"):
+            kyotaku_explicit = int(float(kt_str[:-1]))
+        else:
+            v = int(kt_str)
+            if v >= 1000 and v % 1000 == 0:
+                v //= 1000
+            kyotaku_explicit = v
+        rest = rest[:kt_m.start()] + " " + rest[kt_m.end():]
+
+    # 4.1 提取局、本场与三段式供托 (支持 E1, E1-0, E1-3-1, S4-1-2, 东1-0-1 等)
+    ROUND_CHAR_MAP = {
+        "东": "E", "南": "S", "西": "W", "北": "W",
+        "E": "E", "S": "S", "W": "W", "N": "W",
+        "e": "E", "s": "S", "w": "W", "n": "W",
+    }
     round_raw = "E1"
     honba_raw = "0"
-    round_m = re.search(r'(?i)\b([EWSews][1-4])(?:-(\d+))?\b', rest)
+    kyotaku_from_round = None
+    round_m = re.search(r'(?i)(?:^|(?<=[\s,;]))([EWSews东南西北][1-4]局?)(?:-(\d+)(?:-(\d+))?)?(?=\s|[,;]|$|\b)', rest)
     if round_m:
-        round_raw = round_m.group(1).upper()
+        r_str = round_m.group(1).replace("局", "")
+        w_char = ROUND_CHAR_MAP.get(r_str[0], "E")
+        round_raw = f"{w_char}{r_str[1]}"
         honba_raw = round_m.group(2) or "0"
+        if round_m.group(3) is not None:
+            k_val = int(round_m.group(3))
+            if k_val >= 1000 and k_val % 1000 == 0:
+                k_val //= 1000
+            kyotaku_from_round = k_val
         rest = rest[:round_m.start()] + " " + rest[round_m.end():]
+
+    kyotaku_val = kyotaku_explicit if kyotaku_explicit is not None else (kyotaku_from_round if kyotaku_from_round is not None else 0)
 
     # 5. 提取宝牌 d... (支持 d8p, d4m, d东, d白 等)
     dora_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[dD][:：\s]?([0-9mpszrKR]{2,4}|[东南西北白发發中])\b', rest)
@@ -528,6 +559,12 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
                         if abs(val) < 1000:
                             val *= 100
                     parsed_scores.append(val)
+                # 若用户未显式指定供托，四家点数总和与 100000 恰相差整千点（如 99000），自动推导场存供托
+                if kyotaku_explicit is None and kyotaku_from_round is None and kyotaku_val == 0:
+                    pts_diff = 100000 - sum(parsed_scores)
+                    if 0 < pts_diff <= 20000 and pts_diff % 1000 == 0:
+                        kyotaku_val = pts_diff // 1000
+
                 target_p = target_seat_val if target_seat_val is not None else 0
                 rel_self = parsed_scores[target_p]
                 rel_shimo = parsed_scores[(target_p + 1) % 4]
@@ -593,6 +630,8 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
             hand_str=hand_norm,
             dora_indicator=dora_indicator,
             round_str=round_raw,
+            honba=int(honba_raw),
+            kyotaku=int(kyotaku_val),
             target_seat=effective_target_seat,
             scores=scores_val,
             model_id=real_model_id,
@@ -776,7 +815,7 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         "discards": candidates,
         "round": round_raw,
         "honba": int(honba_raw),
-        "kyotaku": 0,
+        "kyotaku": int(kyotaku_val),
         "runs": runs_raw,
         "target_seat": target_seat_val,
         "x": x_val,
