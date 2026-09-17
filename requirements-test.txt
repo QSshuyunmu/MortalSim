@@ -1,2 +1,6 @@
 pytest==9.1.1
 httpx2==2.9.0
+# Bot rendering/pipeline regression tests (no model or native inference runtime needed).
+Pillow>=10.1
+httpx>=0.28
+websocket-client>=1.8

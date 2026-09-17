@@ -622,11 +622,15 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
 
     effective_target_seat = target_seat_val if target_seat_val is not None else 0
 
+    # 无 c= 时由模型推断决定候选；同一次推断的 Q/P 结果一并缓存进 request["_model_qp"]，
+    # bot.execute 会直接复用，不再为报表列跑第二遍推断。
+    precomputed_qp: dict[str, dict[str, float]] | None = None
     if cand_raw is None:
         # 当用户未提供 c 候选时，调用 Mortal 模型前向推断：支持立直切牌与无压倒性差异时的自适应 x 选 (x>=2)
-        from model_eval import get_top_model_discards
+        # 模型入口语义与上游一致：仅识别两个别名，其余值一律落到默认模型。
+        from model_eval import model_forward
         real_model_id = "distill_nova" if model_id_val == "model_aggressive" else "distill_41b_infer"
-        model_candidates = get_top_model_discards(
+        fwd = model_forward(
             hand_str=hand_norm,
             dora_indicator=dora_indicator,
             round_str=round_raw,
@@ -638,8 +642,11 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
             min_k=2,
             max_k=4,
         )
+        # 空结果也记录：推断已尝试，不应在报表阶段再次运行同一条失败路径。
+        precomputed_qp = fwd.get("qp") or {}
+        model_candidates = fwd.get("top") or []
         if model_candidates:
-            for tile, is_riichi in model_candidates:
+            for tile, is_riichi, _weight in model_candidates:
                 c_name = f"riichi:{tile}" if is_riichi else tile
                 candidates.append({"tile": tile, "riichi": is_riichi, "kan": False, "candidate": c_name})
         else:
@@ -828,6 +835,11 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
 
     if scores_val:
         request["scores"] = scores_val
+
+    # 内部键：无 c= 候选时模型推断顺带产出的 Q/P。仅 bot 侧消费（报表归一P），
+    # bot.execute 在 create_run 之前 pop 掉，绝不外发到后端。
+    if precomputed_qp is not None:
+        request["_model_qp"] = precomputed_qp
 
     if target_past is not None and x_val >= 1:
         tp_len = len(target_past)
