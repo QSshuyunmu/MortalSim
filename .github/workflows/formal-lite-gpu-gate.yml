@@ -130,7 +130,7 @@ jobs:
     needs: [primary-sm89, secondary-sm89]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: formal-lite-*-sm89
           merge-multiple: true
