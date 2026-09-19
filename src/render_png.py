@@ -24,6 +24,21 @@ WEBP_TILE_MAP = {
     "e": "Ton.webp", "s": "Nan.webp", "w": "Shaa.webp", "n": "Pei.webp", "p": "Haku.svg", "f": "Hatsu.webp", "c": "Chun.webp",
 }
 
+YAKU_HAN = {
+    "riichi": 1, "double_riichi": 2, "ippatsu": 1, "menzen_tsumo": 1,
+    "tanyao": 1, "pinfu": 1, "iipeikou": 1,
+    "seat_wind_east": 1, "seat_wind_south": 1, "seat_wind_west": 1, "seat_wind_north": 1,
+    "round_wind_east": 1, "round_wind_south": 1, "round_wind_west": 1, "round_wind_north": 1,
+    "haku": 1, "hatsu": 1, "chun": 1,
+    "rinshan": 1, "chankan": 1, "haitei": 1, "houtei": 1,
+    "sanshoku_doujun": 2, "ikkitsuukan": 2, "chanta": 2, "chiitoitsu": 2,
+    "toitoi": 2, "sanankou": 2, "honroutou": 2, "sanshoku_doukou": 2,
+    "sankantsu": 2, "shousangen": 2, "honitsu": 3, "junchan": 3,
+    "ryanpeikou": 3, "chinitsu": 6,
+    "dora": 1, "ura_dora": 1, "aka_dora": 1,
+    "kokushi": 13, "suuankou": 13, "daisangen": 13, "tsuuiisou": 13,
+}
+
 YAKU_NAME_ZH = {
     "riichi": "立直", "double_riichi": "双立直", "ippatsu": "一发", "menzen_tsumo": "门清自摸",
     "tanyao": "断幺九", "pinfu": "平和", "iipeikou": "一平口",
@@ -553,38 +568,118 @@ def render_png(
         draw.line([(p_inner_x, cur_y + 32), (p_inner_x + p_inner_w, cur_y + 32)], fill=(30, 40, 50, 255), width=1)
         cur_y += 32
 
-    # Section 3: Distinct Yaku Breakdown
+    # Section 3: Distinct Yaku Breakdown (双层融合模型：统计学显著差异解释力优先 + 全局高频主力保底)
     cur_y += 12
     draw.text((p_inner_x, cur_y), "◆ 主要和牌役种构成 (Yaku Breakdown)", fill=t_cfg["text_gold"], font=f_card_title)
     cur_y += 20
 
-    candidate_yaku_maps: list[tuple[str, dict[str, float]]] = []
+    cand_info = []
     all_yaku_names: set[str] = set()
     for c in cands:
         c_lbl = _label_zh(c)
         y_list = c.get("yaku", [])
-        c_map = {}
+        agari_r = c.get("agari_rate") or ((c.get("win") or {}).get("rate", {}).get("rate") if isinstance(c.get("win"), dict) else None) or 0.25
+        n_runs = c.get("runs") or (c.get("cumulative") or {}).get("runs") or 1000
+        n_wins = max(10, int(n_runs * agari_r))
+        c_map: dict[str, float] = {}
         if isinstance(y_list, list):
             for y_item in y_list:
                 y_id = y_item.get("id")
                 y_rate = y_item.get("rate", 0.0)
-                if y_id and isinstance(y_rate, (int, float)) and y_rate > 0.01:
+                if y_id and isinstance(y_rate, (int, float)) and y_rate > 0.005:
                     c_map[y_id] = y_rate
                     all_yaku_names.add(y_id)
-        candidate_yaku_maps.append((c_lbl, c_map))
+        cand_info.append({"lbl": c_lbl, "map": c_map, "agari_r": agari_r, "n_wins": n_wins})
 
-    distinctive_yaku = []
+    K = len(cands)
+    layer1_mainstream: list[dict] = []  # 层1：全局主力高频役种 (出现率 >= 15%)
+    layer2_distinctive: list[dict] = [] # 层2：统计学显著差异役种 (双比例两尾 Z 检验 alpha=0.05, Z >= 1.96 且 delta >= 3.5%)
+
     for y_id in all_yaku_names:
-        rates = [c_map.get(y_id, 0.0) for _, c_map in candidate_yaku_maps]
-        max_r, min_r = max(rates), min(rates)
-        if (max_r - min_r >= 0.04) or (len(all_yaku_names) <= 6 and max_r >= 0.04):
-            distinctive_yaku.append((y_id, max_r, rates))
+        rates = [ci["map"].get(y_id, 0.0) for ci in cand_info]
+        max_r = max(rates)
+        min_r = min(rates)
+        han = YAKU_HAN.get(y_id, 1)
 
-    distinctive_yaku.sort(key=lambda x: -x[1])
+        max_z = 0.0
+        max_delta = 0.0
+        max_impact = 0.0
 
-    if distinctive_yaku:
-        hy = ["役种名称"] + [lbl for lbl, _ in candidate_yaku_maps]
-        wy = [100] + [75] * len(candidate_yaku_maps)
+        for i in range(K):
+            for j in range(i + 1, K):
+                p1, p2 = rates[i], rates[j]
+                n1, n2 = cand_info[i]["n_wins"], cand_info[j]["n_wins"]
+                delta = abs(p1 - p2)
+                if delta > max_delta:
+                    max_delta = delta
+
+                # 全局边际期望番数贡献: han * |agari_i * p1 - agari_j * p2|
+                exp_diff = han * abs(cand_info[i]["agari_r"] * p1 - cand_info[j]["agari_r"] * p2)
+                if exp_diff > max_impact:
+                    max_impact = exp_diff
+
+                p_pool = (p1 * n1 + p2 * n2) / (n1 + n2)
+                if 0 < p_pool < 1:
+                    se = math.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
+                    z = delta / se if se > 0 else 0
+                    if z > max_z:
+                        max_z = z
+
+        # 统计学显著性检验准入：alpha=0.05 对应 Z >= 1.96 且 绝对比例极差 >= 3.5%
+        is_stat_sig = (max_z >= 1.96 and max_delta >= 0.035)
+
+        if is_stat_sig:
+            # 解释力评分模型：番数杠杆与全局边际贡献 * 2.0 + 比例极差 + 频率底噪
+            score2 = max_impact * 2.0 + max_delta * 1.0 + (max_r * 0.1)
+            layer2_distinctive.append({
+                "id": y_id, "score": score2, "rates": rates, "max_r": max_r,
+                "max_delta": max_delta, "han": han, "is_sig": True,
+            })
+
+        # 层1高频门槛
+        if max_r >= 0.15:
+            score1 = max_r
+            layer1_mainstream.append({
+                "id": y_id, "score": score1, "rates": rates, "max_r": max_r,
+                "max_delta": max_delta, "han": han, "is_sig": is_stat_sig,
+            })
+
+    layer2_distinctive.sort(key=lambda x: -x["score"])
+    layer1_mainstream.sort(key=lambda x: -x["score"])
+
+    # 动态容量适配：根据候选个数动态决定表格最大行数 (2候选6行, 3候选5行, 4候选4行)
+    max_yaku_rows = 6 if K <= 2 else (5 if K == 3 else 4)
+
+    # 双层融合选取
+    selected_yaku: list[dict] = []
+    selected_ids: set[str] = set()
+
+    # 1. 优先选入最具解释力的显著差异役种 (最多占 max_yaku_rows - 1 个)
+    for item in layer2_distinctive:
+        if len(selected_yaku) >= max_yaku_rows - 1:
+            break
+        selected_yaku.append(item)
+        selected_ids.add(item["id"])
+
+    # 2. 至少补充 1 个全场最主力的最高频役种作为基准对照
+    for item in layer1_mainstream:
+        if len(selected_yaku) >= max_yaku_rows:
+            break
+        if item["id"] not in selected_ids:
+            selected_yaku.append(item)
+            selected_ids.add(item["id"])
+
+    # 3. 若仍未达到最大容量，依次从层2剩余役种及层1剩余役种补足
+    for item in layer2_distinctive + layer1_mainstream:
+        if len(selected_yaku) >= max_yaku_rows:
+            break
+        if item["id"] not in selected_ids:
+            selected_yaku.append(item)
+            selected_ids.add(item["id"])
+
+    if selected_yaku:
+        hy = ["役种名称"] + [ci["lbl"] for ci in cand_info]
+        wy = [100] + [75] * len(cand_info)
         draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + 22], fill=(10, 14, 20, 255))
         tx = p_inner_x + 6
         for title, col_w in zip(hy, wy):
@@ -592,12 +687,18 @@ def render_png(
             tx += col_w
         cur_y += 22
 
-        for y_id, _, rates in distinctive_yaku[:3]:
+        for item in selected_yaku:
+            y_id = item["id"]
+            rates = item["rates"]
             y_zh = YAKU_NAME_ZH.get(y_id, y_id)
             row_txts = [y_zh] + [_fmt_rate(r) for r in rates]
             tx = p_inner_x + 6
-            for val_txt, col_w in zip(row_txts, wy):
-                draw.text((tx, cur_y + 3), val_txt, fill=t_cfg["text_muted"], font=f_tbl_cell)
+            # 如果该役种存在显著分歧，名称标注强调色，让用户一眼看到何切路线差异
+            is_branch_sig = item.get("is_sig", False)
+            title_color = t_cfg["text_white"] if is_branch_sig else t_cfg["text_muted"]
+            for col_idx, (val_txt, col_w) in enumerate(zip(row_txts, wy)):
+                c_color = title_color if col_idx == 0 else t_cfg["text_muted"]
+                draw.text((tx, cur_y + 3), val_txt, fill=c_color, font=f_tbl_cell)
                 tx += col_w
             cur_y += 18
     else:
