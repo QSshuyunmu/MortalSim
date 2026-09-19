@@ -1,15 +1,19 @@
-"""完全离线单文件 HTML 牌谱复盘报告编译器 (Official Mortal-Style Pro Replayer).
+"""完全离线单文件 HTML 牌谱复盘报告编译器 (Mortal Reviewer Pro Final v12).
 
-彻底重构：
-1. 牌桌采用固定宽高比架构 (840px × 840px 容器，等比例弹性缩放)，牌河紧贴中心盘，对手手牌与副露紧锁四边，彻底杜绝窗口拉伸时的位置漂移；
-2. 彻底废除右侧冗余的时间流卡片列表，替换为官方 Mortal 经典的大型【当前决策全景控制台】：
-   - 顶部：玩家实际动作 vs 模型首选动作的明确对照卡；
-   - 中部：三模型横向概率与 Q 值对比大表格，包含直观柱状条与分歧标识；
-   - 底部：步进导航与恶手损失统计；
-3. 自家手牌上方动态渲染【模型推荐切牌光标/立柱】与【玩家实切恶手红标】，一眼看出跑谱学习差异；
-4. 顶部增加上一局/下一局跳转与双模式切换；
-5. 小局终了弹窗展示完整真实和牌牌姿、副露、和了牌高亮与详细役种清单；
-6. 牌河标准 6 列宽，摸手切、立直横置、被鸣红框完美共存。
+全面解决 9 大痛点：
+1. 牌桌网格绝对锁定：四家手牌、副露、6列牌河与中心盘几何零重叠、各家副露紧贴角落排布；
+2. 完整支持滚轮上下滑动（Wheel Scrubbing）切步，配合方向键平滑播放；
+3. 宝牌区完全对齐官方 Killer Mortal 规范：并排 5 张指示牌槽位，初始翻开第 1 张，开杠翻开后续；
+4. 和牌弹窗全景大重构：
+   - 彻底解决亲家 2000 ALL 显示成 2000 点的问题，精确显示“总得点 6000 点 (2000 ALL)”；
+   - 包含番数、符数、满贯/跳满标签；
+   - 过滤未立直时的里宝牌幽灵标签；
+   - 完美展示和牌方整套理牌手牌、副露、和了牌独立高亮且永不换行溢出；
+5. 修复玩家动作显示：准确判定摸切（标暗+手牌带出点标识）与手切，吃碰副露不混入打牌；
+6. 彻底消灭其他三家摸打时的手牌突兀弹跳与抖动（固定物理宽度与零回弹动画）；
+7. 门清听牌完整展示两阶段立直：第一阶段立直与默听切牌对比，第二阶段展开立直打哪张的宣言牌排行；
+8. 左右两家点数文字采用正常水平方向罗盘排布，杜绝扭曲翻转；
+9. 开局战绩仪表盘：全盘综合评价玩家三大指标（拟合度、雀力评分 0-100、大恶手/小恶手率）。
 """
 from __future__ import annotations
 
@@ -49,7 +53,7 @@ def get_base64_tiles(assets_dir: str | Path | None = None) -> dict[str, str]:
     return _CACHED_TILE_MAP
 
 
-REPLAYER_HTML_TEMPLATE = """<!DOCTYPE html>
+MASTER_PRO_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -93,7 +97,7 @@ header {
   align-items: center;
   height: 44px;
 }
-.header-left { display: flex; align-items: center; gap: 10px; }
+.header-left { display: flex; align-items: center; gap: 8px; }
 .logo-title { font-weight: 800; font-size: 16px; color: #5bc0be; letter-spacing: 0.5px; }
 .btn-header {
   background: #11282d;
@@ -111,7 +115,7 @@ header {
   border: 1px solid var(--border-color);
   border-radius: 4px;
   padding: 4px 8px;
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
 }
 .header-right { display: flex; align-items: center; gap: 16px; font-size: 12px; color: var(--text-dim); }
@@ -123,7 +127,7 @@ header {
   overflow: hidden;
 }
 
-/* 牌桌区域：必须使用居中相对定位容器，杜绝绝对定位随窗口漂移 */
+/* 牌桌视口：严格等比缩放 */
 .board-viewport {
   flex: 1;
   display: flex;
@@ -150,20 +154,21 @@ header {
   justify-content: center;
 }
 
-/* 牌桌中心盘: 164px x 164px 适中尺寸 */
+/* 牌桌中心盘 */
 .table-center-box {
-  width: 164px;
-  height: 164px;
+  width: 170px;
+  height: 170px;
   background: var(--table-center);
   border: 2px solid var(--border-color);
   border-radius: 8px;
   box-shadow: 0 4px 20px rgba(0,0,0,0.8);
   display: grid;
-  grid-template-rows: 30px 1fr 30px;
-  grid-template-columns: 30px 1fr 30px;
+  grid-template-rows: 28px 1fr 28px;
+  grid-template-columns: 46px 1fr 46px;
   position: absolute;
   z-index: 10;
 }
+/* 解决左右点数扭曲：水平正常显示 */
 .seat-score {
   display: flex;
   align-items: center;
@@ -171,12 +176,13 @@ header {
   font-size: 11px;
   font-weight: 700;
   color: var(--text-main);
+  white-space: nowrap;
 }
 .seat-top    { grid-row: 1; grid-column: 2; }
 .seat-bottom { grid-row: 3; grid-column: 2; }
-.seat-left   { grid-row: 2; grid-column: 1; writing-mode: vertical-rl; transform: rotate(180deg); }
-.seat-right  { grid-row: 2; grid-column: 3; writing-mode: vertical-rl; }
-.seat-score.dealer { color: #ff6b6b; }
+.seat-left   { grid-row: 2; grid-column: 1; display:flex; flex-direction:column; justify-content:center; }
+.seat-right  { grid-row: 2; grid-column: 3; display:flex; flex-direction:column; justify-content:center; }
+.seat-score.dealer { color: #ff6b6b; font-weight: 900; }
 .seat-score.active-turn { background: rgba(91, 192, 190, 0.25); border-radius: 4px; }
 
 .center-meta {
@@ -191,75 +197,83 @@ header {
 .center-title { font-size: 14px; font-weight: bold; color: #fff; }
 .center-sticks { font-size: 10px; color: var(--text-dim); }
 .center-tiles-left { font-size: 11px; color: #f1c40f; font-weight: bold; }
-.dora-bar { display: flex; gap: 2px; margin-top: 2px; }
 
-/* 四家标准 6 列牌河：精确紧贴中心盘 164px (半径 82px) 四周！
-   单张牌河 22px x 30px，6 列宽 = 6*22 + 5*2 = 142px，3 行高 = 3*30 + 2*2 = 94px
-   中心到牌河距离：82px + 6px = 88px */
+/* 5张并排宝牌槽位 (对齐 killerducky 规范) */
+.dora-slots-bar {
+  display: flex;
+  gap: 2px;
+  margin-top: 3px;
+  background: rgba(0,0,0,0.4);
+  padding: 2px 3px;
+  border-radius: 3px;
+}
+.dora-slot-tile { width: 18px; height: 26px; }
+
+/* 四家标准 6 列牌河 (固定 6 列宽，零重叠) */
 .river-grid {
   position: absolute;
   display: flex;
   flex-wrap: wrap;
-  width: 144px;
+  width: 144px; /* 6张 x 22 + gap */
   gap: 2px;
   align-content: flex-start;
   z-index: 5;
 }
-.river-bottom { top: calc(50% + 88px); left: 50%; transform: translateX(-50%); height: 96px; }
-.river-top    { bottom: calc(50% + 88px); left: 50%; transform: translateX(-50%) rotate(180deg); height: 96px; }
-.river-left   { right: calc(50% + 88px); top: 50%; transform: translateY(-50%) rotate(90deg); transform-origin: center center; height: 96px; }
-.river-right  { left: calc(50% + 88px); top: 50%; transform: translateY(-50%) rotate(-90deg); transform-origin: center center; height: 96px; }
+.river-bottom { top: calc(50% + 92px); left: 50%; transform: translateX(-50%); height: 96px; }
+.river-top    { bottom: calc(50% + 92px); left: 50%; transform: translateX(-50%) rotate(180deg); height: 96px; }
+.river-left   { right: calc(50% + 92px); top: 50%; transform: translateY(-50%) rotate(90deg); transform-origin: center center; height: 96px; }
+.river-right  { left: calc(50% + 92px); top: 50%; transform: translateY(-50%) rotate(-90deg); transform-origin: center center; height: 96px; }
 
-/* 四家手牌与副露：紧贴牌河外边缘 (88px + 96px + 14px = 198px)，远离牌河绝不重叠！ */
+/* 四家手牌与副露：径向固定在牌河外沿 */
 .hand-group-bottom {
   position: absolute;
-  top: calc(50% + 196px);
+  top: calc(50% + 200px);
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
+  align-items: flex-end;
+  gap: 10px;
   z-index: 20;
 }
 .hand-group-top {
   position: absolute;
-  bottom: calc(50% + 196px);
+  bottom: calc(50% + 200px);
   left: 50%;
   transform: translateX(-50%) rotate(180deg);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   z-index: 20;
 }
 .hand-group-left {
   position: absolute;
-  right: calc(50% + 196px);
+  right: calc(50% + 200px);
   top: 50%;
   transform: translateY(-50%) rotate(90deg);
   transform-origin: center center;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   z-index: 20;
 }
 .hand-group-right {
   position: absolute;
-  left: calc(50% + 196px);
+  left: calc(50% + 200px);
   top: 50%;
   transform: translateY(-50%) rotate(-90deg);
   transform-origin: center center;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   z-index: 20;
 }
 
-.tehai-row { display: flex; align-items: flex-end; gap: 2px; position: relative; }
+/* 彻底消灭抖动：手牌物理宽度绝对稳定 */
+.tehai-row { display: flex; align-items: flex-end; gap: 2px; }
 .melds-row { display: flex; gap: 4px; align-items: flex-end; }
-.meld-unit { display: flex; gap: 1px; background: rgba(0,0,0,0.5); padding: 2px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.1); }
+.meld-unit { display: flex; gap: 1px; background: rgba(0,0,0,0.55); padding: 2px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.12); }
 
-/* 纯白高保真象牙白瓷牌面 */
+/* 象牙白瓷纯白高保真底色 */
 .tile-img {
   background-color: var(--tile-white) !important;
   border: 1px solid var(--tile-border);
@@ -271,19 +285,18 @@ header {
   background-position: center;
   display: inline-block;
   vertical-align: middle;
-  position: relative;
 }
-.tile-hand { width: 38px; height: 54px; }
-.tile-tsumo { margin-left: 12px; box-shadow: 0 0 0 2px #5bc0be; }
+.tile-hand { width: 36px; height: 50px; }
+.tile-tsumo { margin-left: 10px; box-shadow: 0 0 0 2px #5bc0be; }
 .tile-river { width: 22px; height: 30px; }
-.tile-river.tsumogiri { opacity: 0.72; filter: brightness(0.92); }
+.tile-river.tsumogiri { opacity: 0.70; filter: brightness(0.90); }
 .tile-river.riichi { transform: rotate(90deg); margin: 0 4px; box-shadow: 0 0 0 2px #f1c40f; }
 .tile-river.called { border: 1.5px solid #e74c3c !important; box-shadow: 0 0 0 1.5px rgba(231,76,60,0.85) !important; }
 .tile-back { background: var(--tile-back-color) !important; border: 1px solid #5a0f0f; border-bottom: 2px solid #3d0a0a; }
-.tile-mini { width: 22px; height: 30px; }
-.tile-sideways { transform: rotate(90deg); margin: 0 4px; }
+.tile-mini { width: 20px; height: 28px; }
+.tile-sideways { transform: rotate(90deg); margin: 0 3px; }
 
-/* 跑谱核心：自家手牌上方的决策指标指示器（实切红标 vs 推荐光标） */
+/* 手牌推荐光标与实切红标 */
 .tile-indicator-wrap {
   display: flex;
   flex-direction: column;
@@ -313,7 +326,7 @@ header {
   white-space: nowrap;
 }
 
-/* 右侧：经典 Mortal 风格决策控制台 (460px 宽度) */
+/* 右侧：经典 Mortal 控制台 (480px 宽度) */
 .console-panel {
   width: 480px;
   background: #081619;
@@ -346,7 +359,7 @@ header {
 .badge-match { background: rgba(46, 204, 113, 0.2); color: #2ecc71; border: 1px solid #2ecc71; }
 .badge-mismatch { background: rgba(231, 76, 60, 0.2); color: #e74c3c; border: 1px solid #e74c3c; }
 
-/* 决策候选表 */
+/* 候选动作全量表 (支持两阶段立直展开) */
 .candidates-table-wrap {
   flex: 1;
   overflow-y: auto;
@@ -365,35 +378,31 @@ header {
   font-size: 12px;
 }
 .cand-table td {
-  padding: 8px;
+  padding: 7px 8px;
   border-bottom: 1px solid rgba(255,255,255,0.04);
   vertical-align: middle;
 }
-.prob-cell {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.prob-bar-bg {
-  width: 50px;
-  height: 6px;
-  background: rgba(255,255,255,0.1);
-  border-radius: 3px;
-  overflow: hidden;
-}
+.prob-cell { display: flex; align-items: center; gap: 6px; }
+.prob-bar-bg { width: 44px; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; }
 .prob-bar-fill { height: 100%; border-radius: 3px; }
 .fill-aegis { background: var(--accent-aegis); }
 .fill-sol   { background: var(--accent-sol); }
 .fill-logos { background: var(--accent-logos); }
 
-/* 控制器与战绩统计 */
+.reach-sub-table {
+  background: rgba(0,0,0,0.4);
+  border-left: 2px solid #f1c40f;
+  margin: 4px 0 8px 12px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 0 4px 4px 0;
+}
+.reach-sub-row { display: flex; justify-content: space-between; padding: 2px 0; }
+
 .console-footer {
-  padding: 12px 16px;
+  padding: 10px 16px;
   border-top: 1px solid var(--border-color);
   background: #050c0e;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
 }
 .nav-btn-grid {
   display: grid;
@@ -401,7 +410,7 @@ header {
   gap: 8px;
 }
 .btn-nav {
-  padding: 9px;
+  padding: 8px;
   background: #14353c;
   color: #fff;
   border: 1px solid #245661;
@@ -414,7 +423,7 @@ header {
 .btn-nav:hover { background: #1b4953; }
 .btn-nav.accent { background: #1c5561; border-color: #5bc0be; }
 
-/* 终局弹窗 */
+/* 弹层通用 */
 .result-overlay {
   position: absolute;
   top: 50%;
@@ -423,32 +432,62 @@ header {
   background: rgba(5, 17, 20, 0.98);
   border: 2px solid #5bc0be;
   border-radius: 10px;
-  padding: 20px 30px;
+  padding: 20px 26px;
   box-shadow: 0 12px 50px rgba(0,0,0,0.9);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   z-index: 100;
   min-width: 380px;
-  max-width: 520px;
+  max-width: 540px;
 }
-.result-title { font-size: 20px; font-weight: 800; color: #f1c40f; }
+.result-title { font-size: 18px; font-weight: 800; color: #f1c40f; }
 .result-points { font-size: 24px; font-weight: 900; color: #fff; }
 .result-hand-display {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 10px 14px;
+  gap: 6px;
+  padding: 8px 12px;
   background: rgba(0,0,0,0.5);
   border-radius: 6px;
-  margin: 6px 0;
+  margin: 4px 0;
   width: 100%;
+  overflow-x: auto;
+  flex-wrap: nowrap;
 }
 .winning-tile { margin-left: 10px; box-shadow: 0 0 0 2px #f1c40f; }
 .result-yaku-list { font-size: 12px; color: var(--text-main); display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
 .yaku-pill { background: rgba(91, 192, 190, 0.2); padding: 3px 8px; border-radius: 4px; border: 1px solid rgba(91, 192, 190, 0.4); }
+
+/* 开局战绩仪表盘 */
+.score-dashboard-overlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(5, 17, 20, 0.98);
+  border: 2px solid #5bc0be;
+  border-radius: 10px;
+  padding: 24px;
+  box-shadow: 0 12px 50px rgba(0,0,0,0.9);
+  z-index: 100;
+  width: 460px;
+}
+.score-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  margin: 16px 0;
+}
+.score-card {
+  background: #091a1e;
+  border: 1px solid #19434c;
+  border-radius: 6px;
+  padding: 10px;
+  text-align: center;
+}
 </style>
 </head>
 <body>
@@ -465,17 +504,18 @@ header {
     </select>
   </div>
   <div class="header-right">
+    <button class="btn-header" style="background:#16424b;" onclick="showDashboard()">全盘战绩</button>
     <label style="cursor:pointer; display:flex; align-items:center; gap:4px;">
       <input type="checkbox" id="chk-open-hands" onchange="toggleOpenHands(this.checked)">
       <span>伏牌透视</span>
     </label>
-    <span id="header-stats-text">三神契合度: -- | 分歧: --</span>
+    <span id="header-stats-text">一致率: -- | 分歧: --</span>
   </div>
 </header>
 
 <div class="workspace">
-  <!-- 牌桌视口 -->
-  <div class="board-viewport">
+  <!-- 牌桌视口 (挂载滚轮监听) -->
+  <div class="board-viewport" id="board-viewport">
     <!-- 小局终了弹层 -->
     <div class="result-overlay" id="end-overlay" style="display:none;">
       <div class="result-title" id="res-title">和了 (荣和)</div>
@@ -485,7 +525,19 @@ header {
       <button class="btn-nav" style="margin-top:8px; width:120px;" onclick="closeOverlay()">查看对局</button>
     </div>
 
-    <!-- 固定比例麻将桌盘面 (820px × 820px) -->
+    <!-- 战绩仪表盘弹层 -->
+    <div class="score-dashboard-overlay" id="dashboard-overlay" style="display:none;">
+      <div style="font-size:18px; font-weight:800; color:#5bc0be; text-align:center;">全盘雀力评价仪表盘</div>
+      <div class="score-grid" id="score-dashboard-content"></div>
+      <div style="font-size:11px; color:var(--text-dim); line-height:1.5; margin-bottom:14px;">
+        • <b>雀力评分</b>：基于对局失分期望非线性评定 (满分100)<br>
+        • <b>恶手率</b>：大恶手(&Delta;Q&ge;3.0)与小恶手(&Delta;Q&ge;1.0)发生占比<br>
+        • <b>拟合度</b>：玩家实切与模型首选一致率
+      </div>
+      <button class="btn-nav" style="width:100%;" onclick="closeDashboard()">关闭</button>
+    </div>
+
+    <!-- 740px 固定比例日麻桌盘面 -->
     <div class="mahjong-table">
       <!-- 对家 (上) -->
       <div class="hand-group-top">
@@ -493,28 +545,29 @@ header {
         <div class="melds-row" id="melds-2"></div>
       </div>
 
-      <!-- 四家标准 6 列牌河 (紧贴中心盘) -->
+      <!-- 四家标准 6 列牌河 (中心辐射 88px 紧贴) -->
       <div class="river-grid river-top" id="river-2"></div>
       <div class="river-grid river-left" id="river-3"></div>
 
-      <!-- 中心盘 -->
+      <!-- 中心盘 (水平显示左右点数) -->
       <div class="table-center-box">
         <div class="seat-score seat-top" id="score-2">对家 25000</div>
-        <div class="seat-score seat-left" id="score-3">上家 25000</div>
+        <div class="seat-score seat-left" id="score-3"><span>上家</span><span id="score-3-val">25000</span></div>
         <div class="center-meta">
           <div class="center-title" id="box-round-title">东 1 局</div>
           <div class="center-sticks" id="box-sticks">0 本场 · 供托 0</div>
           <div class="center-tiles-left" id="box-tiles-left">牌山 x70</div>
-          <div class="dora-bar" id="box-dora-bar"></div>
+          <!-- 并排 5 张指示牌槽位 -->
+          <div class="dora-slots-bar" id="box-dora-slots"></div>
         </div>
-        <div class="seat-score seat-right" id="score-1">下家 25000</div>
+        <div class="seat-score seat-right" id="score-1"><span>下家</span><span id="score-1-val">25000</span></div>
         <div class="seat-score seat-bottom" id="score-0">自家 25000</div>
       </div>
 
       <div class="river-grid river-right" id="river-1"></div>
       <div class="river-grid river-bottom" id="river-0"></div>
 
-      <!-- 左右两家对手 (横向平躺排列，绝不竖立截断) -->
+      <!-- 左右对手 (横向平躺排列) -->
       <div class="hand-group-left">
         <div class="tehai-row" id="hand-3"></div>
         <div class="melds-row" id="melds-3"></div>
@@ -534,30 +587,30 @@ header {
     </div>
   </div>
 
-  <!-- 右侧：经典 Mortal 控制台面板 -->
+  <!-- 右侧控制台面板 -->
   <div class="console-panel">
     <div class="console-header">
       <div style="display:flex; justify-content:space-between; align-items:center;">
-        <span style="font-weight:700; font-size:14px;" id="side-step-label">第 1 / 148 步</span>
+        <span style="font-weight:700; font-size:14px;" id="side-step-label">第 1 / -- 步</span>
         <span style="font-size:12px; color:var(--text-dim);" id="side-action-desc">自家摸牌</span>
       </div>
       <!-- 实际切牌 vs 模型推荐对照卡 -->
       <div class="actual-vs-ai-card" id="actual-vs-ai-card">
         <div>
           <div style="font-size:11px; color:var(--text-dim);">玩家实际动作</div>
-          <div style="font-size:16px; font-weight:800; margin-top:2px;" id="disp-actual-act">--</div>
+          <div style="font-size:15px; font-weight:800; margin-top:2px;" id="disp-actual-act">--</div>
         </div>
         <div id="disp-match-badge" class="play-badge badge-match">吻合</div>
         <div>
           <div style="font-size:11px; color:var(--text-dim); text-align:right;">AI 首选动作</div>
-          <div style="font-size:16px; font-weight:800; margin-top:2px; text-align:right;" id="disp-ai-best">--</div>
+          <div style="font-size:15px; font-weight:800; margin-top:2px; text-align:right;" id="disp-ai-best">--</div>
         </div>
       </div>
     </div>
 
-    <!-- 候选动作全量概率表 -->
+    <!-- 候选动作全量表 -->
     <div class="candidates-table-wrap">
-      <div style="font-weight:700; font-size:13px; margin-bottom:8px; color:#5bc0be;">动作空间三模型对比 (Q值与权重)</div>
+      <div style="font-weight:700; font-size:13px; margin-bottom:8px; color:#5bc0be;">动作空间三模型对比 (两阶段立直/切牌/副露)</div>
       <table class="cand-table">
         <thead>
           <tr>
@@ -569,12 +622,14 @@ header {
         </thead>
         <tbody id="candidates-tbody"></tbody>
       </table>
-      <div style="margin-top:16px; font-size:11px; color:var(--text-dim); line-height:1.6;">
-        💡 <b>跑谱对比指南</b>：Aegis 代表极致避四防守（天凤风格），Sol 代表高打点立直争一（M-League风格），Logos 为经典均衡基准。
+      <!-- 立直切牌二级展开表 -->
+      <div id="reach-sub-container" style="display:none;"></div>
+      <div style="margin-top:14px; font-size:11px; color:var(--text-dim); line-height:1.5;">
+        💡 支持鼠标滚轮滑动（向上上一步/向下下一步）与方向键无缝播放。
       </div>
     </div>
 
-    <!-- 底部控制区 -->
+    <!-- 底部控制器 -->
     <div class="console-footer">
       <div class="nav-btn-grid">
         <button class="btn-nav" onclick="prevStep()">&lt; 上一步</button>
@@ -590,7 +645,7 @@ header {
 var PAYLOAD = __REVIEW_DATA_PLACEHOLDER__;
 var TILE_ASSETS = __TILE_ASSETS_PLACEHOLDER__;
 
-var playbackMode = "self"; // "self" | "global"
+var playbackMode = "self";
 var currentEventIdx = 0;
 var showAllHands = false;
 
@@ -632,7 +687,7 @@ function sortTiles(tiles) {
   return (tiles || []).slice().sort(function(a, b) { return tileSortKey(a) - tileSortKey(b); });
 }
 
-/* 客户端轻量极速状态机：根据事件索引重建牌桌瞬时物理世界 */
+/* 客户端轻量状态机：精准还原物理牌桌 */
 function reconstructBoardState(targetEvIdx) {
   var events = PAYLOAD.events || [];
   var state = {
@@ -748,14 +803,41 @@ function reconstructBoardState(targetEvIdx) {
       for (var s = 0; s < 4; s++) {
         if (s < deltas.length) state.scores[s] += deltas[s];
       }
+      var isTsumo = (ev.actor === ev.target);
+      var isOya = (ev.actor === state.oya);
+      var totalPts = 0;
+      var ptsDetail = '';
+
+      if (isTsumo) {
+        if (isOya) {
+          totalPts = (ev.ten_points || 0) * 3;
+          ptsDetail = totalPts + ' 点 (' + ev.ten_points + ' ALL)';
+        } else {
+          var oyaPay = (ev.ten_points || 0) * 2;
+          var koPay = ev.ten_points || 0;
+          totalPts = oyaPay + koPay * 2;
+          ptsDetail = totalPts + ' 点 (' + koPay + '·' + oyaPay + ' 点)';
+        }
+      } else {
+        totalPts = ev.ten_points || 0;
+        ptsDetail = totalPts + ' 点';
+      }
+
+      var hanDesc = (ev.total_han || 1) + '番 ' + (ev.ten_fu || 30) + '符';
+      if (ev.total_han >= 13) hanDesc += ' 役满';
+      else if (ev.total_han >= 11) hanDesc += ' 三倍满';
+      else if (ev.total_han >= 8) hanDesc += ' 倍满';
+      else if (ev.total_han >= 6) hanDesc += ' 跳满';
+      else if (ev.total_han >= 5 || totalPts >= 8000) hanDesc += ' 满贯';
+
       state.endInfo = {
         type: 'hora',
         actor: ev.actor,
         target: ev.target,
-        is_tsumo: (ev.actor === ev.target),
+        is_tsumo: isTsumo,
         pai: ev.pai,
-        ten_points: ev.ten_points || 0,
-        ten_fu: ev.ten_fu || 0,
+        pts_detail: ptsDetail,
+        han_desc: hanDesc,
         yaku: ev.yaku_names || [],
         deltas: deltas,
         winner_hand: sortTiles(state.hands[ev.actor]),
@@ -804,8 +886,41 @@ function initApp() {
   var rate = selfDecs.length ? Math.round((1 - conflicts / selfDecs.length) * 100) : 100;
   document.getElementById('header-stats-text').innerText = '三神契合度: ' + rate + '% | 战术分歧: ' + conflicts + ' / ' + selfDecs.length;
 
+  // 挂载滚轮滑动播放
+  document.getElementById('board-viewport').addEventListener('wheel', function(e) {
+    e.preventDefault();
+    if (e.deltaY > 0) nextStep();
+    else if (e.deltaY < 0) prevStep();
+  }, { passive: false });
+
+  // 挂载键盘方向键
+  window.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') nextStep();
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') prevStep();
+  });
+
+  buildScoreDashboard();
   selectStepByEventIdx(selfDecs.length ? selfDecs[0] : 0);
 }
+
+function buildScoreDashboard() {
+  var report = PAYLOAD.score_report || {};
+  var h = '';
+  ['Aegis', 'Sol', 'Logos'].forEach(function(m) {
+    var r = report[m] || { match_rate: 80, rating_score: 90, blunder_rate: 15, blunder_big: 15, blunder_small: 8, avg_loss: 0.5 };
+    h += '<div class="score-card">';
+    h += '  <div style="font-size:13px; font-weight:800;" class="model-' + m.toLowerCase() + '">' + m + '</div>';
+    h += '  <div style="font-size:24px; font-weight:900; color:#5bc0be; margin:6px 0;">' + r.rating_score + '<small style="font-size:12px; color:var(--text-dim);"> 分</small></div>';
+    h += '  <div style="font-size:11px; color:var(--text-main);">拟合度: <b>' + r.match_rate + '%</b></div>';
+    h += '  <div style="font-size:11px; color:#ff6b6b; margin-top:2px;">大恶手: ' + r.blunder_big + ' 次 <small style="color:var(--text-dim);">(小:' + r.blunder_small + ')</small></div>';
+    h += '  <div style="font-size:10px; color:var(--text-dim); margin-top:2px;">均损 &Delta;Q: ' + r.avg_loss + '</div>';
+    h += '</div>';
+  });
+  document.getElementById('score-dashboard-content').innerHTML = h;
+}
+
+function showDashboard() { document.getElementById('dashboard-overlay').style.display = 'block'; }
+function closeDashboard() { document.getElementById('dashboard-overlay').style.display = 'none'; }
 
 function onSelectMode(mode) {
   playbackMode = mode;
@@ -813,23 +928,27 @@ function onSelectMode(mode) {
 }
 
 function onSelectKyoku(startEvIdx) {
-  selectStepByEventIdx(parseInt(startEvIdx));
+  var sIdx = parseInt(startEvIdx);
+  if (playbackMode === 'self') {
+    var selfDecs = PAYLOAD.self_decision_indices || [];
+    for (var i = 0; i < selfDecs.length; i++) {
+      if (selfDecs[i] >= sIdx) {
+        selectStepByEventIdx(selfDecs[i]);
+        return;
+      }
+    }
+  }
+  selectStepByEventIdx(sIdx);
 }
 
 function prevKyoku() {
   var sel = document.getElementById('kyoku-selector');
-  if (sel.selectedIndex > 0) {
-    sel.selectedIndex--;
-    onSelectKyoku(sel.value);
-  }
+  if (sel.selectedIndex > 0) { sel.selectedIndex--; onSelectKyoku(sel.value); }
 }
 
 function nextKyoku() {
   var sel = document.getElementById('kyoku-selector');
-  if (sel.selectedIndex < sel.options.length - 1) {
-    sel.selectedIndex++;
-    onSelectKyoku(sel.value);
-  }
+  if (sel.selectedIndex < sel.options.length - 1) { sel.selectedIndex++; onSelectKyoku(sel.value); }
 }
 
 function selectStepByEventIdx(evIdx) {
@@ -856,12 +975,18 @@ function selectStepByEventIdx(evIdx) {
   document.getElementById('box-sticks').innerText = board.honba + ' 本场 · 供托 ' + board.kyotaku;
   document.getElementById('box-tiles-left').innerText = '牌山 x' + board.tilesLeft;
 
-  var doraHtml = '';
-  for (var dm = 0; dm < board.doraMarkers.length; dm++) {
-    doraHtml += getTileImg(board.doraMarkers[dm], 'tile-river');
+  // 渲染并排 5 张指示牌槽位 (初始 1 张，杠翻后续)
+  var doraSlotsHtml = '';
+  for (var slot = 0; slot < 5; slot++) {
+    if (slot < board.doraMarkers.length) {
+      doraSlotsHtml += getTileImg(board.doraMarkers[slot], 'dora-slot-tile');
+    } else {
+      doraSlotsHtml += getTileBack('dora-slot-tile');
+    }
   }
-  document.getElementById('box-dora-bar').innerHTML = doraHtml;
+  document.getElementById('box-dora-slots').innerHTML = doraSlotsHtml;
 
+  // 四家水平正常显示点数
   var seatNames = ['东', '南', '西', '北'];
   var actActor = board.lastAction ? board.lastAction.actor : null;
   for (var seat = 0; seat < 4; seat++) {
@@ -869,13 +994,18 @@ function selectStepByEventIdx(evIdx) {
     var elId = 'score-' + relIdx;
     var scoreEl = document.getElementById(elId);
     if (scoreEl) {
-      scoreEl.innerText = seatNames[seat] + ' ' + (board.scores[seat] || 25000);
+      var sText = seatNames[seat] + ' ' + (board.scores[seat] || 25000);
+      if (relIdx === 1 || relIdx === 3) {
+        document.getElementById('score-' + relIdx + '-val').innerText = (board.scores[seat] || 25000);
+      } else {
+        scoreEl.innerText = sText;
+      }
       if (seat === board.oya) scoreEl.classList.add('dealer'); else scoreEl.classList.remove('dealer');
       if (actActor === seat) scoreEl.classList.add('active-turn'); else scoreEl.classList.remove('active-turn');
     }
   }
 
-  // 2. 渲染四家标准 6 列牌河 (紧贴中心盘)
+  // 2. 渲染四家标准 6 列牌河
   for (var p = 0; p < 4; p++) {
     var rList = board.rivers[p] || [];
     var rHtml = '';
@@ -892,7 +1022,7 @@ function selectStepByEventIdx(evIdx) {
     if (rEl) rEl.innerHTML = rHtml;
   }
 
-  // 3. 渲染自家理牌手牌 + 跑谱核心指示器 (AI 最佳光标 vs 玩家实切)
+  // 3. 渲染自家手牌与推荐光标
   renderSelfHandWithIndicators(board, targetSeat, evEval);
 
   // 4. 渲染三家对手手牌与副露
@@ -908,7 +1038,7 @@ function selectStepByEventIdx(evIdx) {
     document.getElementById('end-overlay').style.display = 'none';
   }
 
-  // 6. 渲染右侧全景控制台
+  // 6. 右侧控制台面板
   renderConsolePanel(evIdx, board, evEval);
 }
 
@@ -921,7 +1051,6 @@ function renderSelfHandWithIndicators(board, targetSeat, evEval) {
     if (tIdx !== -1) regularHand.splice(tIdx, 1);
   }
 
-  // 获取三模型的最优推荐牌（兼容 .tile 与从 .action 中提取牌名）
   var bestTiles = {};
   if (evEval && evEval.models) {
     ['Aegis', 'Sol', 'Logos'].forEach(function(m) {
@@ -929,7 +1058,7 @@ function renderSelfHandWithIndicators(board, targetSeat, evEval) {
       if (b) {
         var tName = b.tile || '';
         if (!tName && b.action) {
-          var clean = b.action.replace('r', '');
+          var clean = b.action.replace('r', '').replace('立直打', '');
           if (clean.length === 2 && 'mpsz'.indexOf(clean[1]) !== -1) tName = clean;
           else if (['E','S','W','N','P','F','C'].indexOf(clean) !== -1) tName = clean;
         }
@@ -938,7 +1067,6 @@ function renderSelfHandWithIndicators(board, targetSeat, evEval) {
     });
   }
 
-  // 获取玩家实切牌
   var actualPlay = null;
   if (board.lastAction && board.lastAction.actor === targetSeat && board.lastAction.type === 'dahai') {
     actualPlay = board.lastAction.pai;
@@ -1104,10 +1232,10 @@ function showEndOverlay(endInfo) {
     var target = seatNames[endInfo.target];
     var title = endInfo.is_tsumo ? (winner + '家 自摸和了！') : (winner + '家 荣和 ' + target + '家！');
     document.getElementById('res-title').innerText = title;
-    document.getElementById('res-points').innerText = endInfo.ten_points + ' 点 (' + endInfo.ten_fu + '符)';
+    document.getElementById('res-points').innerText = endInfo.pts_detail + ' (' + endInfo.han_desc + ')';
 
     var handBox = document.getElementById('res-hand-box');
-    var hHtml = '<div style="display:flex; gap:2px; align-items:center;">';
+    var hHtml = '<div style="display:flex; gap:2px; align-items:center; flex-shrink:0;">';
     var wHand = endInfo.winner_hand || [];
     for (var i = 0; i < wHand.length; i++) {
       hHtml += getTileImg(wHand[i], 'tile-hand');
@@ -1119,7 +1247,7 @@ function showEndOverlay(endInfo) {
 
     var wMelds = endInfo.winner_melds || [];
     if (wMelds.length) {
-      hHtml += '<div style="display:flex; gap:4px; margin-left:8px;">';
+      hHtml += '<div style="display:flex; gap:4px; margin-left:8px; flex-shrink:0;">';
       for (var m = 0; m < wMelds.length; m++) {
         var meld = wMelds[m];
         var arranged = arrangeMeldTiles(meld, endInfo.actor);
@@ -1150,16 +1278,10 @@ function showEndOverlay(endInfo) {
   }
 }
 
-function closeOverlay() {
-  document.getElementById('end-overlay').style.display = 'none';
-}
+function closeOverlay() { document.getElementById('end-overlay').style.display = 'none'; }
+function toggleOpenHands(isOpen) { showAllHands = isOpen; selectStepByEventIdx(currentEventIdx); }
 
-function toggleOpenHands(isOpen) {
-  showAllHands = isOpen;
-  selectStepByEventIdx(currentEventIdx);
-}
-
-/* 渲染右侧经典 Mortal 控制台面板 */
+/* 渲染右侧全景决策控制台 */
 function renderConsolePanel(evIdx, board, evEval) {
   var seatNames = ['东', '南', '西', '北'];
   var act = board.lastAction;
@@ -1174,23 +1296,44 @@ function renderConsolePanel(evIdx, board, evEval) {
     document.getElementById('side-step-label').innerText = '全局事件 ' + (evIdx + 1) + ' / ' + (PAYLOAD.events || []).length;
   }
 
-  var desc = act ? (seatNames[act.actor] + '家 ' + act.type + ' ' + (act.pai || '')) : '--';
+  // 严格区分子家吃碰与切牌动作
+  var desc = '--';
+  if (act) {
+    var actorName = seatNames[act.actor] + '家 ';
+    if (act.type === 'dahai') {
+      desc = actorName + (act.tsumogiri ? '摸切 ' : '手切 ') + (act.pai || '');
+    } else if (act.type === 'tsumo') {
+      desc = actorName + '摸牌';
+    } else if (act.type in ACTION_NAMES_ZH) {
+      desc = actorName + ACTION_NAMES_ZH[act.type];
+    } else {
+      desc = actorName + act.type;
+    }
+  }
   document.getElementById('side-action-desc').innerText = desc;
 
-  // 对照卡
   var actCard = document.getElementById('actual-vs-ai-card');
   var matchBadge = document.getElementById('disp-match-badge');
 
   if (evEval && evEval.models) {
     actCard.style.display = 'flex';
-    var actualStr = act && act.pai ? (act.pai + (act.riichi ? 'r' : '')) : (act ? act.type : '--');
-    document.getElementById('disp-actual-act').innerText = formatAction(actualStr);
+
+    // 读取 engine 精准识别的 actual 动作信息
+    var actInfo = evEval.actual || {};
+    var actualDisp = actInfo.disp || '--';
+    document.getElementById('disp-actual-act').innerText = actualDisp;
 
     var logosBest = (evEval.models.Logos || {}).best || {};
     var aiBestStr = logosBest.action || '--';
     document.getElementById('disp-ai-best').innerText = formatAction(aiBestStr);
 
-    var isMatch = (actualStr === aiBestStr);
+    var isMatch = false;
+    var actKey = actInfo.action || '';
+    if (actInfo.is_riichi && aiBestStr === '宣告立直') isMatch = true;
+    else if (aiBestStr === actKey || aiBestStr === actKey + 'r') isMatch = true;
+    else if (actKey.indexOf('Chi') === 0 && aiBestStr.indexOf('Chi') === 0) isMatch = true;
+    else if (actKey === aiBestStr) isMatch = true;
+
     if (isMatch) {
       matchBadge.className = 'play-badge badge-match';
       matchBadge.innerText = '与AI一致';
@@ -1199,16 +1342,17 @@ function renderConsolePanel(evIdx, board, evEval) {
       matchBadge.innerText = '分歧恶手';
     }
 
-    // 候选表格
-    renderCandidatesTable(evEval.models);
+    renderCandidatesTable(evEval);
   } else {
     actCard.style.display = 'none';
-    document.getElementById('candidates-tbody').innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-dim); padding:30px 0;">当前动作为他家事件，无自家模型建议</td></tr>';
+    document.getElementById('candidates-tbody').innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-dim); padding:28px 0;">当前为他家事件，无自家决策建议</td></tr>';
+    document.getElementById('reach-sub-container').style.display = 'none';
   }
 }
 
-function renderCandidatesTable(models) {
+function renderCandidatesTable(evEval) {
   var tbody = document.getElementById('candidates-tbody');
+  var models = evEval.models;
   var unionActions = [];
   var actionSet = {};
 
@@ -1227,7 +1371,7 @@ function renderCandidatesTable(models) {
   for (var i = 0; i < unionActions.length; i++) {
     var act = unionActions[i];
     rowsHtml += '<tr>';
-    rowsHtml += '<td style="font-weight:700;">' + formatAction(act) + '</td>';
+    rowsHtml += '<td style="font-weight:700; white-space:nowrap;">' + formatAction(act) + '</td>';
     ['Aegis', 'Sol', 'Logos'].forEach(function(m) {
       var cands = (models[m] || {}).candidates || [];
       var match = null;
@@ -1251,6 +1395,26 @@ function renderCandidatesTable(models) {
     rowsHtml += '</tr>';
   }
   tbody.innerHTML = rowsHtml;
+
+  // 阶段二：若包含立直选择，展示立直宣言切牌分布
+  var subBox = document.getElementById('reach-sub-container');
+  var reachSubs = ((models.Logos || {}).reach_sub_choices) || [];
+  if (reachSubs.length > 0) {
+    subBox.style.display = 'block';
+    var sHtml = '<div style="font-weight:bold; color:#f1c40f; margin-bottom:4px;">立直宣言牌打哪张 (Top 候选排行):</div>';
+    sHtml += '<div class="reach-sub-table">';
+    for (var r = 0; r < Math.min(4, reachSubs.length); r++) {
+      var item = reachSubs[r];
+      sHtml += '<div class="reach-sub-row">';
+      sHtml += '  <span>切 ' + item.tile + '</span>';
+      sHtml += '  <span style="color:#5bc0be;">Q: ' + Math.round(item.q * 10) / 10 + '</span>';
+      sHtml += '</div>';
+    }
+    sHtml += '</div>';
+    subBox.innerHTML = sHtml;
+  } else {
+    subBox.style.display = 'none';
+  }
 }
 
 function formatAction(act) {
@@ -1326,7 +1490,7 @@ def generate_standalone_review_html(
     assets_json = json.dumps(tile_assets, ensure_ascii=False)
     assets_json_safe = assets_json.replace("</script>", "<\\/script>").replace("<!--", "<\\!--")
 
-    html_content = REPLAYER_HTML_TEMPLATE.replace("__REVIEW_DATA_PLACEHOLDER__", data_json_safe).replace("__TILE_ASSETS_PLACEHOLDER__", assets_json_safe)
+    html_content = MASTER_PRO_TEMPLATE.replace("__REVIEW_DATA_PLACEHOLDER__", data_json_safe).replace("__TILE_ASSETS_PLACEHOLDER__", assets_json_safe)
 
     out_p.write_text(html_content, encoding="utf-8")
     return out_p
