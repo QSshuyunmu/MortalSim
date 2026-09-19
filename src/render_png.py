@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from typing import Any
 from PIL import Image, ImageDraw, ImageFont
@@ -172,6 +173,45 @@ def _get_rendered_tile(tile_name: str, target_w: int, target_h: int, tile_back_c
     return tile_im
 
 
+def _rec_identities(recommended_tile: str | None) -> tuple[str | None, set[str]]:
+    """推荐牌的所有等价身份 + 归一化后的纯牌名。
+
+    bot 侧标签可能是 '2pR' / '2pr' / 'riichi:2p' / '立直 2p'，结果候选的 candidate
+    字段则是 'riichi:2p'、行标签是 '2pR' —— 必须全部命中同一推荐。
+    """
+    if not recommended_tile:
+        return None, set()
+    raw = recommended_tile.strip()
+    special = {
+        "kk": "九种九牌", "kyushu:kk": "九种九牌",
+        "自摸": "自摸和", "tsumo": "自摸和", "ron": "荣和",
+        "见逃": "见逃 (过)", "pass": "见逃 (过)",
+    }
+    if raw in special:
+        return None, {raw, special[raw]}
+    base = raw
+    action = "discard"
+    for pref in ("riichi:", "立直:", "立直 "):
+        if base.lower().startswith(pref):
+            base = base[len(pref):].strip()
+            action = "riichi"
+            break
+    if base.endswith(("r", "R")):
+        base = base[:-1]
+        action = "riichi"
+    elif base.endswith(("k", "杠")):
+        base = base[:-1]
+        action = "kan"
+    if action == "riichi":
+        keys = {raw, f"riichi:{base}", f"立直 {base}", f"立直:{base}", f"{base}r", f"{base}R"}
+    elif action == "kan":
+        keys = {raw, f"{base}k", f"{base}杠"}
+    else:
+        keys = {raw, base}
+    # base 只用于底部手牌抬升；行高亮必须保留动作身份，不能把立直和默听混为一项。
+    return base, keys
+
+
 def _fmt_signed(v: float | None, prec: int = 0) -> str:
     if v is None: return "—"
     sign = "+" if v > 0 else ("-" if v < 0 else "")
@@ -187,6 +227,26 @@ def _fmt_ci95(ci: list[float] | None, prec: int = 0) -> str:
 
 def _seat_zh(seat: int) -> str:
     return ["东", "南", "西", "北"][seat % 4]
+
+
+def _lookup_model_qp(model_qp: dict[str, dict[str, float]], c: dict[str, Any]) -> dict[str, float] | None:
+    """按候选动作取出模型 Q / P。
+
+    候选在报表里的身份由 candidate 决定 (普通切牌=牌名，立直="riichi:<牌>"，
+    副露/和牌等快照动作=专有 id)。只有真实切牌动作才有模型 Q，其余一律返回 None
+    由调用方渲染成 "—" —— 不能拿别的动作的数值顶替。
+    """
+    if not model_qp:
+        return None
+    # 先解析动作，再查询数值：first_riichi + discard="2p" 不能先命中默听 2p。
+    label = _label_zh(c)
+    label = label.replace("5mr", "0m").replace("5pr", "0p").replace("5sr", "0s")
+    match = re.fullmatch(r"([0-9][mpsz])(R?)", label)
+    if not match:
+        return None
+    tile, reach = match.groups()
+    key = f"riichi:{tile}" if reach else tile
+    return model_qp.get(key)
 
 def _label_zh(c: dict[str, Any]) -> str:
     if c.get("first_kyushu") or c.get("candidate") == "kyushu:kk":
@@ -207,7 +267,21 @@ def _label_zh(c: dict[str, Any]) -> str:
     base = c.get("discard") or cand_name
     if c.get("first_kan"):
         return base + "杠"
-    return "立直 " + base if c.get("first_riichi") else base
+    # 立直切牌统一显示 “牌名 + R”：candidate 可能写作 'riichi:2p' / '立直:2p'（仅带
+    # candidate 而没有 first_riichi 标记的模型候选就走这条），也可能只带 first_riichi。
+    low = cand_name.lower()
+    if c.get("first_riichi") or c.get("riichi") is True or low.startswith(("riichi:", "立直:")):
+        if ":" in cand_name:
+            base = cand_name.split(":", 1)[1].strip()
+        return base + "R"
+    return base
+
+
+def candidate_label(c: dict[str, Any]) -> str:
+    """Shared QQ/PNG action label; internal candidate IDs remain unchanged."""
+    if not isinstance(c, dict):
+        return "?"
+    return _label_zh(c)
 
 
 def render_png(
@@ -217,7 +291,16 @@ def render_png(
     output_path: str | Path,
     recommended_tile: str | None = None,
     theme: str = "obsidian", # 'obsidian' | 'emerald' | 'titanium'
+    model_qp: dict[str, dict[str, float]] | None = None,
 ) -> Path:
+    """渲染决策报表。
+
+    model_qp: 选中 Mortal 模型对当前局面的前向推断结果，形如::
+
+        {"1s": {"q": -0.42, "p": 0.31}, "riichi:1s": {"q": -0.30, "p": 0.44}}
+
+    key 与 candidate 一致；命中时在"副露率"后追加"归一P"列。Q 仅供内部候选排序，不展示。
+    """
     font_path = Path(font_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -276,6 +359,12 @@ def render_png(
 
     draw.text((140, 16), "日麻决策推演分析报告", fill=t_cfg["text_white"], font=f_header_lg)
     draw.text((140, 42), f"{round_zh} {honba}本场 | 巡目: 第 {x_turn} 巡 | 视角: {_seat_zh(target_seat)}家", fill=t_cfg["text_muted"], font=f_sub)
+
+    rec_base, rec_keys = _rec_identities(recommended_tile)
+
+    def _is_rec(c: dict[str, Any], c_lbl: str) -> bool:
+        # c_lbl 已综合 first_riichi / candidate；裸 discard 不足以区分同牌不同动作。
+        return c_lbl in rec_keys
 
     cum_total = result_data.get("cumulative_total_runs") or result_data.get("total_runs") or runs
     is_accel = cum_total > runs
@@ -422,7 +511,81 @@ def render_png(
     cur_y += 22
 
     h1 = ["候选动作", "局收支 / 95% CI", "和牌率", "平均打点", "自摸率", "放铳率", "立直率", "副露率"]
-    w1 = [95, 175, 55, 68, 52, 52, 52, 52]
+    if model_qp:
+        # 只展示归一P；移除模型Q后，将宽度还给既有指标和概率列
+        h1 += ["归一P"]
+
+    max_pt = max([abs((c.get("value") or {}).get("point", {}).get("value") or 1) for c in cands] + [10000])
+
+    # 先收集各行的显示内容，按实际字体宽度实测列宽，再把剩余空间均匀分到各列，
+    # 保证表格铺满内栏且列间距一致（不会出现某两列之间突兀的大空白）
+    def _row_stats(c: dict[str, Any]) -> dict[str, Any]:
+        pt_obj = (c.get("value") or {}).get("point", {}) if isinstance(c.get("value"), dict) else {}
+        agari_r = c.get("agari_rate") or ((c.get("win") or {}).get("rate", {}).get("rate") if isinstance(c.get("win"), dict) else None)
+        avg_pt = (c.get("win") or {}).get("average_point") if isinstance(c.get("win"), dict) else c.get("avg_point")
+        tsumo_r = (c.get("outcome") or {}).get("self_tsumo", {}).get("rate") if isinstance(c.get("outcome"), dict) else None
+        houjuu_r = c.get("houjuu_rate") or ((c.get("defense") or {}).get("deal_in_rate", {}).get("rate") if isinstance(c.get("defense"), dict) else None)
+        riichi_r = c.get("riichi_rate") or ((c.get("riichi") or {}).get("rate", {}).get("rate") if isinstance(c.get("riichi"), dict) else None)
+        fuuro_r = c.get("fuuro_rate") or ((c.get("call") or {}).get("rate", {}).get("rate") if isinstance(c.get("call"), dict) else None)
+        p_txt = None
+        if model_qp:
+            qp = _lookup_model_qp(model_qp, c)
+            if qp is None:
+                p_txt = "—"
+            else:
+                reach_p = qp.get("reach_p")
+                if qp.get("riichi") and reach_p is not None:
+                    # 两级分解: P(宣告立直)→P(本牌 | 立直后)
+                    p_txt = f"{reach_p * 100:.1f}%→{qp['p'] * 100:.1f}%"
+                else:
+                    p_txt = f"{qp['p'] * 100:.1f}%"
+        return {
+            "pt_obj": pt_obj,
+            "stats": [
+                _fmt_rate(agari_r),
+                f"{avg_pt:.0f}" if isinstance(avg_pt, (int, float)) else "—",
+                _fmt_rate(tsumo_r), _fmt_rate(houjuu_r), _fmt_rate(riichi_r), _fmt_rate(fuuro_r),
+            ],
+            "p_txt": p_txt,
+        }
+
+    rows1 = []
+    content_w = [draw.textlength(t, font=f_tbl_head) for t in h1]
+    bar_text_w = 0.0  # 局收支列文本（数值/CI 取宽者）最大宽度，迷你条紧跟其后
+    for c in cands:
+        c_lbl = _label_zh(c)
+        is_rec = _is_rec(c, c_lbl)
+        info = _row_stats(c)
+        info["is_rec"] = is_rec
+        cell_font = f_tbl_bold if is_rec else f_tbl_cell
+        label_txt = c_lbl + (" ★" if is_rec else "")
+        pt_val = info["pt_obj"].get("value")
+        val_txt = _fmt_signed(pt_val, 0)
+        ci_txt = f"CI {_fmt_ci95(info['pt_obj'].get('ci95'), 0)}"
+        content_w[0] = max(content_w[0], draw.textlength(label_txt, font=cell_font))
+        # 局收支列 = 数值/CI 文本 + 右侧迷你条 (48px) 与间距；条的位置按列内最长文本对齐
+        bar_text_w = max(bar_text_w, draw.textlength(val_txt, font=cell_font),
+                         draw.textlength(ci_txt, font=f_ci95))
+        content_w[1] = max(content_w[1], bar_text_w + 52)
+        for i, s in enumerate(info["stats"]):
+            content_w[2 + i] = max(content_w[2 + i], draw.textlength(s, font=f_tbl_cell))
+        if model_qp:
+            content_w[-1] = max(content_w[-1], draw.textlength(info["p_txt"] or "", font=f_tbl_cell))
+        info["label_txt"] = label_txt
+        info["val_txt"] = val_txt
+        info["ci_txt"] = ci_txt
+        rows1.append(info)
+
+    tbl_avail = p_inner_w - 12
+    cell_pad = 8
+    base_w = [w + cell_pad for w in content_w]
+    if sum(base_w) >= tbl_avail:
+        # 内容超出可用宽度时按比例压缩（极端情况下启用）
+        scale = tbl_avail / sum(base_w)
+        w1 = [b * scale for b in base_w]
+    else:
+        extra = (tbl_avail - sum(base_w)) / len(base_w)
+        w1 = [b + extra for b in base_w]
 
     draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + 24], fill=(10, 14, 20, 255))
     draw.line([(p_inner_x, cur_y + 24), (p_inner_x + p_inner_w, cur_y + 24)], fill=t_cfg["panel_border"], width=1)
@@ -432,38 +595,26 @@ def render_png(
         tx += col_w
     cur_y += 24
 
-    max_pt = max([abs((c.get("value") or {}).get("point", {}).get("value") or 1) for c in cands] + [10000])
-
-    for idx, c in enumerate(cands):
-        c_lbl = _label_zh(c)
-        is_rec = (c.get("candidate") == recommended_tile or c_lbl == recommended_tile)
+    for idx, info in enumerate(rows1):
+        is_rec = info["is_rec"]
         row_bg = t_cfg["rec_row_bg"] if is_rec else (t_cfg["row_alt"] if idx % 2 == 1 else t_cfg["panel_bg"])
         draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + 32], fill=row_bg)
 
-        pt_obj = (c.get("value") or {}).get("point", {}) if isinstance(c.get("value"), dict) else {}
-        pt_val = pt_obj.get("value")
-        pt_ci = pt_obj.get("ci95")
-        agari_r = c.get("agari_rate") or ((c.get("win") or {}).get("rate", {}).get("rate") if isinstance(c.get("win"), dict) else None)
-        avg_pt = (c.get("win") or {}).get("average_point") if isinstance(c.get("win"), dict) else c.get("avg_point")
-        tsumo_r = (c.get("outcome") or {}).get("self_tsumo", {}).get("rate") if isinstance(c.get("outcome"), dict) else None
-        houjuu_r = c.get("houjuu_rate") or ((c.get("defense") or {}).get("deal_in_rate", {}).get("rate") if isinstance(c.get("defense"), dict) else None)
-        riichi_r = c.get("riichi_rate") or ((c.get("riichi") or {}).get("rate", {}).get("rate") if isinstance(c.get("riichi"), dict) else None)
-        fuuro_r = c.get("fuuro_rate") or ((c.get("call") or {}).get("rate", {}).get("rate") if isinstance(c.get("call"), dict) else None)
+        pt_val = info["pt_obj"].get("value")
 
         tx = p_inner_x + 6
         # Col 0: Candidate Name
-        draw.text((tx, cur_y + 8), c_lbl + (" ★" if is_rec else ""), fill=t_cfg["rec_emerald"] if is_rec else t_cfg["text_white"], font=f_tbl_bold if is_rec else f_tbl_cell)
+        draw.text((tx, cur_y + 8), info["label_txt"], fill=t_cfg["rec_emerald"] if is_rec else t_cfg["text_white"], font=f_tbl_bold if is_rec else f_tbl_cell)
         tx += w1[0]
 
         # Col 1: Point Value + CI95 subtitle + Mini Bar
-        draw.text((tx, cur_y + 2), _fmt_signed(pt_val, 0), fill=t_cfg["rec_emerald"] if is_rec else t_cfg["text_white"], font=f_tbl_bold if is_rec else f_tbl_cell)
-        ci_str = f"CI {_fmt_ci95(pt_ci, 0)}"
-        draw.text((tx, cur_y + 17), ci_str, fill=t_cfg["text_muted"], font=f_ci95)
+        draw.text((tx, cur_y + 2), info["val_txt"], fill=t_cfg["rec_emerald"] if is_rec else t_cfg["text_white"], font=f_tbl_bold if is_rec else f_tbl_cell)
+        draw.text((tx, cur_y + 17), info["ci_txt"], fill=t_cfg["text_muted"], font=f_ci95)
 
-        # Bar on right of Col 1
+        # Bar 紧跟列内最长文本之后（各行条垂直对齐），不被列宽拉开
         bar_w = 48
         bar_h = 7
-        bar_x = tx + 120
+        bar_x = tx + bar_text_w + 4
         bar_y = cur_y + 12
         draw.rounded_rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], radius=2, fill=(20, 30, 30, 255))
         if pt_val is not None and pt_val > 0:
@@ -475,17 +626,20 @@ def render_png(
         tx += w1[1]
 
         # Other physical stats
-        other_vals = [
-            _fmt_rate(agari_r),
-            f"{avg_pt:.0f}" if isinstance(avg_pt, (int, float)) else "—",
-            _fmt_rate(tsumo_r),
-            _fmt_rate(houjuu_r),
-            _fmt_rate(riichi_r),
-            _fmt_rate(fuuro_r),
-        ]
-        for v_txt, col_w in zip(other_vals, w1[2:]):
+        for v_txt, col_w in zip(info["stats"], w1[2:2 + len(info["stats"])]):
             draw.text((tx, cur_y + 8), v_txt, fill=t_cfg["rec_emerald"] if is_rec else t_cfg["text_white"], font=f_tbl_cell)
             tx += col_w
+
+        # 归一 P (复用选中模型的瞬时推断；模型 Q 不再展示)
+        if model_qp:
+            p_txt = info["p_txt"] or "—"
+            # 双段概率文本较长，放不下时降一档字体
+            p_font = f_tbl_cell
+            if draw.textlength(p_txt, font=f_tbl_cell) > w1[-1] - 4:
+                p_font = f_ci95
+                if draw.textlength(p_txt, font=f_ci95) > w1[-1] - 2:
+                    p_txt = p_txt.replace(".0%", "%")
+            draw.text((tx, cur_y + 8 if p_font is f_tbl_cell else cur_y + 10), p_txt, fill=t_cfg["rec_emerald"] if is_rec else t_cfg["text_white"], font=p_font)
 
         draw.line([(p_inner_x, cur_y + 32), (p_inner_x + p_inner_w, cur_y + 32)], fill=(30, 40, 50, 255), width=1)
         cur_y += 32
@@ -508,7 +662,7 @@ def render_png(
 
     for idx, c in enumerate(cands):
         c_lbl = _label_zh(c)
-        is_rec = (c.get("candidate") == recommended_tile or c_lbl == recommended_tile)
+        is_rec = _is_rec(c, c_lbl)
         row_bg = t_cfg["rec_row_bg"] if is_rec else (t_cfg["row_alt"] if idx % 2 == 1 else t_cfg["panel_bg"])
         draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + 32], fill=row_bg)
 
@@ -732,7 +886,14 @@ def render_png(
     tile_w, tile_h = 36, 50
     hand_start_px = 145
 
-    rec_pure_tile = recommended_tile.replace("riichi:", "").replace("立直 ", "").replace("k", "").strip() if recommended_tile else None
+    # 手牌铺排间距：默认沿用上游常量 (牌间 4px、第 14 张额外 +10px)。
+    # 仅在显式配置 [render] hand_tile_gap / hand_tsumo_gap 时才改变，未配置时视觉与上游一致。
+    hand_gap = config.get("hand_tile_gap")
+    hand_gap = 4 if hand_gap is None else int(hand_gap)
+    tsumo_gap = config.get("hand_tsumo_gap")
+    tsumo_gap = 10 if tsumo_gap is None else int(tsumo_gap)
+
+    rec_pure_tile = rec_base
 
     elevated_drawn = False
     for idx, t_str in enumerate(hand_tiles):
@@ -742,14 +903,16 @@ def render_png(
             elevated_drawn = True
 
         t_im = _get_rendered_tile(t_str, tile_w, tile_h, t_cfg["tile_back"], asset_dir=asset_dir)
-        px = hand_start_px + idx * (tile_w + 4)
+        px = hand_start_px + idx * (tile_w + hand_gap)
         if idx == len(hand_tiles) - 1 and len(hand_tiles) == 14:
-            px += 10
+            px += tsumo_gap
 
         py = hand_bar_y + 26 - elevate_offset
 
         if is_rec_hand_tile:
-            draw.rounded_rectangle([px - 2, py - 2, px + tile_w + 2, py + tile_h + 2], radius=4, fill=(0, 0, 0, 100), outline=t_cfg["rec_emerald"], width=2)
+            # 无缝铺排时缩小高亮描边外扩，避免遮住相邻手牌
+            bleed = 1 if hand_gap <= 0 else 2
+            draw.rounded_rectangle([px - bleed, py - bleed, px + tile_w + bleed, py + tile_h + bleed], radius=4, fill=(0, 0, 0, 100), outline=t_cfg["rec_emerald"], width=2)
             draw.text((px + 2, py - 14), "★ 最优", fill=t_cfg["rec_emerald"], font=f_foot)
 
         img.paste(t_im, (px, py), t_im)

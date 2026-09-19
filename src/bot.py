@@ -22,7 +22,7 @@ import websocket
 from mortal_client import MortalClient, MortalSimError
 from parser import parse_sim_command
 from quota import QuotaStore
-from render_png import render_png
+from render_png import candidate_label, render_png
 
 log = logging.getLogger("bot")
 
@@ -673,11 +673,41 @@ class Bot:
                 log.exception("unexpected error in worker loop: %s", exc)
                 await asyncio.sleep(1.0)
 
+    def _eval_model_qp(self, request: dict) -> dict[str, dict[str, float]]:
+        """对当前局面跑一次选中模型的前向推断，取各候选动作的 Q 与归一化 P。
+
+        仅在 parser 未推断过（用户显式给了 c= 候选）时才需要调用；无 c= 时
+        parser 已把同一局面的推断结果放进 request["_model_qp"]，直接复用。
+
+        失败时静默返回 {} —— 报表会显示 "—"，不影响主推演结果。
+        """
+        try:
+            from model_eval import eval_model_qp
+            scores = request.get("scores") or {}
+            return eval_model_qp(
+                hand_str=request.get("hand", ""),
+                dora_indicator=request.get("dora", ""),
+                round_str=str(request.get("round", "E1")),
+                honba=int(request.get("honba") or 0),
+                kyotaku=int(request.get("kyotaku") or 0),
+                target_seat=int(request.get("target_seat") or 0),
+                scores=scores,
+                model_id=request.get("model_id", "distill_41b_infer"),
+            )
+        except Exception as exc:
+            log.warning("模型 Q/P 推断失败，报表对应列将留空: %s", exc)
+            return {}
+
     async def execute(self, item: dict) -> None:
         request = dict(item["request"])
+        # 无 c= 候选时 parser 已经为“生成候选”跑过一次模型推断，那份 Q/P 直接复用；
+        # 只有显式给了 c= 候选（parser 没推断过）时才在这里补推断。
+        precomputed_qp = request.pop("_model_qp", None)
         request["runs"] = item["runs"]
         request["batch_size"] = 1000
         # 模型映射: parser 内部用不透明别名，此处映射回后端真实模型 ID (用户侧绝不显示模型名)
+        # 模型映射: parser 内部用不透明别名，此处映射回后端真实模型 ID (用户侧绝不显示模型名)
+        # 保持上游行为：非已知别名一律回落到配置默认模型，不透传未知模型 ID。
         internal_model = request.get("model_id", self.mortal_cfg.get("model_id", "model_balanced"))
         request["model_id"] = {
             "model_balanced": "distill_41b_infer",
@@ -698,29 +728,14 @@ class Bot:
 
         # 注入请求配置供 render_png 完整读取手牌、局况、宝牌
         result["config"] = job.get("request", {})
+        # 手牌铺排间距渲染偏好：仅在 [render] 显式配置时下发，未配置则不改上游默认间距。
+        if "hand_tile_gap" in self.render_cfg:
+            result["config"].setdefault("hand_tile_gap", int(self.render_cfg["hand_tile_gap"]))
+        if "hand_tsumo_gap" in self.render_cfg:
+            result["config"].setdefault("hand_tsumo_gap", int(self.render_cfg["hand_tsumo_gap"]))
 
-        def label(c):
-            if not isinstance(c, dict):
-                return "?"
-            if c.get("first_kyushu") or c.get("candidate") == "kyushu:kk":
-                return "kk"
-            if c.get("first_tsumo") or c.get("candidate") == "tsumo":
-                return "自摸"
-            if c.get("first_ron") or c.get("candidate") == "ron":
-                return "荣和"
-            if c.get("first_pass") or c.get("candidate") == "pass":
-                return "见逃"
-            cand_name = str(c.get("candidate") or c.get("discard") or "?")
-            if cand_name.startswith("chi:"):
-                return f"吃 {cand_name[4:]}"
-            if cand_name.startswith("pon"):
-                return f"碰 {cand_name[3:]}" if len(cand_name) > 3 else "碰"
-            if cand_name == "daiminkan":
-                return "大明杠"
-            base = c.get("discard") or cand_name
-            if c.get("first_kan"):
-                return base + "k"
-            return base + ("r" if c.get("first_riichi") else "")
+        # QQ 文本与图片使用相同的动作标签，避免立直/和牌等推荐高亮失配。
+        label = candidate_label
 
         candidates = result["candidates"]
         def _pt_value(c):
@@ -743,6 +758,9 @@ class Bot:
         recommended = pt_best
         rec_tile = label(recommended)
 
+        # 复用选中模型的 Q/P 结果；报表仅展示归一P，Q 留作内部候选排序。
+        model_qp = precomputed_qp if precomputed_qp is not None else self._eval_model_qp(request)
+
         png_path = Path(self.render_cfg["output_dir"]) / f"{run_id}.png"
         import random
         selected_theme = random.choice(["obsidian", "emerald", "titanium"])
@@ -753,6 +771,7 @@ class Bot:
             output_path=png_path,
             recommended_tile=rec_tile,
             theme=selected_theme,
+            model_qp=model_qp,
         )
         x_turn = item.get("request", {}).get("x", 1)
         action_label = f"第 {x_turn} 打" if x_turn > 1 else "第一打"
