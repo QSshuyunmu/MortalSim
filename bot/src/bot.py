@@ -581,17 +581,18 @@ class Bot:
 
         generate_standalone_review_html(review_result, html_file)
 
-        total_dec = review_result.get("total_decisions", 0)
-        timeline = review_result.get("timeline", [])
-        conflicts = sum(1 for d in timeline if d.get("has_conflict"))
-        conflict_rate = (conflicts / total_dec * 100) if total_dec else 0.0
+        rev = review_result.get("review", {})
+        total_rev = rev.get("total_reviewed", 0)
+        total_match = rev.get("total_matches", 0)
+        rating_pct = round(rev.get("rating", 1.0) * 100, 1)
+        match_pct = round(total_match / total_rev * 100, 1) if total_rev else 100.0
 
         summary_msg = (
-            f"【Mortal Reviewer 牌谱审查完成】\n"
-            f"• 审查视角：{target_seat} 号位 (共 {total_dec} 巡决策)\n"
-            f"• 三神一致率：{100 - conflict_rate:.1f}%\n"
-            f"• 战术分歧点：{conflicts} 处 (Aegis避四 / Sol争一 / Logos理性)\n"
-            f"正在发送完全离线 HTML 报告..."
+            f"【Killer Mortal 牌谱检讨完成】\n"
+            f"• 检讨视角：{target_seat} 号位 (共 {total_rev} 巡决策)\n"
+            f"• 一致率：{match_pct}% ({total_match}/{total_rev})\n"
+            f"• 评分：{rating_pct} 分\n"
+            f"正在发送 100% 官方代码级复刻 Killer Mortal 单文件离线 HTML 报告..."
         )
         # 在同步工作线程中通过标准 HTTP post 投递，杜绝跨线程 asyncio.run 关闭共享连接池
         self._post_group_msg_sync(group_id, summary_msg)
