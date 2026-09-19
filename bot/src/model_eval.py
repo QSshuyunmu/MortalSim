@@ -1,23 +1,46 @@
-"""model_eval.py — 调用 Mortal 模型对当前局面进行瞬时前向推断，输出 Q 值最高的合法切牌候选。"""
+"""model_eval.py — 调用 Mortal 模型对当前局面进行瞬时前向推断。
+
+统一推断入口 (本模块的核心约定)::
+
+    from model_eval import model_forward
+
+    fwd = model_forward(hand_str=..., dora_indicator=..., ...)
+    fwd["qp"]   # {candidate_key: {"q":..., "p":..., "riichi":...}}
+    fwd["top"]  # [(tile, is_riichi, weight), ...] 动态自适应选取的前 x 选
+
+设计要点：
+    1. **一次前向推断同时产出"候选切牌"与"Q/P"** —— 这两件事本质是同一次
+       engine 推断的两个视图（一个回答"打哪几张"，一个回答"Q值/归一概率"）。
+       历史上 get_top_model_discards() 与 eval_model_qp() 各自跑一遍完整推断，
+       在没有显式 c= 候选时等于把同一局面的推断流程重复执行；
+       现在两者都是 model_forward() 的薄封装，且 bot 侧在无 c= 时把 qp 结果
+       沿请求带下去复用（见 parser.py / bot.py 的 request["_model_qp"]）。
+    2. 两个视图各自保留原有归一化口径：
+       - Q/P: 两级分解（默听池 vs 宣告立直 → 立直后切牌池），不互相稀释。
+       - top: 每张牌取"立直/默听"中 Q 更高者，合并后单池 softmax + 断崖判定。
+"""
 from __future__ import annotations
 
 import json
 import logging
 import math
+import os
 from typing import Any
 from pathlib import Path
 import sys
 
 # 动态确保 mortal 与 libriichi 模块可用
-MORTALSIM_ROOT = Path("D:/tenhoulib/MortalSim").resolve()
+# 默认路径由本文件位置推导 (bot/src/model_eval.py -> 仓库根)，不再硬编码 D:/tenhoulib/...
+# —— 硬编码路径在换机/换盘后会让推断整体静默降级 (except 吞掉异常 -> 候选走兜底)。
+# 仓库根与 native 产物不在同一处时，用 MORTALSIM_ROOT 覆盖，不改本文件。
+MORTALSIM_ROOT = Path(os.environ.get("MORTALSIM_ROOT") or Path(__file__).resolve().parents[2]).resolve()
 for p in [MORTALSIM_ROOT / "target" / "release", MORTALSIM_ROOT / "mortal", MORTALSIM_ROOT]:
     p_str = str(p)
     if p_str not in sys.path:
         sys.path.insert(0, p_str)
 
-import libriichi
-from mortal_app.service import _load_engine
-from simulator.kyoku_sim_win import parse_hand
+# Native inference dependencies are loaded inside the guarded inference path.
+# Importing model aliases or rendering a report must not require a local .pyd/GPU.
 
 log = logging.getLogger("model_eval")
 
@@ -34,11 +57,18 @@ TO_MJAI_HONOR = {
     '5z': 'P', '6z': 'F', '7z': 'C',
 }
 
+# 模型入口保持上游语义：仅 model_balanced / model_aggressive 两个别名会切换后端模型，
+# 其余值一律落到默认模型。映射规则留在 parser.py / bot.py 的既有分支里，本模块不引入
+# 新的解析层，避免把"换模型"这件事从既有入口挪到别处。
+DEFAULT_MODEL_ID = "distill_41b_infer"
+
 # 单例全局缓存已加载的 engine 实例，避免重复创建
 _CACHED_ENGINES: dict[str, Any] = {}
 
-def get_cached_engine(model_id: str = "distill_41b_infer") -> Any:
+def get_cached_engine(model_id: str = DEFAULT_MODEL_ID) -> Any:
     if model_id not in _CACHED_ENGINES:
+        from mortal_app.service import _load_engine
+
         eng, _, _ = _load_engine(model_id, "python")
         _CACHED_ENGINES[model_id] = eng
     return _CACHED_ENGINES[model_id]
@@ -79,7 +109,31 @@ def select_candidate_count(weights: list[float], min_x: int = 2, max_x: int = 4)
     return x
 
 
-def get_top_model_discards(
+def _build_scores(
+    scores: dict[str, int] | list[int] | None,
+    target_seat: int,
+    kyotaku: int = 0,
+) -> list[int]:
+    """把 dict/list 分数统一成 4 家数组，推导上家时扣除供托。"""
+    if scores is None:
+        scores = {}
+    if isinstance(scores, dict):
+        s_self = scores.get("self", 25000)
+        s_shimo = scores.get("shimocha", 25000)
+        s_toi = scores.get("toimen", 25000)
+        s_kami = 100000 - kyotaku * 1000 - s_self - s_shimo - s_toi
+        score_list = [25000, 25000, 25000, 25000]
+        score_list[target_seat] = s_self
+        score_list[(target_seat + 1) % 4] = s_shimo
+        score_list[(target_seat + 2) % 4] = s_toi
+        score_list[(target_seat + 3) % 4] = s_kami
+        return score_list
+    if isinstance(scores, list) and len(scores) == 4:
+        return [int(s) for s in scores]
+    return [25000, 25000, 25000, 25000]
+
+
+def _forward_inference(
     hand_str: str,
     dora_indicator: str,
     round_str: str = "E1",
@@ -88,36 +142,29 @@ def get_top_model_discards(
     target_seat: int = 0,
     scores: dict[str, int] | list[int] | None = None,
     model_id: str = "distill_41b_infer",
-    min_k: int = 2,
-    max_k: int = 4,
-) -> list[tuple[str, bool]]:
-    """使用 Mortal 模型前向推断当前手牌所有合法切牌（包含立直打牌）的 Q 值与 Softmax 权重。
+) -> dict[str, Any] | None:
+    """对当前局面构建一次 mjai 推断流程，返回两个视图共用的原始结果::
 
-    返回:
-        list of (tile, is_riichi)，例如 [('1s', True), ('7z', True)]。
-        当权重无压倒性差异时动态扩展 x 选（x 最小为 min_k=2，最大为 max_k=4）。
+        {
+            "dama":            {tile: q}   # 默听各切牌 Q (action_id < 37)
+            "reach":           {tile: q}   # 立直后各切牌 Q (仅当可立直时非空)
+            "reach_declare_q": float|None  # "宣告立直"动作 (action_id 37) 的 Q
+        }
+
+    失败返回 None。这是全模块唯一真正跑 engine 的地方 —— 候选生成与 Q/P 列
+    都必须走这里。可立直时仍需一次宣告后的条件推断；复用消除的是候选与报表
+    各自重复整套流程的开销，而非把两个决策状态合成一次神经网络调用。
     """
     try:
+        import libriichi
+        from simulator.kyoku_sim_win import parse_hand
+
         engine = get_cached_engine(model_id)
         tiles = parse_hand(hand_str)
         if len(tiles) not in (13, 14):
-            return []
+            return None
 
-        # 4家分数构造
-        if isinstance(scores, dict):
-            s_self = scores.get("self", 25000)
-            s_shimo = scores.get("shimocha", 25000)
-            s_toi = scores.get("toimen", 25000)
-            s_kami = 100000 - kyotaku * 1000 - s_self - s_shimo - s_toi
-            score_list = [25000, 25000, 25000, 25000]
-            score_list[target_seat] = s_self
-            score_list[(target_seat + 1) % 4] = s_shimo
-            score_list[(target_seat + 2) % 4] = s_toi
-            score_list[(target_seat + 3) % 4] = s_kami
-        elif isinstance(scores, list) and len(scores) == 4:
-            score_list = [int(s) for s in scores]
-        else:
-            score_list = [25000, 25000, 25000, 25000]
+        score_list = _build_scores(scores, target_seat, kyotaku)
 
         bot = libriichi.mjai.Bot(engine, target_seat)
         bot.react(json.dumps({"type": "start_game"}))
@@ -130,7 +177,7 @@ def get_top_model_discards(
         mjai_dora = TO_MJAI_HONOR.get(dora_indicator, dora_indicator)
         mjai_tiles = [TO_MJAI_HONOR.get(t, t) for t in tiles]
 
-        # 宝牌指示牌若与手牌重合导致全局该牌超过 4 张，安全替换为不冲突的指示牌（仅用于前向推断候选切牌）
+        # 宝牌指示牌若与手牌重合导致全局该牌超过 4 张，安全替换为不冲突的指示牌（仅用于前向推断）
         eval_dora = mjai_dora
         if mjai_tiles.count(eval_dora) == 4:
             for cand_dora in ["C", "F", "P", "N", "W", "S", "E", "1s", "9s", "1p", "9p"]:
@@ -174,7 +221,7 @@ def get_top_model_discards(
             "pai": tsumo_tile,
         }))
         if not res_str:
-            return []
+            return None
 
         res = json.loads(res_str)
         meta = res.get("meta", {})
@@ -189,8 +236,7 @@ def get_top_model_discards(
                     q_map[action_id] = float(q_vals[idx])
                 idx += 1
 
-        # 检查是否可以立直 (action_id == 37)
-        # 若能立直，向 bot 声明 reach 并提取各立直打牌动作及具体 Q 值
+        # 探查立直切牌 (action_id == 37)
         reach_discards: dict[str, float] = {}
         if 37 in q_map:
             try:
@@ -214,42 +260,210 @@ def get_top_model_discards(
             if act_id < 37:
                 dama_discards[ACTION_TO_TILE[act_id]] = q
 
-        # 将每个可切牌的"立直"与"默听"按最高 Q 值决策合并
-        all_candidate_tiles = set(dama_discards.keys()) | set(reach_discards.keys())
-        candidates_pool: list[tuple[str, bool, float]] = []
-        for t in all_candidate_tiles:
-            q_dama = dama_discards.get(t)
-            q_reach = reach_discards.get(t)
-            if q_dama is not None and q_reach is not None:
-                if q_reach >= q_dama:
-                    candidates_pool.append((t, True, q_reach))
-                else:
-                    candidates_pool.append((t, False, q_dama))
-            elif q_reach is not None:
-                candidates_pool.append((t, True, q_reach))
-            elif q_dama is not None:
-                candidates_pool.append((t, False, q_dama))
-
-        if not candidates_pool:
-            return []
-
-        # 计算 Softmax 权重分布
-        max_q = max(c[2] for c in candidates_pool)
-        exps = [math.exp(c[2] - max_q) for c in candidates_pool]
-        sum_exp = sum(exps)
-        probs = [e / sum_exp for e in exps]
-
-        sorted_pool = sorted(zip(candidates_pool, probs), key=lambda x: x[1], reverse=True)
-        weights = [p for _, p in sorted_pool]
-
-        # 动态判定无压倒性差异的前 x 选
-        k = select_candidate_count(weights, min_x=min_k, max_x=max_k)
-        selected_candidates = [(c[0], c[1]) for c, _ in sorted_pool[:k]]
-
-        log_details = [f"{c[0]}{'r' if c[1] else ''}({p*100:.1f}%)" for c, p in sorted_pool[:k]]
-        log.info("模型前向推断完成，动态自适应选取前 %d 选: %s", k, ", ".join(log_details))
-
-        return selected_candidates
+        return {
+            "dama": dama_discards,
+            "reach": reach_discards,
+            "reach_declare_q": q_map.get(37),
+        }
     except Exception as exc:
-        log.warning("模型前向推断候选失败，将降级处理: %s", exc)
+        log.warning("模型前向推断失败: %s", exc)
+        return None
+
+
+def _build_qp_map(raw: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """把原始推断结果整理成渲染层/报表用的 Q + 归一化 P 视图。
+
+    返回结构::
+
+        {
+            "1s":         {"q": -0.42, "p": 0.31, "riichi": 0.0},
+            "riichi:1s":  {"q": -0.30, "p": 0.44, "riichi": 1.0, "reach_p": 0.62},
+            ...
+        }
+
+    ---- 两级决策分解 ----
+    第一级【当前决策点】：默听切牌 + "宣告立直"单一动作 (action 37) 共同 softmax
+      → P(打X 默听) / P(宣告立直)    【这一层才回答"要不要立直"】
+    第二级【declare 之后】：立直后的各切牌在自身池内 softmax
+      → P(打X | 已立直)             【这一层回答"立直了打哪张"】
+    不能把两级混在一个池里归一（那样立直概率会被可切牌张数稀释）。
+    """
+    dama_discards = raw.get("dama") or {}
+    reach_discards = raw.get("reach") or {}
+    reach_declare_q = raw.get("reach_declare_q")
+
+    first_level: list[tuple[str, float]] = [(t, q) for t, q in dama_discards.items()]
+    if reach_declare_q is not None:
+        first_level.append(("__reach__", reach_declare_q))
+    if not first_level and not reach_discards:
+        return {}
+
+    max_q1 = max(q for _, q in first_level) if first_level else 0.0
+    exps1 = [math.exp(q - max_q1) for _, q in first_level]
+    sum1 = sum(exps1) or 1.0
+    p1 = {key: e / sum1 for (key, _), e in zip(first_level, exps1)}
+    reach_p = p1.get("__reach__")
+
+    out: dict[str, dict[str, float]] = {}
+    for t, q in dama_discards.items():
+        out[t] = {"q": q, "p": p1.get(t, 0.0), "riichi": 0.0}
+
+    if reach_discards:
+        max_q2 = max(reach_discards.values())
+        exps2 = {t: math.exp(q - max_q2) for t, q in reach_discards.items()}
+        sum2 = sum(exps2.values()) or 1.0
+        for t, q in reach_discards.items():
+            entry = {"q": q, "p": exps2[t] / sum2, "riichi": 1.0}
+            if reach_p is not None:
+                entry["reach_p"] = reach_p  # 第一级"宣告立直"的归一概率
+            out[f"riichi:{t}"] = entry
+    return out
+
+
+def _build_top_candidates(
+    raw: dict[str, Any],
+    min_k: int = 2,
+    max_k: int = 4,
+) -> list[tuple[str, bool, float]]:
+    """把原始推断结果整理成"该推演哪几张"的候选视图，返回 [(tile, is_riichi, weight)]。
+
+    每张牌取"立直 / 默听"中 Q 更高者合并成单池，再 softmax + 断崖判定自适应选前 x 个。
+    """
+    dama_discards = raw.get("dama") or {}
+    reach_discards = raw.get("reach") or {}
+
+    all_tiles = set(dama_discards.keys()) | set(reach_discards.keys())
+    pool: list[tuple[str, bool, float]] = []
+    for t in sorted(all_tiles, key=ACTION_TO_TILE.index):
+        q_dama = dama_discards.get(t)
+        q_reach = reach_discards.get(t)
+        if q_dama is not None and q_reach is not None:
+            if q_reach >= q_dama:
+                pool.append((t, True, q_reach))
+            else:
+                pool.append((t, False, q_dama))
+        elif q_reach is not None:
+            pool.append((t, True, q_reach))
+        elif q_dama is not None:
+            pool.append((t, False, q_dama))
+
+    if not pool:
         return []
+
+    max_q = max(c[2] for c in pool)
+    exps = [math.exp(c[2] - max_q) for c in pool]
+    sum_exp = sum(exps)
+    probs = [e / sum_exp for e in exps]
+
+    sorted_pool = sorted(zip(pool, probs), key=lambda x: x[1], reverse=True)
+    weights = [p for _, p in sorted_pool]
+
+    k = select_candidate_count(weights, min_x=min_k, max_x=max_k)
+    selected = [(c[0], c[1], p) for c, p in sorted_pool[:k]]
+
+    log_details = [f"{tile}{'R' if is_riichi else ''}({p*100:.1f}%)" for tile, is_riichi, p in selected]
+    log.info("模型前向推断完成，动态自适应选取前 %d 选: %s", k, ", ".join(log_details))
+    return selected
+
+
+def model_forward(
+    hand_str: str,
+    dora_indicator: str,
+    round_str: str = "E1",
+    honba: int = 0,
+    kyotaku: int = 0,
+    target_seat: int = 0,
+    scores: dict[str, int] | list[int] | None = None,
+    model_id: str = "distill_41b_infer",
+    min_k: int = 2,
+    max_k: int = 4,
+) -> dict[str, Any]:
+    """统一推断入口：一次前向推断同时产出 Q/P 视图与候选视图。
+
+    返回::
+
+        {"qp": {candidate_key: {"q":..., "p":..., "riichi":...}},
+         "top": [(tile, is_riichi, weight), ...]}
+
+    两者失败时分别为 {} / []，调用方按空值走原有降级路径即可。
+    """
+    raw = _forward_inference(
+        hand_str=hand_str,
+        dora_indicator=dora_indicator,
+        round_str=round_str,
+        honba=honba,
+        kyotaku=kyotaku,
+        target_seat=target_seat,
+        scores=scores,
+        model_id=model_id,
+    )
+    if raw is None:
+        return {"qp": {}, "top": []}
+    return {
+        "qp": _build_qp_map(raw),
+        "top": _build_top_candidates(raw, min_k=min_k, max_k=max_k),
+    }
+
+
+def eval_model_qp(
+    hand_str: str,
+    dora_indicator: str,
+    round_str: str = "E1",
+    honba: int = 0,
+    kyotaku: int = 0,
+    target_seat: int = 0,
+    scores: dict[str, int] | list[int] | None = None,
+    model_id: str = "distill_41b_infer",
+) -> dict[str, dict[str, float]]:
+    """对当前局面做一次前向推断，返回每个合法切牌动作的 Q 值与 Softmax 归一化 P。
+
+    key 与 /sim 请求里 discards[].candidate 一致 (普通切牌 = 牌名，立直切牌 = "riichi:<牌名>")，
+    便于渲染层直接用 candidate 取值。Q 为模型原始 advantage；P 为归一化概率，
+    ΣP(默听切牌) + P(宣告立直) = 1，ΣP(切牌 | 立直后) = 1；两层不能混加。
+    """
+    return model_forward(
+        hand_str=hand_str,
+        dora_indicator=dora_indicator,
+        round_str=round_str,
+        honba=honba,
+        kyotaku=kyotaku,
+        target_seat=target_seat,
+        scores=scores,
+        model_id=model_id,
+    )["qp"]
+
+
+def get_top_model_discards(
+    hand_str: str,
+    dora_indicator: str,
+    round_str: str = "E1",
+    honba: int = 0,
+    kyotaku: int = 0,
+    target_seat: int = 0,
+    scores: dict[str, int] | list[int] | None = None,
+    model_id: str = "distill_41b_infer",
+    min_k: int = 2,
+    max_k: int = 4,
+) -> list[tuple[str, bool]]:
+    """使用 Mortal 模型前向推断当前手牌所有合法切牌（包含立直打牌）的 Q 值与 Softmax 权重。
+
+    返回:
+        list of (tile, is_riichi)，例如 [('1s', True), ('7z', True)]。
+        当权重无压倒性差异时动态扩展 x 选（x 最小为 min_k=2，最大为 max_k=4）。
+
+    注意：若调用方同时也需要 Q/P（例如报表列），请直接用 model_forward() 一次拿到
+    两个视图，不要分别调用本函数与 eval_model_qp() —— 那会跑两遍完整推断。
+    """
+    fwd = model_forward(
+        hand_str=hand_str,
+        dora_indicator=dora_indicator,
+        round_str=round_str,
+        honba=honba,
+        kyotaku=kyotaku,
+        target_seat=target_seat,
+        scores=scores,
+        model_id=model_id,
+        min_k=min_k,
+        max_k=max_k,
+    )
+    return [(tile, is_riichi) for tile, is_riichi, _ in fwd["top"]]
