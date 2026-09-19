@@ -135,10 +135,10 @@ header {
   padding: 10px;
 }
 .mahjong-table {
-  width: 680px;
-  height: 680px;
-  max-width: calc(100vh - 56px);
-  max-height: calc(100vh - 56px);
+  width: 740px;
+  height: 740px;
+  max-width: calc(100vh - 54px);
+  max-height: calc(100vh - 54px);
   aspect-ratio: 1 / 1;
   background: var(--board-bg);
   border: 3px solid #14353c;
@@ -150,17 +150,17 @@ header {
   justify-content: center;
 }
 
-/* 牌桌中心盘 */
+/* 牌桌中心盘: 164px x 164px 适中尺寸 */
 .table-center-box {
-  width: 190px;
-  height: 190px;
+  width: 164px;
+  height: 164px;
   background: var(--table-center);
   border: 2px solid var(--border-color);
   border-radius: 8px;
   box-shadow: 0 4px 20px rgba(0,0,0,0.8);
   display: grid;
-  grid-template-rows: 32px 1fr 32px;
-  grid-template-columns: 32px 1fr 32px;
+  grid-template-rows: 30px 1fr 30px;
+  grid-template-columns: 30px 1fr 30px;
   position: absolute;
   z-index: 10;
 }
@@ -188,32 +188,32 @@ header {
   justify-content: center;
   gap: 2px;
 }
-.center-title { font-size: 15px; font-weight: bold; color: #fff; }
-.center-sticks { font-size: 11px; color: var(--text-dim); }
+.center-title { font-size: 14px; font-weight: bold; color: #fff; }
+.center-sticks { font-size: 10px; color: var(--text-dim); }
 .center-tiles-left { font-size: 11px; color: #f1c40f; font-weight: bold; }
 .dora-bar { display: flex; gap: 2px; margin-top: 2px; }
 
-/* 四家标准 6 列牌河：紧靠中心盘四周边沿，距离仅 8px！ */
+/* 四家标准 6 列牌河：精确紧贴中心盘 164px (半径 82px) 四周！
+   单张牌河 22px x 30px，6 列宽 = 6*22 + 5*2 = 142px，3 行高 = 3*30 + 2*2 = 94px
+   中心到牌河距离：82px + 6px = 88px */
 .river-grid {
   position: absolute;
   display: flex;
   flex-wrap: wrap;
-  width: 156px; /* 6 张 x 24px + gap = 154px */
+  width: 144px;
   gap: 2px;
   align-content: flex-start;
   z-index: 5;
 }
-/* 四家标准 6 列牌河：紧贴中心盘 190px 外边缘，距离仅 8px！ */
-/* 中心盘位于 50%，半径 95px -> 紧贴外沿为 50% + 95px + 8px = calc(50% + 103px) */
-.river-bottom { top: calc(50% + 103px); left: 50%; transform: translateX(-50%); height: 106px; }
-.river-top    { bottom: calc(50% + 103px); left: 50%; transform: translateX(-50%) rotate(180deg); height: 106px; }
-.river-left   { right: calc(50% + 103px); top: 50%; transform: translateY(-50%) rotate(90deg); transform-origin: center center; height: 106px; }
-.river-right  { left: calc(50% + 103px); top: 50%; transform: translateY(-50%) rotate(-90deg); transform-origin: center center; height: 106px; }
+.river-bottom { top: calc(50% + 88px); left: 50%; transform: translateX(-50%); height: 96px; }
+.river-top    { bottom: calc(50% + 88px); left: 50%; transform: translateX(-50%) rotate(180deg); height: 96px; }
+.river-left   { right: calc(50% + 88px); top: 50%; transform: translateY(-50%) rotate(90deg); transform-origin: center center; height: 96px; }
+.river-right  { left: calc(50% + 88px); top: 50%; transform: translateY(-50%) rotate(-90deg); transform-origin: center center; height: 96px; }
 
-/* 四家手牌与副露：紧贴牌河外侧 */
+/* 四家手牌与副露：紧贴牌河外边缘 (88px + 96px + 14px = 198px)，远离牌河绝不重叠！ */
 .hand-group-bottom {
   position: absolute;
-  bottom: 16px;
+  top: calc(50% + 196px);
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -224,7 +224,7 @@ header {
 }
 .hand-group-top {
   position: absolute;
-  top: 16px;
+  bottom: calc(50% + 196px);
   left: 50%;
   transform: translateX(-50%) rotate(180deg);
   display: flex;
@@ -234,7 +234,7 @@ header {
 }
 .hand-group-left {
   position: absolute;
-  left: 16px;
+  right: calc(50% + 196px);
   top: 50%;
   transform: translateY(-50%) rotate(90deg);
   transform-origin: center center;
@@ -245,7 +245,7 @@ header {
 }
 .hand-group-right {
   position: absolute;
-  right: 16px;
+  left: calc(50% + 196px);
   top: 50%;
   transform: translateY(-50%) rotate(-90deg);
   transform-origin: center center;
@@ -275,7 +275,7 @@ header {
 }
 .tile-hand { width: 38px; height: 54px; }
 .tile-tsumo { margin-left: 12px; box-shadow: 0 0 0 2px #5bc0be; }
-.tile-river { width: 24px; height: 32px; }
+.tile-river { width: 22px; height: 30px; }
 .tile-river.tsumogiri { opacity: 0.72; filter: brightness(0.92); }
 .tile-river.riichi { transform: rotate(90deg); margin: 0 4px; box-shadow: 0 0 0 2px #f1c40f; }
 .tile-river.called { border: 1.5px solid #e74c3c !important; box-shadow: 0 0 0 1.5px rgba(231,76,60,0.85) !important; }
