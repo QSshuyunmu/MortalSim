@@ -358,7 +358,7 @@ def run_multi_model_review(
                 continue
 
             max_q = max(d["q_value"] for d in details)
-            temp = 0.35  # 优化温度：凸显至多三选博弈，彻底杜绝第四选干扰
+            temp = 1.0  # 优化温度：凸显至多三选博弈，彻底杜绝第四选干扰
             exps = [math.exp((d["q_value"] - max_q) / temp) for d in details]
             s_exp = sum(exps)
             for k, d in enumerate(details):
@@ -429,7 +429,7 @@ def run_multi_model_review(
             "total_reviewed": total_reviewed,
             "total_matches": total_matches,
             "rating": rating_ratio,
-            "temperature": 0.35,
+            "temperature": 1.0,
             "kyokus": kyokus,
             "model_tag": official_tag,
             "relative_phi_matrix": []
