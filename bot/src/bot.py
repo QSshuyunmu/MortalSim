@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -475,7 +476,14 @@ class Bot:
         if not text or text.startswith(("/help", "帮助", "help")):
             await self.send_group_text(
                 group_id,
-                "/sim 手牌 d宝牌 [可选条件...]\n\n最简示例：\n  /sim 123456789m789s12p d8p\n\n可选累加条件：\n  • 候选与立直：c1pr,2p（r为立直；副露 c=pon>4p 或 c=ron,pass）\n  • 局况与座次：E2-1（东2局1本场）；支持三段式 E1-0-1（含1供托）或 供托=1；seat=南（0=东,1=南,2=西,3=北）\n  • 巡目：x=3（第3打，未填牌河时自动推导前置牌河）\n  • 牌河：river=1m,2p/9s,1z/白,中/1s（/ 分隔四家，或指定单家如 东:1m 其余家自动补齐）\n  • 点数：P180,200,390,230（东南西北四家点数）\n  • 局数：末尾加数字，如 1000\n\n组合示例：\n  /sim 123456789m789s12p d8p c1pr,2p S1-0 seat=南 x=3 P250,250,250,250 1000\n\n/state 查看状态 | /取消 撤回任务",
+                "【Mortal 牌谱检讨 /review】\n"
+                "格式：/review <天凤/雀魂链接> [seat=0~3] [model=模型代号]\n"
+                "• 视角座次：默认取链接中的 tw 视角，也可显式指定 seat=0~3 (0东, 1南, 2西, 3北)\n"
+                "• 模型代号：Logos(默认基准) / Bastion(避四) / Nova-X(争一) / Consensus(共识) / Shadow-J(奇策)\n"
+                "• 示例：/review http://tenhou.net/0/?log=...&tw=1 seat=2 model=Nova-X\n\n"
+                "【局况蒙特卡洛仿真 /sim】\n"
+                "示例：/sim 123456789m789s12p d8p c1pr,2p S1-0 seat=南 x=3 P250,250,250,250 1000\n\n"
+                "/state 查看队列状态 | /取消 撤回任务",
             )
             return
 
@@ -527,7 +535,7 @@ class Bot:
         if self.review_tasks.qsize() >= 3:
             await self.send_group_text(group_id, "当前跑谱审查队列已满 (最多排队 3 场)，请稍候再试。")
             return
-        await self.send_group_text(group_id, "已收到牌谱审查任务，正在抓取对局并调用 Aegis/Sol/Logos 三大模型深度推演...")
+        await self.send_group_text(group_id, "已收到牌谱检讨任务，正在抓取对局并调度 Mortal 核心引擎进行深度推演...")
         await self.review_tasks.put({"group_id": group_id, "user_id": user_id, "source": source_str})
 
     async def review_worker(self) -> None:
@@ -565,17 +573,58 @@ class Bot:
         from mortal_app.reviewer.engine import run_multi_model_review
         from mortal_app.reviewer.web.packager import generate_standalone_review_html
 
-        events, err, meta = load_replay_to_mjai(source_str)
+        # 1. 解析 model 参数
+        model_name = "distill_41b_infer"
+        official_tag_name = "Logos"
+        clean_source = source_str
+        import re
+
+        m_match = re.search(r'model=([a-zA-Z0-9_\-]+)', source_str, re.IGNORECASE)
+        if m_match:
+            user_model = m_match.group(1).lower()
+            clean_source = re.sub(r'model=[a-zA-Z0-9_\-]+', '', clean_source, flags=re.IGNORECASE).strip()
+            from mortal_app.manifest_manager import resolve_model_path
+            tag, pth, _ = resolve_model_path(user_model)
+            if pth:
+                model_name = pth.stem
+                official_tag_name = tag
+
+        # 2. 解析显式指定的 seat 参数 (例如 seat=2)
+        explicit_seat = None
+        s_match = re.search(r'seat=([0-3])', source_str, re.IGNORECASE)
+        if s_match:
+            explicit_seat = int(s_match.group(1))
+            clean_source = re.sub(r'seat=[0-3]', '', clean_source, flags=re.IGNORECASE).strip()
+
+        # 3. 提取链接中的 tw 参数 (例如 tw=1) 作为默认视角
+        tw_match = re.search(r'[?&]tw=([0-3])', clean_source, re.IGNORECASE)
+        tw_seat = int(tw_match.group(1)) if tw_match else None
+
+        events, err, meta = load_replay_to_mjai(clean_source)
         if err or not events:
-            asyncio.run(self.send_group_text(group_id, err or "牌谱获取失败"))
+            self._post_group_msg_sync(group_id, f"牌谱获取失败：{err or '无法识别的牌谱链接'}")
             return
 
-        target_seat = meta.get("target_seat", 0)
-        review_result = run_multi_model_review(events, target_seat=target_seat)
+        # 最终决定目标视角：显式 seat > 链接 tw > 默认 0
+        if explicit_seat is not None:
+            target_seat = explicit_seat
+        elif tw_seat is not None:
+            target_seat = tw_seat
+        else:
+            target_seat = meta.get("target_seat", 0)
+
+        seat_names = ["东", "南", "西", "北"]
+        seat_zh = seat_names[target_seat] if target_seat in (0, 1, 2, 3) else f"{target_seat}号位"
+
+        # 通过 GpuLease 互斥保护推断
+        from mortal_app.gpu_lease import guarded_gpu_context
+        with guarded_gpu_context(model_name, timeout=40.0):
+            review_result = run_multi_model_review(events, target_seat=target_seat, model_id=model_name)
 
         paipu_id = meta.get("id") or "replay"
         ts = int(time.time())
-        out_dir = Path(self.render_cfg["output_dir"]) / "reviews"
+        from mortal_app.reviewer.web_server import REVIEWS_DIR
+        out_dir = REVIEWS_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
         html_file = out_dir / f"review_{paipu_id}_{ts}.html"
 
@@ -587,18 +636,20 @@ class Bot:
         rating_pct = round(rev.get("rating", 1.0) * 100, 1)
         match_pct = round(total_match / total_rev * 100, 1) if total_rev else 100.0
 
+        from mortal_app.reviewer.web_server import generate_report_token
+        from tunnel_manager import get_public_base_url
+        report_token = generate_report_token(f"review_{paipu_id}_{ts}")
+        base_url = get_public_base_url()
+        web_link = f"{base_url}/reviews/{report_token}.html"
+
+        # 精简高效文本回复，不再发送离线 html 群文件
         summary_msg = (
-            f"【Killer Mortal 牌谱检讨完成】\n"
-            f"• 检讨视角：{target_seat} 号位 (共 {total_rev} 巡决策)\n"
-            f"• 一致率：{match_pct}% ({total_match}/{total_rev})\n"
-            f"• 评分：{rating_pct} 分\n"
-            f"正在发送 100% 官方代码级复刻 Killer Mortal 单文件离线 HTML 报告..."
+            f"【Mortal 牌谱检讨】\n"
+            f"视角：{seat_zh}家 ({target_seat}号位) | 共 {total_rev} 巡\n"
+            f"模型：{official_tag_name} | 评分：{rating_pct} | 吻合度：{match_pct}%\n"
+            f"🌐 在线复盘：{web_link}"
         )
-        # 在同步工作线程中通过标准 HTTP post 投递，杜绝跨线程 asyncio.run 关闭共享连接池
         self._post_group_msg_sync(group_id, summary_msg)
-        upload_ok = self._upload_group_file_sync(group_id, html_file, f"review_{paipu_id}.html")
-        if not upload_ok:
-            self._post_group_msg_sync(group_id, f"QQ群文件上传受限，报告已保存在本地服务器：\n{html_file.name}")
 
     def _post_group_msg_sync(self, group_id: int, text: str) -> None:
         try:
@@ -831,8 +882,24 @@ def _pid_alive(pid: int) -> bool:
 _bot_mutex_handle = None
 
 def _acquire_singleton() -> bool:
-    """单实例锁：使用 Windows 原生命名互斥体 (Win32 Named Mutex) 保证全局绝对唯一实例。"""
+    """双重单实例锁：Win32 命名互斥体 + 文件独占锁，确保全局唯一实例。"""
     global _bot_mutex_handle
+    # 1. 检查并清理孤儿残留进程
+    try:
+        import psutil
+        current_pid = os.getpid()
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            if proc.info['pid'] != current_pid and proc.info['name'] == 'python.exe':
+                cmd = " ".join(proc.info.get('cmdline') or [])
+                if 'bot.py' in cmd and 'daemon.py' not in cmd:
+                    log.warning("检测到残留的 bot 进程 (PID: %s)，正在强制终止以保证全局单例唯一性...", proc.info['pid'])
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+    except Exception as exc:
+        log.warning("清理残留 bot 进程失败: %s", exc)
+
     if os.name != 'nt':
         return True
     try:
@@ -846,11 +913,11 @@ def _acquire_singleton() -> bool:
             if _bot_mutex_handle:
                 kernel32.CloseHandle(_bot_mutex_handle)
                 _bot_mutex_handle = None
-            log.error("another bot core instance is already running (Win32 Mutex Active); exiting.")
+            log.error("检测到已有激活的 Bot 互斥体，当前实例退出。")
             return False
         return True
     except Exception as e:
-        log.warning("Win32 Mutex check failed: %s; allowing startup.", e)
+        log.warning("Win32 Mutex 异常: %s; 允许启动。", e)
         return True
 
 
@@ -917,6 +984,10 @@ def main() -> None:
                 log.warning("补发循环异常: %s", exc)
 
     loop.create_task(_flush_spooled_loop())
+
+    # 启动 Cloudflare Tunnel 外网公共直链服务
+    from tunnel_manager import ensure_tunnel_running
+    ensure_tunnel_running(50718)
 
     # 启动 OneBot WebSocket 客户端监听
     def run_ws():

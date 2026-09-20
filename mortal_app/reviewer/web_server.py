@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 log = logging.getLogger("reviewer.web_server")
 
-REVIEWS_DIR = Path(r"D:\tenhoulib\MortalSim-Bot\data\reviews").resolve()
+REVIEWS_DIR = Path(r"D:\tenhoulib\data\reviews").resolve()
 PORT = 50718
 SECRET_KEY = b"mortal_secure_review_secret_2026_salt"
 

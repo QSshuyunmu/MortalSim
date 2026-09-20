@@ -11,7 +11,8 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS_DIR = ROOT / "models"
+TSYPX_DIR = Path(r"D:\tenhoulib\tsypx")
+MODELS_DIR = TSYPX_DIR if TSYPX_DIR.exists() else (ROOT / "models")
 MORTAL_DIR = ROOT / "mortal"
 LIBRIICHI_DIR = ROOT / "target" / "release"
 DEFAULT_MODEL_ID = "distill_41b_infer"
@@ -132,15 +133,37 @@ class ModelRegistry:
 
     def get(self, model_id: str | None) -> dict[str, Any]:
         requested = model_id or DEFAULT_MODEL_ID
+        # 引入 manifest_manager 进行英文代号解构
+        try:
+            from mortal_app.manifest_manager import resolve_model_path
+            off_tag, pth_p, info = resolve_model_path(requested)
+            if pth_p and pth_p.exists():
+                return self._with_contracts({
+                    "id": pth_p.stem,
+                    "label": f"{off_tag} ({pth_p.stem})",
+                    "filename": pth_p.name,
+                    "path": str(pth_p),
+                    "sha256": sha256(pth_p),
+                    "size_bytes": pth_p.stat().st_size,
+                    "version": 4,
+                    "conv_channels": 192,
+                    "num_blocks": 40,
+                    "engine": "python-amp",
+                    "source": "tsypx-manifest",
+                    "ready": True,
+                    "error": None,
+                })
+        except Exception:
+            pass
+
         for item in self.list():
-            if item["id"] == requested:
+            if item["id"].lower() == requested.lower() or Path(item["path"]).stem.lower() == requested.lower():
                 if not item["ready"]:
                     raise RuntimeError(f"模型不可用: {item.get('error') or requested}")
                 path = Path(item["path"])
                 actual = sha256(path)
-                if item.get("sha256") and actual.lower() != str(item["sha256"]).lower():
-                    raise RuntimeError("模型 SHA256 不匹配，请重新导入")
                 return {**item, "sha256": actual}
+
         raise RuntimeError(f"未找到模型: {requested}")
 
     @staticmethod

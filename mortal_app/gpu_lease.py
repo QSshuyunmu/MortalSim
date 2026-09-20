@@ -85,13 +85,16 @@ class GpuLease:
     def release(self) -> None:
         if self.file_handle:
             try:
-                if sys.platform == "win32":
-                    import msvcrt
-                    self.file_handle.seek(0)
-                    msvcrt.locking(self.file_handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(self.file_handle.fileno(), fcntl.LOCK_UN)
+                try:
+                    if sys.platform == "win32":
+                        import msvcrt
+                        self.file_handle.seek(0)
+                        msvcrt.locking(self.file_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(self.file_handle.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
                 self.file_handle.close()
             except Exception as exc:
                 log.warning("释放 GPU 租约异常: %s", exc)
