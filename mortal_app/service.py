@@ -161,7 +161,8 @@ def normalize_candidate(value: Any) -> dict[str, Any]:
             c_id = f"chi:{''.join(chi_val)}{fu_str}"
         elif pon_val:
             fu_str = f">{fu_val}" if fu_val else ""
-            c_id = f"pon{fu_str}"
+            call_str = f":{value['call_tile']}" if value.get("call_tile") else ""
+            c_id = f"pon{call_str}{fu_str}"
         elif minkan_val:
             c_id = "daiminkan"
         else:
@@ -178,6 +179,7 @@ def normalize_candidate(value: Any) -> dict[str, Any]:
             "chi": chi_val,
             "pon": pon_val,
             "daiminkan": minkan_val,
+            "call_tile": value.get("call_tile"),
             "follow_up_discard": fu_val,
             "candidate": c_id,
         }
@@ -401,13 +403,10 @@ def _load_engine(
 
 
 def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
-    """Resolve public relative-seat inputs to libriichi's table seats.
-    
-    In table coordinates:
-    Seat 0 = 东家 (Dealer / 亲)
-    Seat 1 = 南家 (下家 / 子)
-    Seat 2 = 西家 (对家 / 子)
-    Seat 3 = 北家 (上家 / 子)
+    """Resolve relative scores to absolute engine player IDs.
+
+    The round determines the dealer ID. The bot translates current seat winds
+    to these IDs before calling the service; an omitted target means dealer.
     """
     if "round" not in request:
         oya = int(request.get("oya", 0))
@@ -415,7 +414,7 @@ def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
             "round": f"E{oya + 1}",
             "kyoku": 1,
             "bakaze": "E",
-            "oya": 0,
+            "oya": oya,
             "honba": int(request.get("honba", 0)),
             "kyotaku": int(request.get("kyotaku", 0)),
             "scores": [int(value) for value in request.get("absolute_scores", [25_000] * 4)],
@@ -428,12 +427,11 @@ def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
     round_number = int(round_id[1])
     kyoku = wind_index * 4 + round_number
 
-    # On table: Seat 0=East, Seat 1=South, Seat 2=West, Seat 3=North.
-    # Dealer of the round is: E1/S1 -> Seat 0, E2/S2 -> Seat 1, E3/S3 -> Seat 2, E4/S4 -> Seat 3.
+    # Initial player IDs rotate through the dealer position across the round.
     oya = (round_number - 1) % 4
 
     target_seat = request.get("target_seat")
-    effective_target = int(target_seat) if target_seat is not None else 0
+    effective_target = int(target_seat) if target_seat is not None else oya
 
     honba = int(request.get("honba", 0))
     kyotaku = int(request.get("kyotaku", 0))
@@ -450,8 +448,7 @@ def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
     if any(value < 0 or value % 100 for value in all_relative):
         raise ValueError("all scores must be non-negative multiples of 100")
     
-    # Map relative scores (self, shimo, toimen, kami) onto table seats (0=东, 1=南, 2=西, 3=北)
-    # self is sitting at effective_target!
+    # Map relative scores onto absolute engine IDs, starting at the target.
     scores = [0] * 4
     for offset, value in enumerate(all_relative):
         scores[(effective_target + offset) % 4] = value
@@ -460,12 +457,10 @@ def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
         "round": round_id,
         "kyoku": kyoku,
         "bakaze": round_id[0],
-        "round_number": round_number,
-        "oya": 0,
+        "oya": oya,
         "honba": honba,
         "kyotaku": kyotaku,
         "scores": scores,
-        "target_seat": effective_target,
         "relative_scores": {
             "self": values[0],
             "shimocha": values[1],
@@ -476,7 +471,12 @@ def resolve_simulation_context(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_inputs(request: dict[str, Any]):
+    # Reject impossible response worlds before loading native code or a model.
+    from .call_context import response_context, validate_native_response
+    reaction = response_context(request)
     _prepare_imports(int(request.get("rayon_threads", 20)))
+    if reaction is not None:
+        validate_native_response(request, reaction)
     from kyoku_sim_win import parse_hand
     complete_hand = parse_hand(request["hand"])
 
@@ -489,6 +489,28 @@ def _parse_inputs(request: dict[str, Any]):
         if len(tiles) != 1:
             raise ValueError(f"{label}必须是单张牌（解析得到 {len(tiles)} 张）: {value}")
         return tiles[0]
+
+    # 路由强校验：响应(吃/碰/杠/和牌/pass)必须 3n+1；打牌必须 3n+2（或旧版 13+first_tsumo）。
+    raw_discards_for_check = request["discards"]
+    if isinstance(raw_discards_for_check, str):
+        raw_discards_for_check = raw_discards_for_check.split(",")
+    _norm_check = [normalize_candidate(v) for v in raw_discards_for_check]
+    _is_response = any(
+        c.get("chi") or c.get("pon") or c.get("daiminkan") or c.get("pass") or c.get("ron") or c.get("tsumo")
+        for c in _norm_check
+    )
+    _n = len(complete_hand)
+    if _is_response:
+        if request.get("first_tsumo") is not None:
+            raise ValueError("副露/响应判断不能带 first_tsumo（那是摸牌后状态）")
+        if _n % 3 != 1:
+            raise ValueError(f"副露响应判断手牌必须为 3n+1 张（如 13 张），当前 {_n} 张")
+    else:
+        if request.get("first_tsumo") is None and _n % 3 != 2:
+            raise ValueError(
+                f"打牌判断手牌必须为 3n+2 张（如 14 张），当前 {_n} 张；"
+                f"若为副露判断请传 chi/pon/pass 候选。"
+            )
 
     legacy_first_tsumo = request.get("first_tsumo")
     if legacy_first_tsumo is None:
@@ -627,7 +649,7 @@ def _parse_inputs(request: dict[str, Any]):
                 for item in p_river:
                     opponent_rivers[p_idx].append(_parse_spec_item(item, f"对手 {p_idx} 舍牌"))
 
-    tau = float(request.get("tau", 1.0))
+    tau = float(request.get("tau", 0.1))
     if tau <= 0 or not math.isfinite(tau):
         raise ValueError(f"tau 必须为正数，当前为 {tau}")
     weighted = bool(request.get("weighted", False) or opponent_rivers is not None)
@@ -867,7 +889,11 @@ def _resolve_next_hanchan_state(
     if isinstance(agari_actors, bytes):
         agari_actors = list(agari_actors)
     oya_won = oya in agari_actors if agari_actors else (outcome == "self_win" and context.get("target_seat", oya) == oya)
-    dealer_tenpai = bool((metrics or {}).get("dealer_tenpai") if (metrics or {}).get("dealer_tenpai") is not None else (metrics or {}).get("final_tenpai", False))
+    dealer_tenpai = (metrics or {}).get("dealer_tenpai")
+    if dealer_tenpai is None:
+        # Legacy final_tenpai describes the TARGET, not necessarily the dealer.
+        dealer_tenpai = context.get("target_seat", oya) == oya and bool((metrics or {}).get("final_tenpai", False))
+    dealer_tenpai = bool(dealer_tenpai)
 
     renchan = oya_won or (outcome == "draw" and dealer_tenpai)
 
@@ -945,57 +971,37 @@ def _summarize_hanchan(
 ) -> dict[str, Any]:
     """Aggregate NAGA-style final-hanchan expectations from simulated rows."""
     rows = sorted(rows, key=_row_seed_key)
-    target_seat = int(target_seat if target_seat is not None else context.get("target_seat", 0))
+    target_seat = int(target_seat if target_seat is not None else context.get("target_seat", context.get("oya", 0)))
+    transition_context = {**context, "target_seat": target_seat}
 
     expected_ranks: list[float] = []
     rank_prob_sums = [0.0, 0.0, 0.0, 0.0]
     pt_rows = {name: [] for name in HANCHAN_PT_TABLES}
     mleague_rows: list[float] = []
 
-    round_id = str(context.get("round", "E1")).upper()
-    round_number = int(context.get("round_number", int(round_id[1]) if len(round_id) >= 2 and round_id[1].isdigit() else 1))
-
-    # In Tenhou Houou logs, dealer in round N is player (N - 1) % 4.
-    # On our table: Seat 0 is the current dealer (风=东).
-    # Seat P's current wind is P (0=东, 1=南, 2=西, 3=北).
-    # To map Table Seat P to Tenhou permanent Player K in round N:
-    # K = (P + round_number - 1) % 4
-    # The dealer (Table Seat 0) maps to Tenhou Player (round_number - 1) % 4 (the oya in round N!).
-    # Target Seat (Table Seat target_seat) maps to Tenhou Player (target_seat + round_number - 1) % 4.
+    # Runner scores, target, and dealer already use permanent player IDs.
+    # Rotating these again by the round number corrupts non-E1 continuations.
 
     for row in rows:
         result = row.get("result") or {}
         metrics = row.get("metrics") or {}
         if result.get("outcome") == "error" or result.get("error"):
             continue
-        state = _resolve_next_hanchan_state(context, result, metrics)
+        state = _resolve_next_hanchan_state(transition_context, result, metrics)
         if state is None:
             scores = result.get("final_scores")
             if not isinstance(scores, list) or len(scores) != 4:
                 continue
             probs = _final_rank_distribution([int(value) for value in scores], target_seat)
         else:
-            next_kyoku_num = state["kyoku_num"]
-            next_oya_tenhou = (next_kyoku_num - 1) % 4 if state["bakaze"] in ("E", "S", "W") else 0
-            
-            # Map next kyoku table scores back to Tenhou permanent player coordinates
-            table_scores = state["scores"]
-            tenhou_scores = [0] * 4
-            for t_seat in range(4):
-                # When oya in next kyoku is table seat (0 if renchan, 1 if dealer rotated):
-                k = (t_seat + round_number - 1) % 4
-                tenhou_scores[k] = table_scores[t_seat]
-            
-            tenhou_target_player = (target_seat + round_number - 1) % 4
-
             probs = model.predict_seat(
-                tenhou_scores,
+                state["scores"],
                 state["bakaze"],
                 state["kyoku_num"],
                 state["honba"],
                 state["kyotaku"],
-                next_oya_tenhou,
-                tenhou_target_player,
+                state["oya"],
+                target_seat,
             )
         probs = [float(value) for value in probs]
         expected_ranks.append(sum((rank + 1) * probs[rank] for rank in range(4)))
@@ -1006,10 +1012,28 @@ def _summarize_hanchan(
 
         # 官方 M-League PTEV: 终局素点期望 (以 30000 返点为基准) + 顺位马 (+50, +10, -10, -30)
         # 当前局点数变动后的即时积分
-        cur_target_score = float(table_scores[target_seat]) if state else float(scores[target_seat])
+        cur_target_score = float(result["final_scores"][target_seat])
         raw_pt = (cur_target_score - 30000.0) / 1000.0
         mleague_uma_val = sum(probs[rank] * MLEAGUE_UMA[rank] for rank in range(4))
-        mleague_rows.append(raw_pt + mleague_uma_val)
+
+        # 供托(立直棒)与本场归属：
+        #   - 自己和牌：拿走本局被消耗的供托 + 本场棒 (每本 300 点)
+        #   - 流局：留到下局，不计入本局 PTEV；但若半庄就此结束(南4终局流局)，
+        #     按 M-League 规则供托归一位，用预测的一位率加权计入。
+        #   - 他家和/自摸/放铳：目标拿不到，不加。
+        kyotaku_start = int(context.get("kyotaku", 0) or 0)
+        honba_now = int(context.get("honba", 0) or 0)
+        kyotaku_after = int(state.get("kyotaku", kyotaku_start)) if state else kyotaku_start
+        outcome_here, _ = _legacy_outcome(result, target_seat)
+        bonus_pt = 0.0
+        if outcome_here == "self_win":
+            consumed_kyotaku = max(0, kyotaku_start - kyotaku_after)
+            bonus_pt += float(consumed_kyotaku) + honba_now * 0.3
+        elif outcome_here == "draw" and state is None:
+            # 半庄结束时的流局：剩余供托归一位所有
+            bonus_pt += probs[0] * float(kyotaku_after)
+
+        mleague_rows.append(raw_pt + mleague_uma_val + bonus_pt)
 
     n = len(expected_ranks)
     rank_rates = [
@@ -1030,6 +1054,8 @@ def _summarize_hanchan(
             "rank_rates": rank_rates,
             "dan_pt_ev": dan_pt_ev,
             "mleague_pt_ev": mleague_pt_ev,
+            "coordinate_system": "absolute-player-ids-v2",
+            "continuation_method": "single_kyoku_then_rank_model",
         },
         "sample": {"games": n, "completed_games": n, "errors": 0},
     }
@@ -1045,7 +1071,7 @@ def _summarize(
     first_kan: bool = False,
     first_kyushu: bool = False,
     weighted: bool = False,
-    tau: float = 1.0,
+    tau: float = 0.1,
 ) -> dict[str, Any]:
     # The Rust runner returns completed games in completion order, not seed
     # order.  Cumulative stability and same-seed paired comparisons must use
@@ -1331,16 +1357,26 @@ def _merge_hanchan(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any
         name: _merge_mean(lm["dan_pt_ev"][name], rm["dan_pt_ev"][name])
         for name in HANCHAN_PT_TABLES
     }
+    m_left = lm.get("mleague_pt_ev") or left.get("mleague_pt_ev") or {"value": 0.0, "stddev": 0.0, "ci95": None, "n": 0, "sum": 0.0, "sum_sq": 0.0}
+    m_right = rm.get("mleague_pt_ev") or right.get("mleague_pt_ev") or {"value": 0.0, "stddev": 0.0, "ci95": None, "n": 0, "sum": 0.0, "sum_sq": 0.0}
+    mleague_pt_ev = _merge_mean(m_left, m_right)
+    for field in ("coordinate_system", "continuation_method"):
+        if lm.get(field) != rm.get(field):
+            raise ValueError(f"hanchan merge semantic mismatch: {field}")
     merge_state = {
         "expected_rank": expected_rank,
         "rank_rates": rank_rates,
         "dan_pt_ev": dan_pt_ev,
+        "mleague_pt_ev": mleague_pt_ev,
+        "coordinate_system": lm.get("coordinate_system"),
+        "continuation_method": lm.get("continuation_method"),
     }
     games = int(left.get("sample", {}).get("games", 0) or 0) + int(right.get("sample", {}).get("games", 0) or 0)
     return {
         "expected_rank": expected_rank,
         "rank_rates": rank_rates,
         "dan_pt_ev": dan_pt_ev,
+        "mleague_pt_ev": mleague_pt_ev,
         "merge_state": merge_state,
         "sample": {"games": games, "completed_games": games, "errors": 0},
     }
@@ -1373,7 +1409,7 @@ def merge_results(base: dict[str, Any], extra: dict[str, Any], operation_id: str
         raise ValueError("model SHA256 mismatch")
     base_hanchan = base.get("hanchan_model") or {}
     extra_hanchan = extra.get("hanchan_model") or {}
-    for field in ("model_id", "model_sha256", "feature_schema"):
+    for field in ("model_id", "model_sha256", "feature_schema", "coordinate_system", "continuation_method"):
         if base_hanchan.get(field) != extra_hanchan.get(field):
             raise ValueError(f"hanchan model identity mismatch: {field}")
     extension_config = extra.get("config") or {}
@@ -1669,6 +1705,8 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
             weighted=prefix_config["weighted"], tau=prefix_config["tau"],
         )
         candidate["candidate"] = action_id
+        if candidate["errors"] or not candidate["completed_games"]:
+            raise ValueError(f"候选{action_id}模拟失败：完成{candidate['completed_games']}局，错误{candidate['errors']}局；不发布收益或写入历史")
         candidate["hanchan"] = _summarize_hanchan(rows, context, hanchan_model, target_seat=effective_target)
         candidates.append(candidate)
         _emit(emit, "candidate_completed", summary={
@@ -1769,6 +1807,8 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
             "model_sha256": hanchan_model.model_sha256,
             "feature_schema": str(hanchan_model.manifest.get("feature_schema", "")),
             "pt_tables": deepcopy(HANCHAN_PT_TABLES),
+            "continuation_method": "single_kyoku_then_rank_model",
+            "coordinate_system": "absolute_player_ids_v2",
         },
         "runtime": deepcopy(getattr(engine, "runtime_metadata", {})),
         "elapsed": time.perf_counter() - started,
@@ -1789,6 +1829,7 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
         },
         "seed": seed,
         "resolved_context": context,
+        "config": {key: deepcopy(value) for key, value in request.items() if not key.startswith("_")},
         "resolved_input": {
             "main_haipai": [public_tile(tile) for tile in hand],
             "first_tsumo": public_tile(first_tsumo),

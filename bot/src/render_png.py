@@ -25,21 +25,6 @@ WEBP_TILE_MAP = {
     "e": "Ton.webp", "s": "Nan.webp", "w": "Shaa.webp", "n": "Pei.webp", "p": "Haku.svg", "f": "Hatsu.webp", "c": "Chun.webp",
 }
 
-YAKU_HAN = {
-    "riichi": 1, "double_riichi": 2, "ippatsu": 1, "menzen_tsumo": 1,
-    "tanyao": 1, "pinfu": 1, "iipeikou": 1,
-    "seat_wind_east": 1, "seat_wind_south": 1, "seat_wind_west": 1, "seat_wind_north": 1,
-    "round_wind_east": 1, "round_wind_south": 1, "round_wind_west": 1, "round_wind_north": 1,
-    "haku": 1, "hatsu": 1, "chun": 1,
-    "rinshan": 1, "chankan": 1, "haitei": 1, "houtei": 1,
-    "sanshoku_doujun": 2, "ikkitsuukan": 2, "chanta": 2, "chiitoitsu": 2,
-    "toitoi": 2, "sanankou": 2, "honroutou": 2, "sanshoku_doukou": 2,
-    "sankantsu": 2, "shousangen": 2, "honitsu": 3, "junchan": 3,
-    "ryanpeikou": 3, "chinitsu": 6,
-    "dora": 1, "ura_dora": 1, "aka_dora": 1,
-    "kokushi": 13, "suuankou": 13, "daisangen": 13, "tsuuiisou": 13,
-}
-
 YAKU_NAME_ZH = {
     "riichi": "立直", "double_riichi": "双立直", "ippatsu": "一发", "menzen_tsumo": "门清自摸",
     "tanyao": "断幺九", "pinfu": "平和", "iipeikou": "一平口",
@@ -233,22 +218,81 @@ def _lookup_model_qp(model_qp: dict[str, dict[str, float]], c: dict[str, Any]) -
     """按候选动作取出模型 Q / P。
 
     候选在报表里的身份由 candidate 决定 (普通切牌=牌名，立直="riichi:<牌>"，
-    副露/和牌等快照动作=专有 id)。只有真实切牌动作才有模型 Q，其余一律返回 None
-    由调用方渲染成 "—" —— 不能拿别的动作的数值顶替。
+    副露/和牌等快照动作=专有 id，如 chi:..., pon:..., pass)。
     """
     if not model_qp:
         return None
-    # 先解析动作，再查询数值：first_riichi + discard="2p" 不能先命中默听 2p。
+    # 严格排除非切牌/不可吃碰动作 (杠/自摸/荣和/大明杠等)
+    if c.get("first_kan") or c.get("kan") or c.get("first_kyushu") or c.get("first_tsumo") or c.get("first_ron") or c.get("daiminkan"):
+        return None
+    # 1. 检查普通切牌或立直切牌：first_riichi + discard="2p" 不能先命中默听 2p。
     label = _label_zh(c)
     label = label.replace("5mr", "0m").replace("5pr", "0p").replace("5sr", "0s")
     match = re.fullmatch(r"([0-9][mpsz])(R?)", label)
-    if not match:
-        return None
-    tile, reach = match.groups()
-    key = f"riichi:{tile}" if reach else tile
-    return model_qp.get(key)
+    if match:
+        tile, reach = match.groups()
+        key = f"riichi:{tile}" if reach else tile
+        return model_qp.get(key)
+    # 2. 检查副露或见逃 (chi:..., pon:..., pass)
+    cand_id = c.get("candidate")
+    if cand_id:
+        if cand_id in model_qp:
+            return model_qp[cand_id]
+        if ">" in cand_id:
+            base_cand = cand_id.split(">", 1)[0].strip()
+            if base_cand in model_qp:
+                return model_qp[base_cand]
+    if c.get("pass") or c.get("first_pass") or cand_id == "pass":
+        if "pass" in model_qp:
+            return model_qp["pass"]
+    return None
 
-def _label_zh(c: dict[str, Any]) -> str:
+def pass_mode(candidates: list[dict[str, Any]] | None) -> str:
+    """决定 pass 的口径：
+
+    - 同一决策点存在和牌分支（荣和/自摸）时，pass 表示放弃和牌 -> 见逃；
+    - 只是普通副露（吃/碰/杠）决策时，pass 表示不鸣牌 -> 跳过。
+    """
+    for c in candidates or []:
+        if (
+            c.get("first_ron")
+            or c.get("first_tsumo")
+            or c.get("ron")
+            or c.get("tsumo")
+            or str(c.get("candidate") or "") in ("ron", "tsumo")
+        ):
+            return "agari"
+    return "fuuro"
+
+
+def _format_chi_suffix(suffix: str) -> str:
+    """把 '1m2m' / '1m2m>9s' 规范成 '12m吃' / '12m吃>9s'。
+
+    赤五保持 0 标记（如 '05m吃'），多花色分别收尾（如 '12m34p' 极少见但保持可读）。
+    """
+    core, _, follow = suffix.partition(">")
+    tiles = [core[i:i + 2] for i in range(0, len(core), 2)]
+    parts: list[str] = []
+    cur_digits = ""
+    cur_suit = ""
+    for t in tiles:
+        if len(t) != 2:
+            continue
+        rank, suit = t[0], t[1]
+        if suit != cur_suit and cur_suit:
+            parts.append(f"{cur_digits}{cur_suit}")
+            cur_digits, cur_suit = "", ""
+        cur_suit = suit
+        cur_digits += rank
+    if cur_digits:
+        parts.append(f"{cur_digits}{cur_suit}")
+    label = "".join(parts) + "吃"
+    if follow:
+        label += f">{follow}"
+    return label
+
+
+def _label_zh(c: dict[str, Any], pass_kind: str = "agari") -> str:
     if c.get("first_kyushu") or c.get("candidate") == "kyushu:kk":
         return "九种九牌"
     if c.get("first_tsumo") or c.get("candidate") == "tsumo":
@@ -256,12 +300,12 @@ def _label_zh(c: dict[str, Any]) -> str:
     if c.get("first_ron") or c.get("candidate") == "ron":
         return "荣和"
     if c.get("first_pass") or c.get("candidate") == "pass":
-        return "见逃 (过)"
+        return "见逃 (过)" if pass_kind == "agari" else "跳过"
     cand_name = str(c.get("candidate") or c.get("discard") or "?")
     if cand_name.startswith("chi:"):
-        return f"吃 {cand_name[4:]}"
+        return _format_chi_suffix(cand_name[4:])
     if cand_name.startswith("pon"):
-        return f"碰 {cand_name[3:]}" if len(cand_name) > 3 else "碰"
+        return f"碰 {cand_name[3:].lstrip(':')}" if len(cand_name) > 3 else "碰"
     if cand_name == "daiminkan":
         return "大明杠"
     base = c.get("discard") or cand_name
@@ -277,11 +321,37 @@ def _label_zh(c: dict[str, Any]) -> str:
     return base
 
 
-def candidate_label(c: dict[str, Any]) -> str:
-    """Shared QQ/PNG action label; internal candidate IDs remain unchanged."""
+def candidate_label(c: dict[str, Any], peers: list[dict[str, Any]] | None = None) -> str:
+    """Shared QQ/PNG action label; internal candidate IDs remain unchanged.
+
+    peers 用于判断 pass 口径（见逃 vs 跳过）。当未提供 peers 时，默认按 agari 规则（见逃），
+    保持与上游默认 label 行为完全一致。
+    """
     if not isinstance(c, dict):
         return "?"
-    return _label_zh(c)
+    pass_kind = pass_mode(peers) if peers is not None else "agari"
+    return _label_zh(c, pass_kind)
+
+
+def _table_snapshot(result_data: dict[str, Any]) -> dict[str, Any]:
+    """Use the persisted request, never invent x=1/empty rivers for a call."""
+    config = dict(result_data.get("config") or {})
+    oya = int((result_data.get("resolved_context") or {}).get("oya", int(str(config.get("round", "E1"))[1]) - 1))
+    target = config.get("target_seat")
+    target = oya if target is None else int(target)
+    response = None
+    is_response = any(str(c.get("candidate", "")).split(":")[0] in ("chi", "pon", "pass", "ron", "daiminkan") for c in result_data.get("candidates", []))
+    if is_response:
+        # 仅在具备完整巡目和牌河时进行严格校验；缺少巡目/牌河的副露报告禁止盲目渲染
+        if not all(k in config for k in ("x", "opponent_rivers", "discards")):
+            if config.get("hand") and len(config.get("hand")) == 26:  # 13 张手牌响应
+                raise ValueError("副露报告缺少原始巡目/牌河/候选，不能渲染成第1巡空桌")
+        else:
+            from mortal_app.call_context import response_context
+            response = response_context(config)
+            if response is None:
+                raise ValueError("副露结果与请求决策类型不一致")
+    return {"config": config, "target_seat": target, "target_wind": (target - oya) % 4, "response": response}
 
 
 def render_png(
@@ -321,7 +391,8 @@ def render_png(
     f_ci95 = ImageFont.truetype(str(font_path), 10)
     f_foot = ImageFont.truetype(str(font_path), 10)
 
-    config = result_data.get("config", {})
+    snapshot = _table_snapshot(result_data)
+    config = snapshot["config"]
     round_str = str(config.get("round", "E1")).upper()
     round_zh = KYOKU_FULL_NAME_ZH.get(round_str, round_str)
     honba = config.get("honba", 0)
@@ -330,7 +401,8 @@ def render_png(
     cands = result_data.get("candidates", [])
     hand_str = config.get("hand", "")
     dora_indicator = config.get("dora", "")
-    target_seat = int(config.get("target_seat", 0) if config.get("target_seat") is not None else 0)
+    target_seat = snapshot["target_seat"]
+    target_wind = snapshot["target_wind"]
     x_turn = int(config.get("x", 1))
 
     scores_obj = config.get("scores", {})
@@ -358,7 +430,7 @@ def render_png(
     draw.text((24 + (104 - (b_bb[2] - b_bb[0])) // 2, 19), b_txt, fill=(255, 255, 255, 255), font=f_brand)
 
     draw.text((140, 16), "日麻决策推演分析报告", fill=t_cfg["text_white"], font=f_header_lg)
-    draw.text((140, 42), f"{round_zh} {honba}本场 | 巡目: 第 {x_turn} 巡 | 视角: {_seat_zh(target_seat)}家", fill=t_cfg["text_muted"], font=f_sub)
+    draw.text((140, 42), f"{round_zh} {honba}本场 | 巡目: 第 {x_turn} 巡 | 视角: {_seat_zh(target_wind)}家", fill=t_cfg["text_muted"], font=f_sub)
 
     rec_base, rec_keys = _rec_identities(recommended_tile)
 
@@ -378,7 +450,7 @@ def render_png(
     # 2. Left Side: Full-Scale Table & Rivers (四家牌桌态势与立体牌河)
     left_x, left_y, left_w, left_h = 24, 86, 380, 520
     draw.rounded_rectangle([left_x, left_y, left_x + left_w, left_y + left_h], radius=6, fill=t_cfg["panel_bg"], outline=t_cfg["panel_border"], width=1)
-    draw.text((left_x + 14, left_y + 10), "◆ 牌桌实时态势 · 牌河", fill=t_cfg["text_gold"], font=f_card_title)
+    draw.text((left_x + 14, left_y + 10), "◆ 牌桌条件局面 · 牌河", fill=t_cfg["text_gold"], font=f_card_title)
 
     mat_x, mat_y, mat_w, mat_h = left_x + 12, left_y + 32, 356, 476
     draw.rounded_rectangle([mat_x, mat_y, mat_x + mat_w, mat_y + mat_h], radius=4, fill=t_cfg["table_mat"], outline=t_cfg["table_frame"], width=2)
@@ -388,7 +460,7 @@ def render_png(
     cy = mat_y + (mat_h - ch) // 2
     draw.rounded_rectangle([cx, cy, cx + cw, cy + ch], radius=4, fill=t_cfg["center_box"], outline=t_cfg["table_frame"], width=1)
 
-    p2_seat_k = _seat_zh((target_seat + 2) % 4)
+    p2_seat_k = _seat_zh((target_wind + 2) % 4)
     p2_score_str = f"{p2_seat_k} {rel_scores[2]}"
     p2_bb = draw.textbbox((0, 0), p2_score_str, font=f_center_score)
     draw.text((cx + (cw - (p2_bb[2] - p2_bb[0])) // 2, cy + 6), p2_score_str, fill=t_cfg["text_muted"], font=f_center_score)
@@ -413,7 +485,7 @@ def render_png(
         draw.rectangle([kx, d_start_y, kx + dora_w, d_start_y + dora_h], fill=t_cfg["dora_back"], outline=(50, 15, 15, 255), width=1)
     draw.text((bx + (box_w - 60) // 2, by + 66), "宝牌指示牌", fill=t_cfg["text_muted"], font=f_foot)
 
-    p0_seat_k = _seat_zh(target_seat)
+    p0_seat_k = _seat_zh(target_wind)
     p0_score_str = f"{p0_seat_k} {rel_scores[0]}"
     p0_bb = draw.textbbox((0, 0), p0_score_str, font=f_center_score)
     draw.text((cx + (cw - (p0_bb[2] - p0_bb[0])) // 2, cy + ch - 18), p0_score_str, fill=t_cfg["rec_emerald"], font=f_center_score)
@@ -425,11 +497,11 @@ def render_png(
         d.text((0, 0), text, fill=color, font=f_center_score)
         return im.rotate(angle, expand=True)
 
-    p1_seat_k = _seat_zh((target_seat + 1) % 4)
+    p1_seat_k = _seat_zh((target_wind + 1) % 4)
     rot_p1 = _rotate_text(f"{p1_seat_k} {rel_scores[1]}", 90, t_cfg["text_muted"])
     img.paste(rot_p1, (cx + cw - 16, cy + (ch - rot_p1.height) // 2), rot_p1)
 
-    p3_seat_k = _seat_zh((target_seat + 3) % 4)
+    p3_seat_k = _seat_zh((target_wind + 3) % 4)
     rot_p3 = _rotate_text(f"{p3_seat_k} {rel_scores[3]}", 270, t_cfg["text_muted"])
     img.paste(rot_p3, (cx + 3, cy + (ch - rot_p3.height) // 2), rot_p3)
 
@@ -489,6 +561,10 @@ def render_png(
         t_img = _get_rendered_tile(t_val, rw_w, rw_h, t_cfg["tile_back"], asset_dir=asset_dir, is_tsumogiri=is_tsumo, rotate_angle=angle)
         img.paste(t_img, (shimo_start_x + row * (rw_w + 3), shimo_start_y - col * (rw_w + 3)), t_img)
 
+    if snapshot["response"]:
+        called = snapshot["response"]["tile"]
+        draw.text((left_x + 24, left_y + left_h - 34), f"上家打出 {called} · 待响应（未摸牌）", fill=t_cfg["text_gold"], font=f_sub)
+
     kami_start_x = cx - 10 - rw_h
     kami_start_y = cy + 16
     for i, item in enumerate(rel_rivers[3]):
@@ -496,7 +572,10 @@ def render_png(
         row, col = i // 6, i % 6
         angle = 0 if is_r else 270
         t_img = _get_rendered_tile(t_val, rw_w, rw_h, t_cfg["tile_back"], asset_dir=asset_dir, is_tsumogiri=is_tsumo, rotate_angle=angle)
-        img.paste(t_img, (kami_start_x - row * (rw_w + 3), kami_start_y + col * (rw_w + 3)), t_img)
+        pos = (kami_start_x - row * (rw_w + 3), kami_start_y + col * (rw_w + 3))
+        img.paste(t_img, pos, t_img)
+        if snapshot["response"] and i == len(rel_rivers[3]) - 1:
+            draw.rectangle([pos[0] - 2, pos[1] - 2, pos[0] + t_img.width + 1, pos[1] + t_img.height + 1], outline=t_cfg["text_gold"], width=2)
 
     # 3. Right Side: Unified Analytical Decision Suite with CI95 Precision
     right_x, right_y, right_w, right_h = 418, 86, W - 418 - 24, 520
@@ -512,8 +591,12 @@ def render_png(
 
     h1 = ["候选动作", "局收支 / 95% CI", "和牌率", "平均打点", "自摸率", "放铳率", "立直率", "副露率"]
     if model_qp:
-        # 只展示归一P；移除模型Q后，将宽度还给既有指标和概率列
-        h1 += ["归一P"]
+        # 副露动作有第二层决策：根动作 P -> 吃碰后切牌条件 P；纯切牌展示为归一P。
+        has_two_stage = any(
+            isinstance(qp, dict) and (qp.get("follow_up") or qp.get("reach_p"))
+            for qp in model_qp.values()
+        )
+        h1 += ["动作P → 后切P" if has_two_stage else "归一P"]
 
     max_pt = max([abs((c.get("value") or {}).get("point", {}).get("value") or 1) for c in cands] + [10000])
 
@@ -533,12 +616,17 @@ def render_png(
             if qp is None:
                 p_txt = "—"
             else:
-                reach_p = qp.get("reach_p")
-                if qp.get("riichi") and reach_p is not None:
-                    # 两级分解: P(宣告立直)→P(本牌 | 立直后)
-                    p_txt = f"{reach_p * 100:.1f}%→{qp['p'] * 100:.1f}%"
+                follow = qp.get("follow_up")
+                if follow and follow.get("p") is not None:
+                    mode = "模型" if follow.get("mode") == "model" else "指定"
+                    p_txt = f"{qp.get('p', 0.0) * 100:.1f}%→{follow.get('tile')} {follow['p'] * 100:.1f}%({mode})"
                 else:
-                    p_txt = f"{qp['p'] * 100:.1f}%"
+                    reach_p = qp.get("reach_p")
+                    if qp.get("riichi") and reach_p is not None:
+                        # 两级分解: P(宣告立直)→P(本牌 | 立直后)
+                        p_txt = f"{reach_p * 100:.1f}%→{qp['p'] * 100:.1f}%"
+                    else:
+                        p_txt = f"{qp['p'] * 100:.1f}%"
         return {
             "pt_obj": pt_obj,
             "stats": [
@@ -549,11 +637,19 @@ def render_png(
             "p_txt": p_txt,
         }
 
+    # 下方手牌栏位置（版式常量；溢出判断需要提前引用）
+    hand_bar_y = 625
+    hand_bar_h = 95
+
+    # 行高自适应：候选偏多（>4）时压缩行距，保证役种区还有空间；仍不足则触发溢出提醒。
+    row_h = 26 if len(cands) > 4 else 32
+
+    pass_kind = pass_mode(cands)
     rows1 = []
     content_w = [draw.textlength(t, font=f_tbl_head) for t in h1]
     bar_text_w = 0.0  # 局收支列文本（数值/CI 取宽者）最大宽度，迷你条紧跟其后
     for c in cands:
-        c_lbl = _label_zh(c)
+        c_lbl = _label_zh(c, pass_kind)
         is_rec = _is_rec(c, c_lbl)
         info = _row_stats(c)
         info["is_rec"] = is_rec
@@ -598,7 +694,7 @@ def render_png(
     for idx, info in enumerate(rows1):
         is_rec = info["is_rec"]
         row_bg = t_cfg["rec_row_bg"] if is_rec else (t_cfg["row_alt"] if idx % 2 == 1 else t_cfg["panel_bg"])
-        draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + 32], fill=row_bg)
+        draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + row_h], fill=row_bg)
 
         pt_val = info["pt_obj"].get("value")
 
@@ -641,8 +737,8 @@ def render_png(
                     p_txt = p_txt.replace(".0%", "%")
             draw.text((tx, cur_y + 8 if p_font is f_tbl_cell else cur_y + 10), p_txt, fill=t_cfg["rec_emerald"] if is_rec else t_cfg["text_white"], font=p_font)
 
-        draw.line([(p_inner_x, cur_y + 32), (p_inner_x + p_inner_w, cur_y + 32)], fill=(30, 40, 50, 255), width=1)
-        cur_y += 32
+        draw.line([(p_inner_x, cur_y + row_h), (p_inner_x + p_inner_w, cur_y + row_h)], fill=(30, 40, 50, 255), width=1)
+        cur_y += row_h
 
     # Section 2: Rank Probabilities with Stacked Bar Charts + PT EV with CI95
     cur_y += 12
@@ -661,10 +757,10 @@ def render_png(
     cur_y += 24
 
     for idx, c in enumerate(cands):
-        c_lbl = _label_zh(c)
+        c_lbl = _label_zh(c, pass_kind)
         is_rec = _is_rec(c, c_lbl)
         row_bg = t_cfg["rec_row_bg"] if is_rec else (t_cfg["row_alt"] if idx % 2 == 1 else t_cfg["panel_bg"])
-        draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + 32], fill=row_bg)
+        draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + row_h], fill=row_bg)
 
         han = c.get("hanchan") or {}
         rr = han.get("rank_rates", [])
@@ -719,168 +815,101 @@ def render_png(
         dist_str = f"{r1_val:.0f}% / {r2_val:.0f}% / {r3_val:.0f}% / {r4_val:.0f}%"
         draw.text((tx, cur_y + 8), dist_str, fill=t_cfg["text_muted"], font=f_foot)
 
-        draw.line([(p_inner_x, cur_y + 32), (p_inner_x + p_inner_w, cur_y + 32)], fill=(30, 40, 50, 255), width=1)
-        cur_y += 32
+        draw.line([(p_inner_x, cur_y + row_h), (p_inner_x + p_inner_w, cur_y + row_h)], fill=(30, 40, 50, 255), width=1)
+        cur_y += row_h
 
-    # Section 3: Distinct Yaku Breakdown (双层融合模型：统计学显著差异解释力优先 + 全局高频主力保底)
+    # Section 3: Distinct Yaku Breakdown
     cur_y += 12
     draw.text((p_inner_x, cur_y), "◆ 主要和牌役种构成 (Yaku Breakdown)", fill=t_cfg["text_gold"], font=f_card_title)
-    cur_y += 20
-
-    cand_info = []
-    all_yaku_names: set[str] = set()
-    for c in cands:
-        c_lbl = _label_zh(c)
-        y_list = c.get("yaku", [])
-        agari_r = c.get("agari_rate") or ((c.get("win") or {}).get("rate", {}).get("rate") if isinstance(c.get("win"), dict) else None) or 0.25
-        n_runs = c.get("runs") or (c.get("cumulative") or {}).get("runs") or 1000
-        n_wins = max(10, int(n_runs * agari_r))
-        c_map: dict[str, float] = {}
-        if isinstance(y_list, list):
-            for y_item in y_list:
-                y_id = y_item.get("id")
-                y_rate = y_item.get("rate", 0.0)
-                if y_id and isinstance(y_rate, (int, float)) and y_rate > 0.005:
-                    c_map[y_id] = y_rate
-                    all_yaku_names.add(y_id)
-        cand_info.append({"lbl": c_lbl, "map": c_map, "agari_r": agari_r, "n_wins": n_wins})
-
-    K = len(cands)
-    layer1_mainstream: list[dict] = []  # 层1：全局主力高频役种 (出现率 >= 15%)
-    layer2_distinctive: list[dict] = [] # 层2：统计学显著差异役种 (双比例两尾 Z 检验 alpha=0.05, Z >= 1.96 且 delta >= 3.5%)
-
-    for y_id in all_yaku_names:
-        rates = [ci["map"].get(y_id, 0.0) for ci in cand_info]
-        max_r = max(rates)
-        min_r = min(rates)
-        han = YAKU_HAN.get(y_id, 1)
-
-        max_z = 0.0
-        max_delta = 0.0
-        max_impact = 0.0
-
-        for i in range(K):
-            for j in range(i + 1, K):
-                p1, p2 = rates[i], rates[j]
-                n1, n2 = cand_info[i]["n_wins"], cand_info[j]["n_wins"]
-                delta = abs(p1 - p2)
-                if delta > max_delta:
-                    max_delta = delta
-
-                # 全局边际期望番数贡献: han * |agari_i * p1 - agari_j * p2|
-                exp_diff = han * abs(cand_info[i]["agari_r"] * p1 - cand_info[j]["agari_r"] * p2)
-                if exp_diff > max_impact:
-                    max_impact = exp_diff
-
-                p_pool = (p1 * n1 + p2 * n2) / (n1 + n2)
-                if 0 < p_pool < 1:
-                    se = math.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
-                    z = delta / se if se > 0 else 0
-                    if z > max_z:
-                        max_z = z
-
-        # 统计学显著性检验准入：alpha=0.05 对应 Z >= 1.96 且 绝对比例极差 >= 3.5%
-        is_stat_sig = (max_z >= 1.96 and max_delta >= 0.035)
-
-        if is_stat_sig:
-            # 解释力评分模型：番数杠杆与全局边际贡献 * 2.0 + 比例极差 + 频率底噪
-            score2 = max_impact * 2.0 + max_delta * 1.0 + (max_r * 0.1)
-            layer2_distinctive.append({
-                "id": y_id, "score": score2, "rates": rates, "max_r": max_r,
-                "max_delta": max_delta, "han": han, "is_sig": True,
-            })
-
-        # 层1高频门槛
-        if max_r >= 0.15:
-            score1 = max_r
-            layer1_mainstream.append({
-                "id": y_id, "score": score1, "rates": rates, "max_r": max_r,
-                "max_delta": max_delta, "han": han, "is_sig": is_stat_sig,
-            })
-
-    layer2_distinctive.sort(key=lambda x: -x["score"])
-    layer1_mainstream.sort(key=lambda x: -x["score"])
-
-    # 动态容量适配：根据候选个数动态决定表格最大行数 (2候选6行, 3候选5行, 4候选4行)
-    max_yaku_rows = 6 if K <= 2 else (5 if K == 3 else 4)
-
-    # 双层融合选取
-    selected_yaku: list[dict] = []
-    selected_ids: set[str] = set()
-
-    # 1. 优先选入最具解释力的显著差异役种 (最多占 max_yaku_rows - 1 个)
-    for item in layer2_distinctive:
-        if len(selected_yaku) >= max_yaku_rows - 1:
-            break
-        selected_yaku.append(item)
-        selected_ids.add(item["id"])
-
-    # 2. 至少补充 1 个全场最主力的最高频役种作为基准对照
-    for item in layer1_mainstream:
-        if len(selected_yaku) >= max_yaku_rows:
-            break
-        if item["id"] not in selected_ids:
-            selected_yaku.append(item)
-            selected_ids.add(item["id"])
-
-    # 3. 若仍未达到最大容量，依次从层2剩余役种及层1剩余役种补足
-    for item in layer2_distinctive + layer1_mainstream:
-        if len(selected_yaku) >= max_yaku_rows:
-            break
-        if item["id"] not in selected_ids:
-            selected_yaku.append(item)
-            selected_ids.add(item["id"])
-
-    if selected_yaku:
-        hy = ["役种名称"] + [ci["lbl"] for ci in cand_info]
-        wy = [100] + [75] * len(cand_info)
-        draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + 22], fill=(10, 14, 20, 255))
-        tx = p_inner_x + 6
-        for title, col_w in zip(hy, wy):
-            draw.text((tx, cur_y + 4), title, fill=t_cfg["text_muted"], font=f_tbl_head)
-            tx += col_w
-        cur_y += 22
-
-        for item in selected_yaku:
-            y_id = item["id"]
-            rates = item["rates"]
-            y_zh = YAKU_NAME_ZH.get(y_id, y_id)
-            row_txts = [y_zh] + [_fmt_rate(r) for r in rates]
-            tx = p_inner_x + 6
-            # 如果该役种存在显著分歧，名称标注强调色，让用户一眼看到何切路线差异
-            is_branch_sig = item.get("is_sig", False)
-            title_color = t_cfg["text_white"] if is_branch_sig else t_cfg["text_muted"]
-            for col_idx, (val_txt, col_w) in enumerate(zip(row_txts, wy)):
-                c_color = title_color if col_idx == 0 else t_cfg["text_muted"]
-                draw.text((tx, cur_y + 3), val_txt, fill=c_color, font=f_tbl_cell)
-                tx += col_w
-            cur_y += 18
-    else:
-        draw.text((p_inner_x + 6, cur_y + 4), "• 各候选和牌役种构成相近，无显著差异。", fill=t_cfg["text_muted"], font=f_tbl_cell)
-
-    # 4. Bottom Hand Bar with 3D Elevated Recommended Tile
-    hand_bar_y = 625
-    hand_bar_h = 95
-    draw.rounded_rectangle([24, hand_bar_y, W - 24, hand_bar_y + hand_bar_h], radius=6, fill=t_cfg["panel_bg"], outline=t_cfg["panel_border"], width=1)
-
-    draw.text((38, hand_bar_y + 18), f"◆ 自家手牌\n  ({_seat_zh(target_seat)}家)", fill=t_cfg["text_gold"], font=f_card_title)
-
-    # Decision convergence badge (🌟 明确优选 / ⚖️ 伯仲均可 / ⚠️ 尚不明确)
+    # 决策收敛徽标（置于役种构成标题右侧）
     dec_state = result_data.get("decision_state") or {}
-    badge_text = str(dec_state.get("badge") or "🌟 明确优选")
-    if "明确" in badge_text or "唯一" in badge_text:
+    badge_text = str(dec_state.get("badge") or "⚠️ 尚不明确")
+    if dec_state.get("status_code") in ("clear_best", "single_candidate"):
         badge_fill, badge_border, badge_fg = (20, 55, 35, 255), t_cfg["rec_emerald"], t_cfg["rec_emerald"]
     elif "伯仲" in badge_text or "均势" in badge_text:
         badge_fill, badge_border, badge_fg = (35, 40, 50, 255), (140, 160, 180, 255), (200, 215, 230, 255)
     else:
         badge_fill, badge_border, badge_fg = (55, 45, 15, 255), (220, 160, 40, 255), (245, 190, 60, 255)
-
-    badge_w = 100
-    badge_x = W - 24 - badge_w - 14
-    badge_y = hand_bar_y + 16
-    draw.rounded_rectangle([badge_x, badge_y, badge_x + badge_w, badge_y + 24], radius=3, fill=badge_fill, outline=badge_border, width=1)
+    badge_w = 104
+    badge_x = p_inner_x + p_inner_w - badge_w
+    badge_y = cur_y - 3
+    draw.rounded_rectangle([badge_x, badge_y, badge_x + badge_w, badge_y + 22], radius=3, fill=badge_fill, outline=badge_border, width=1)
     b_bb = draw.textbbox((0, 0), badge_text, font=f_tbl_head)
-    draw.text((badge_x + (badge_w - (b_bb[2] - b_bb[0])) // 2, badge_y + 4), badge_text, fill=badge_fg, font=f_tbl_head)
+    draw.text((badge_x + (badge_w - (b_bb[2] - b_bb[0])) // 2, badge_y + 3), badge_text, fill=badge_fg, font=f_tbl_head)
+    cur_y += 20
+
+    # 候选动作过多时，下方役种/明细可能无法完整显示，必须在图内显式提醒，不能静默截断。
+    overflow_warn = len(cands) > 4
+
+    candidate_yaku_maps: list[tuple[str, dict[str, float]]] = []
+    all_yaku_names: set[str] = set()
+    for c in cands:
+        c_lbl = _label_zh(c, pass_kind)
+        y_list = c.get("yaku", [])
+        c_map = {}
+        if isinstance(y_list, list):
+            for y_item in y_list:
+                y_id = y_item.get("id")
+                y_rate = y_item.get("rate", 0.0)
+                if y_id and isinstance(y_rate, (int, float)) and y_rate > 0.01:
+                    c_map[y_id] = y_rate
+                    all_yaku_names.add(y_id)
+        candidate_yaku_maps.append((c_lbl, c_map))
+
+    distinctive_yaku = []
+    for y_id in all_yaku_names:
+        rates = [c_map.get(y_id, 0.0) for _, c_map in candidate_yaku_maps]
+        max_r, min_r = max(rates), min(rates)
+        if (max_r - min_r >= 0.04) or (len(all_yaku_names) <= 6 and max_r >= 0.04):
+            distinctive_yaku.append((y_id, max_r, rates))
+
+    distinctive_yaku.sort(key=lambda x: -x[1])
+
+    yaku_rows_drawn = 0
+    if distinctive_yaku:
+        fits = (cur_y + 22 + 18 * min(len(distinctive_yaku), 3)) <= (hand_bar_y - 30)
+        if fits:
+            hy = ["役种名称"] + [lbl for lbl, _ in candidate_yaku_maps]
+            wy = [100] + [75] * len(candidate_yaku_maps)
+            draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + 22], fill=(10, 14, 20, 255))
+            tx = p_inner_x + 6
+            for title, col_w in zip(hy, wy):
+                draw.text((tx, cur_y + 4), title, fill=t_cfg["text_muted"], font=f_tbl_head)
+                tx += col_w
+            cur_y += 22
+
+            for y_id, _, rates in distinctive_yaku[:3]:
+                if cur_y + 18 > hand_bar_y - 30:
+                    overflow_warn = True
+                    break
+                y_zh = YAKU_NAME_ZH.get(y_id, y_id)
+                row_txts = [y_zh] + [_fmt_rate(r) for r in rates]
+                tx = p_inner_x + 6
+                for val_txt, col_w in zip(row_txts, wy):
+                    draw.text((tx, cur_y + 3), val_txt, fill=t_cfg["text_muted"], font=f_tbl_cell)
+                    tx += col_w
+                cur_y += 18
+                yaku_rows_drawn += 1
+            if len(distinctive_yaku) > 3:
+                overflow_warn = True
+        else:
+            overflow_warn = True
+            draw.text((p_inner_x + 6, cur_y + 4), "• 空间不足，役种明细已省略。", fill=t_cfg["text_muted"], font=f_tbl_cell)
+            cur_y += 18
+    else:
+        draw.text((p_inner_x + 6, cur_y + 4), "• 各候选和牌役种构成相近，无显著差异。", fill=t_cfg["text_muted"], font=f_tbl_cell)
+
+    if overflow_warn:
+        warn_txt = f"⚠ 候选动作 {len(cands)} 个偏多，部分内容可能未完整显示（建议减少候选或查看文字报告）"
+        wy2 = hand_bar_y - 26
+        draw.rounded_rectangle([p_inner_x, wy2 - 4, p_inner_x + p_inner_w, wy2 + 20], radius=3, fill=(55, 45, 15, 255), outline=(220, 160, 40, 255), width=1)
+        draw.text((p_inner_x + 8, wy2), warn_txt, fill=(245, 190, 60, 255), font=f_tbl_head)
+
+
+    # 4. Bottom Hand Bar with 3D Elevated Recommended Tile
+    draw.rounded_rectangle([24, hand_bar_y, W - 24, hand_bar_y + hand_bar_h], radius=6, fill=t_cfg["panel_bg"], outline=t_cfg["panel_border"], width=1)
+
+    draw.text((38, hand_bar_y + 18), f"◆ 自家手牌\n  ({_seat_zh(target_wind)}家)", fill=t_cfg["text_gold"], font=f_card_title)
 
     hand_tiles = [hand_str[i:i+2] for i in range(0, len(hand_str), 2)]
     tile_w, tile_h = 36, 50

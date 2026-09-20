@@ -114,9 +114,61 @@ def normalize_tile_text(text: str) -> str:
     return t
 
 
-def _kyushu_kinds(tiles: list[str]) -> int:
-    yaojiu = {"1m", "9m", "1p", "9p", "1s", "9s", "1z", "2z", "3z", "4z", "5z", "6z", "7z"}
-    return len(set(tiles) & yaojiu)
+def _infer_chi_consumed(hand_tiles: list[str], call_tile: str) -> list[list[str]]:
+    """Return the possible two in-hand tiles for a called suited tile.
+
+    A one-tile chi form such as ``chi:1m>9s`` names the tile discarded by
+    the opponent; the two tiles consumed from our hand are inferred here.
+    Red fives (``0m``/``0p``/``0s``) can satisfy a normal five in a sequence.
+    """
+    if len(call_tile) != 2 or call_tile[1] not in ("m", "p", "s"):
+        return []
+    try:
+        called_rank = 5 if call_tile[0] == "0" else int(call_tile[0])
+    except ValueError:
+        return []
+    if called_rank not in range(1, 10):
+        return []
+
+    from collections import Counter
+    import itertools
+
+    available = Counter(hand_tiles)
+    matches: list[list[str]] = []
+    for start in range(1, 8):
+        sequence = [start, start + 1, start + 2]
+        if called_rank not in sequence:
+            continue
+        # 每个待补牌位的可选牌：数字 5 同时存在普通五与赤五两种选择，
+        # 二者是不同的实体牌 -> 必须展开成独立候选（赤五多一番打点）。
+        options: list[list[str]] = []
+        valid = True
+        for rank in sequence:
+            if rank == called_rank:
+                continue
+            normal = f"{rank}{call_tile[1]}"
+            red = f"0{call_tile[1]}"
+            choices: list[str] = []
+            if available[normal] > 0:
+                choices.append(normal)
+            if rank == 5 and available[red] > 0:
+                choices.append(red)
+            if not choices:
+                valid = False
+                break
+            options.append(choices)
+        if not valid:
+            continue
+        for combo in itertools.product(*options):
+            consumed = list(combo)
+            need = Counter(consumed)
+            # 同一张实体牌不能被同时用两次（例如只剩一张 5m 时不能用两次 5m）
+            if any(need[tile] > available[tile] for tile in need):
+                continue
+            if consumed not in matches:
+                matches.append(consumed)
+        continue
+    return matches
 
 
 def _parse_river_token(token: str) -> tuple[str, bool, bool, dict[str, Any] | None] | None:
@@ -271,12 +323,38 @@ def _generate_default_rivers(
     partial_target_past: list[tuple[str, bool, bool]] | None = None,
     partial_opp_rivers: list[list[tuple[str, bool, bool]]] | None = None,
 ) -> tuple[list[tuple[str, bool, bool]], list[list[tuple[str, bool, bool]]]]:
-    """当巡目 x >= 2 且用户未提供牌河时，自动生成四家物理合法、无冲突且符合牌理的牌河：
-       1. 严格按 字牌 -> 幺九 -> 28 -> 37 -> 456 优先级出牌；
-       2. 严禁打出手牌以及手牌附近的牌（±1 邻张/进张/搭子）；
-       3. 首巡四家各打不同牌，绝对避免触发四风连打中途流局；
-       4. 若指定了副露目标牌 call_target_tile，前驱出牌者在当前巡目的最后一打必须为该牌。
+    """当巡目 x >= 2 且用户未提供牌河时，自动生成四家物理合法、无冲突且符合牌理的牌河。
+
+    抽样规则（按用户口径）：
+      1. 先剔除自己手牌及周边相关联牌（±1 邻张/进张），手中字牌绝对不出现；
+      2. 权重分层：字牌与无关联幺九 = 1.0，28 数牌 = 1/5，37 = 1/25，456 = 1/125；
+      3. 用确定性 RNG（同一局面同一牌河，便于复盘），避免“每次都切同一张”的死板牌河；
+      4. 第一巡四家不打相同牌，避免四风连打；若指定副露目标牌，则目标玩家的上家在
+         决策巡的上一舍必为该牌（保持响应时点因果正确）。
     """
+    import hashlib
+    import random
+
+    seed_material = "|".join(
+        sorted(hand_tiles)
+        + [f"oya{oya}", f"seat{target_seat}", f"x{x}", f"call{call_target_tile or ''}"]
+    )
+    rng = random.Random(int.from_bytes(hashlib.sha256(seed_material.encode()).digest()[:8], "big"))
+
+    def _tile_weight(t: str) -> float:
+        if t in ("0m", "5mr"): t = "5m"
+        elif t in ("0p", "5pr"): t = "5p"
+        elif t in ("0s", "5sr"): t = "5s"
+        if t.endswith("z"):
+            return 1.0
+        n = int(t[0])
+        if n in (1, 9):
+            return 1.0
+        if n in (2, 8):
+            return 0.2
+        if n in (3, 7):
+            return 0.04
+        return 0.008
     forbidden = set()
     for t in hand_tiles:
         if t in ("0m", "5mr"):
@@ -339,7 +417,6 @@ def _generate_default_rivers(
     def pick_tile_for_player(p_idx: int, turn_idx: int, used_this_turn: set[str]) -> str:
         # 该玩家上一巡打出的牌（严禁连续手切同一张牌）
         last_discard = rivers[p_idx][-1][0] if rivers[p_idx] else None
-        p_history = player_discard_history[p_idx]
 
         def can_pick(candidate: str) -> bool:
             if tile_used_counts.get(candidate, 0) >= 4:
@@ -350,58 +427,43 @@ def _generate_default_rivers(
                 return False
             return True
 
-        # 打分原则：
-        # 1. 优先从没打过的牌中选；
-        # 2. 其次选打过次数最少的牌；
-        # 3. 距上次打出该牌的巡目间隔越长越好（避免来回交替同两张牌）
-        # 4. 遵守 TILES_BY_PRIORITY 的字牌->幺九->中张顺序
-        def penalty_score(candidate: str) -> tuple[int, int, int]:
-            in_turn = 1 if candidate in used_this_turn else 0
-            times_discarded = p_history.count(candidate)
-            # 最近一次打出的索引越近，recency 惩罚越大
-            last_idx = -1
-            for idx in range(len(p_history) - 1, -1, -1):
-                if p_history[idx] == candidate:
-                    last_idx = idx
-                    break
-            recency = (len(p_history) - last_idx) if last_idx >= 0 else 999
-            # 排序元组：(本巡是否出现, 该家打过该牌的次数, -间隔巡数)
-            return (in_turn, times_discarded, -recency)
+        def weighted_choice(cands: list[str]) -> str:
+            weights = [_tile_weight(c) for c in cands]
+            return rng.choices(cands, weights=weights, k=1)[0]
 
         valid_candidates = [t for t in allowed_pool if can_pick(t)]
         if valid_candidates:
-            # 稳定排序：优先度高的牌池顺序由 Python 保证稳定性
-            best_tile = min(valid_candidates, key=penalty_score)
+            best_tile = weighted_choice(valid_candidates)
             tile_used_counts[best_tile] = tile_used_counts.get(best_tile, 0) + 1
             used_this_turn.add(best_tile)
-            p_history.append(best_tile)
+            player_discard_history[p_idx].append(best_tile)
             return best_tile
 
         # 候选不足时，从全局合法牌池补充
         valid_fallback = [t for t in TILES_BY_PRIORITY if t not in hand_tiles and can_pick(t)]
         if valid_fallback:
-            best_tile = min(valid_fallback, key=penalty_score)
+            best_tile = weighted_choice(valid_fallback)
             tile_used_counts[best_tile] = tile_used_counts.get(best_tile, 0) + 1
             used_this_turn.add(best_tile)
-            p_history.append(best_tile)
+            player_discard_history[p_idx].append(best_tile)
             return best_tile
 
         # 终极保底：未满 4 张且非上一打
-        for t in TILES_BY_PRIORITY:
-            if tile_used_counts.get(t, 0) < 4 and (last_discard is None or t != last_discard):
-                tile_used_counts[t] = tile_used_counts.get(t, 0) + 1
-                used_this_turn.add(t)
-                p_history.append(t)
-                return t
+        final_pool = [t for t in TILES_BY_PRIORITY if tile_used_counts.get(t, 0) < 4 and (last_discard is None or t != last_discard)]
+        if final_pool:
+            picked = weighted_choice(final_pool)
+            tile_used_counts[picked] = tile_used_counts.get(picked, 0) + 1
+            used_this_turn.add(picked)
+            player_discard_history[p_idx].append(picked)
+            return picked
 
         fallback = "2z" if last_discard == "1z" else "1z"
         tile_used_counts[fallback] = tile_used_counts.get(fallback, 0) + 1
         used_this_turn.add(fallback)
-        p_history.append(fallback)
+        player_discard_history[p_idx].append(fallback)
         return fallback
 
     pos_target = (target_seat + 4 - oya) % 4
-    preceding_player = (target_seat + 3) % 4
 
     for r in range(1, x + 1):
         used_this_turn: set[str] = set()
@@ -420,8 +482,11 @@ def _generate_default_rivers(
                 used_this_turn.add(norm_t)
                 continue
 
-            # 若此切是目标前驱在目标反应点前的最后一打，且指定了碰/吃目标牌：
-            if call_target_tile and r == x and p == preceding_player:
+            # 吃/碰目标牌必须落在目标玩家真正能响应的上一张舍牌上。
+            # 目标玩家若是本巡第一家，则该牌来自上一巡末家；否则来自本巡目标玩家前一家。
+            call_round = x - 1 if pos_target == 0 else x
+            call_player = (oya + 3) % 4 if pos_target == 0 else (oya + pos_target - 1) % 4
+            if call_target_tile and r == call_round and p == call_player:
                 tile = call_target_tile
                 tile_used_counts[tile] = tile_used_counts.get(tile, 0) + 1
                 used_this_turn.add(tile)
@@ -468,9 +533,9 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
             target_seat_val = SEAT_MAP[s_tok]
         rest = rest[:seat_m.start()] + " " + rest[seat_m.end():]
 
-    # 3. 提取温度 tau
-    tau_val = 1.0
-    tau_m = re.search(r"(?i)(?:^|(?<=[\s,;]))(?:tau|温度)[:：=]?(\d+(?:\.\d+)?)\b", rest)
+    # 3. 提取温度 tau / T (默认 0.1)
+    tau_val = 0.1
+    tau_m = re.search(r"(?i)(?:^|(?<=[\s,;]))(?:tau|温度|t)[:：=]?(\d+(?:\.\d+)?)\b", rest)
     if tau_m:
         tau_val = float(tau_m.group(1))
         rest = rest[:tau_m.start()] + " " + rest[tau_m.end():]
@@ -532,7 +597,7 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         rest = rest[:river_m.start()] + " " + rest[river_m.end():]
 
     # 7. 提取候选 c... (支持 c=... 或 ctsumo,...)
-    cand_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[cC][:：=]?([a-zA-Z0-9mpszkrKR>:\-_,，、\u4e00-\u9fa5]+?)(?=\s+[pPdDeEwWsSxX]|\s+\d+\b|\s*$)', rest)
+    cand_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[cC][:：=]?([a-zA-Z0-9mpszkrKR>:\-_,，、\(\)（）@\u4e00-\u9fa5]+?)(?=\s+[pPdDeEwWsSxX]|\s+\d+\b|\s*$)', rest)
     cand_raw = None
     if cand_m:
         cand_raw = cand_m.group(1).strip()
@@ -673,21 +738,95 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
                     return None, f"九種九牌（kk）不合法：手牌只有 {kinds} 种幺九牌（需要 9 种及以上）。"
                 candidates.append({"tile": "kk", "riichi": False, "kan": False, "kyushu": True})
                 continue
-            if part.startswith("chi:") or part.startswith("吃:"):
-                sub = part.split(":", 1)[1].strip()
+            if re.match(r'(?i)^(?:chi|吃)[:：]?', part):
+                # 支持格式：
+                # 1. 单目标牌（自动展开或推导）：chi:4m>9s / chi1m>9s / 吃4m>9s
+                # 2. 复合指定（搭子+目标）：chi:23m(4m)>9s / chi:23m@4m>9s / chi4m:23m>9s
+                # 3. 显式手牌搭子：chi:23m>9s / chi:35m>9s（嵌张自动推导中间牌）
+                m_chi = re.match(r'(?i)^(?:chi|吃)[:：]?(.*)$', part)
+                sub = (m_chi.group(1) if m_chi else "").strip()
                 fu_tile = None
                 if ">" in sub:
                     c_part, fu_part = sub.split(">", 1)
                     fu_norm = normalize_tile_text(fu_part)
-                    if len(fu_norm) == 2:
-                        fu_tile = fu_norm
+                    if len(fu_norm) != 2:
+                        return None, f"吃牌后切牌格式错误：{fu_part}"
+                    fu_tile = fu_norm
                     sub = c_part.strip()
+
+                call_tile = None
+                # 提取 (4m) 或 @4m
+                m_call = re.search(r'[\(@\[（]([0-9mpsz]{2})[\)\]）]|@([0-9mpsz]{2})', sub)
+                if m_call:
+                    raw_ct = m_call.group(1) or m_call.group(2)
+                    norm_ct = normalize_tile_text(raw_ct)
+                    if len(norm_ct) == 2:
+                        call_tile = norm_ct
+                    sub = sub[:m_call.start()] + sub[m_call.end():]
+                    sub = sub.strip()
+
+                # 提取前缀被吃牌 4m:23m
+                m_pre = re.match(r'^([0-9mpsz]{2})[:：](.*)$', sub)
+                if m_pre:
+                    norm_ct = normalize_tile_text(m_pre.group(1))
+                    if len(norm_ct) == 2:
+                        call_tile = norm_ct
+                    sub = m_pre.group(2).strip()
+
                 consumed_norm = normalize_tile_text(sub)
                 c_tiles = [consumed_norm[i:i+2] for i in range(0, len(consumed_norm), 2)]
-                if len(c_tiles) != 2:
-                    return None, f"吃牌候选格式错误：{part}，例：chi:45m>6p 或 chi:4m5m"
-                candidates.append({"tile": "chi", "riichi": False, "kan": False, "kyushu": False, "chi": c_tiles, "follow_up_discard": fu_tile})
-                continue
+
+                if len(c_tiles) == 1:
+                    # 单张目标牌：从手牌中推导所有可能组合
+                    target_t = c_tiles[0]
+                    matches = _infer_chi_consumed(hand_tiles, target_t)
+                    if not matches:
+                        return None, f"吃牌错误：手牌中无法用两张牌吃【{target_t}】（当前手牌：{''.join(hand_tiles)}）"
+                    for m in matches:
+                        chi_cand_name = f"chi:{''.join(m)}"
+                        if fu_tile:
+                            chi_cand_name += f">{fu_tile}"
+                        candidates.append({
+                            "tile": "chi",
+                            "riichi": False,
+                            "kan": False,
+                            "kyushu": False,
+                            "chi": m,
+                            "call_tile": target_t,
+                            "follow_up_discard": fu_tile,
+                            "candidate": chi_cand_name,
+                        })
+                    continue
+
+                if len(c_tiles) == 2:
+                    # 若未显式指定目标牌，且两张牌为同花色嵌张（如 3m 与 5m），自动推导中间被吃牌
+                    if not call_tile and c_tiles[0][1] == c_tiles[1][1] and c_tiles[0][1] in ("m", "p", "s"):
+                        try:
+                            r1 = 5 if c_tiles[0][0] == "0" else int(c_tiles[0][0])
+                            r2 = 5 if c_tiles[1][0] == "0" else int(c_tiles[1][0])
+                            if abs(r1 - r2) == 2:
+                                mid_rank = (r1 + r2) // 2
+                                call_tile = f"{mid_rank}{c_tiles[0][1]}"
+                        except Exception:
+                            pass
+
+                    chi_candidate = f"chi:{''.join(c_tiles)}"
+                    if fu_tile:
+                        chi_candidate += f">{fu_tile}"
+                    candidates.append({
+                        "tile": "chi",
+                        "riichi": False,
+                        "kan": False,
+                        "kyushu": False,
+                        "chi": c_tiles,
+                        "call_tile": call_tile,
+                        "follow_up_discard": fu_tile,
+                        "candidate": chi_candidate,
+                    })
+                    continue
+
+                return None, f"吃牌候选格式错误：{part}，例：chi:4m>9s、chi:35m>9s 或 chi:23m(4m)>9s"
+
             if part.startswith("pon") or part.startswith("碰"):
                 # 支持：
                 # 1. 显式指定碰牌：c=pon:5z>2p / c=碰5z>2p / c=pon5z>2p / c=pon:8m>2p
@@ -698,8 +837,9 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
                     main_p, fu_p = part.split(">", 1)
                     call_part = main_p.strip()
                     fu_norm = normalize_tile_text(fu_p.strip())
-                    if len(fu_norm) == 2:
-                        fu_tile = fu_norm
+                    if len(fu_norm) != 2:
+                        return None, f"碰牌后切牌格式错误：{fu_p}"
+                    fu_tile = fu_norm
 
                 # 提取碰的目标牌
                 pon_target = None
@@ -736,8 +876,12 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
                 candidates.append(cand_dict)
                 continue
             if part in ("daiminkan", "minkan", "大明杠", "明杠"):
-                candidates.append({"tile": "daiminkan", "riichi": False, "kan": False, "kyushu": False, "daiminkan": True})
-                continue
+                # 大明杠不模拟：杠后需岭上摸牌并再打一张，无法替用户假造这条支路，
+                # 因此明确拒绝，而不是生成不可信的期望。
+                return None, (
+                    "大明杠暂不模拟：杠后需要岭上摸牌并再打一张，无法替你假造这条支路。"
+                    "请改为比较 吃/碰/跳过（或碰后打牌）等候选。"
+                )
 
             is_riichi = False
             is_kan = False
@@ -783,6 +927,22 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
     if not candidates:
         return None, "没有识别到候选。"
 
+    # 严格规则校验 3: 副露判断只能在 3n+1（未摸牌，等待响应）输入，
+    # 切牌判断只能在 3n+2（已摸牌，等待打牌）输入。禁止 13 张走打牌路径。
+    n_hand = len(hand_tiles)
+    is_response = any(c.get("chi") or c.get("pon") or c.get("pass") or c.get("ron") or c.get("daiminkan") for c in candidates)
+    if is_response and n_hand % 3 != 1:
+        return None, (
+            f"副露(吃/碰/大明杠/和牌/见逃)判断的手牌必须是 3n+1 张（未摸牌状态，如 13 张），"
+            f"当前 {n_hand} 张属于 3n+2 张（已摸牌状态），请改用打牌判断或去掉一张手牌。"
+        )
+    if not is_response and n_hand % 3 != 2:
+        return None, (
+            f"打牌判断的手牌必须是 3n+2 张（摸牌后状态，如 14 张），"
+            f"当前 {n_hand} 张属于 3n+1 张（未摸牌状态）。"
+            f"若要做副露判断，请在候选里写 c=chi:3m / pon:3m / pass 等响应动作。"
+        )
+
     target_past = None
     opp_rivers = None
     prefix_melds = []
@@ -792,15 +952,54 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
             call_tile = cand["call_tile"]
             break
 
+    # CLI seat=东南西北 names CURRENT seat winds, not initial player IDs.
+    # Generate in wind coordinates (East is always dealer); rotate exactly once
+    # at the API boundary below.
+    effective_oya = 0
+    round_oya = (int(round_raw[1]) - 1) % 4
+
+    if any(c.get("chi") or c.get("pon") or c.get("pass") or c.get("ron") or c.get("daiminkan") for c in candidates):
+        if x_val == 1 and effective_target_seat == 0:
+            return None, "东家(庄家)第1巡尚无上家弃牌，不能吃/碰/过；请使用真实响应时点（如 x=2）"
+        # All candidates describe ONE discard. A consumed pair can constrain the
+        # target, but an ambiguous pair must not silently choose another world.
+        possible = None
+        for c in candidates:
+            choices = None
+            if c.get("call_tile"):
+                choices = {c["call_tile"]}
+            elif c.get("chi"):
+                choices = {f"{n}{s}" for s in "mps" for n in range(1, 10)
+                           if c["chi"] in _infer_chi_consumed(c["chi"], f"{n}{s}")}
+            if choices is not None:
+                possible = choices if possible is None else possible & choices
+        if river_raw:
+            _, explicit_rivers, _, error = _parse_river_spec(river_raw, effective_target_seat, x_val, 0)
+            if error:
+                return None, error
+            kami = (effective_target_seat + 3) % 4
+            expected = x_val - 1 if effective_target_seat == 0 else x_val
+            if explicit_rivers and len(explicit_rivers[kami]) == expected:
+                river_target = {explicit_rivers[kami][-1][0]}
+                possible = river_target if possible is None else possible & river_target
+        if not possible:
+            return None, "副露候选与牌河必须指向同一张上家弃牌；请明确目标牌"
+        if len(possible) != 1:
+            return None, "吃牌搭子对应多个目标，请写 chi:23m(4m) 或提供上家最后弃牌"
+        call_tile = next(iter(possible))
+        for c in candidates:
+            if c.get("chi") or c.get("pon") or c.get("daiminkan"):
+                c["call_tile"] = call_tile
+
     if river_raw:
-        parsed_target_past, parsed_opp_rivers, prefix_melds, river_err = _parse_river_spec(river_raw, effective_target_seat, x_val, 0)
+        parsed_target_past, parsed_opp_rivers, prefix_melds, river_err = _parse_river_spec(river_raw, effective_target_seat, x_val, effective_oya)
         if river_err:
             return None, river_err
         # 增量自动补齐其余未指定或张数不足的玩家牌河
         target_past, opp_rivers = _generate_default_rivers(
             hand_tiles,
             effective_target_seat,
-            0,
+            effective_oya,
             x_val,
             call_target_tile=call_tile,
             partial_target_past=parsed_target_past,
@@ -810,7 +1009,7 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         target_past, opp_rivers = _generate_default_rivers(
             hand_tiles,
             effective_target_seat,
-            0,
+            effective_oya,
             x_val,
             call_target_tile=call_tile,
         )
@@ -851,6 +1050,31 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
                 f'自家历史舍牌应为 {max(0, x_val - 1)} 张（摸牌决策）或 {x_val} 张（切牌后反应决策），'
                 f'当前输入了 {tp_len} 张。'
             )
+    # Absolute engine seats: round dealer + current seat wind. Rivers, hand,
+    # scores and model evaluation must agree on this single conversion.
+    request["target_seat"] = (round_oya + effective_target_seat) % 4
+    if opp_rivers is not None:
+        absolute_rivers = [[], [], [], []]
+        for wind, river in enumerate(opp_rivers):
+            absolute_rivers[(round_oya + wind) % 4] = river
+        request["opponent_rivers"] = absolute_rivers
+    for meld in prefix_melds:
+        for key in ("actor", "target"):
+            if meld.get(key) is not None:
+                meld[key] = (round_oya + meld[key]) % 4
+
+    # Pure structural validation also runs at the service boundary, independently
+    # of the bot. Keep standalone bot/src imports working outside the repo cwd.
+    import sys
+    from pathlib import Path
+    root = str(Path(__file__).resolve().parents[2])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from mortal_app.call_context import response_context
+    try:
+        response_context(request)
+    except ValueError as exc:
+        return None, str(exc)
     return request, None
 
 
