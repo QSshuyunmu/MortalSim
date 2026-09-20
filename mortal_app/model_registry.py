@@ -17,7 +17,7 @@ MORTAL_DIR = ROOT / "mortal"
 LIBRIICHI_DIR = ROOT / "target" / "release"
 DEFAULT_MODEL_ID = "distill_41b_infer"
 PATH_41B = MODELS_DIR / "distill_41b_infer.pth"
-PATH_NOVA = MODELS_DIR / "distill_nova.pth"
+PATH_NOVA = MODELS_DIR / "distill_nova_v2.pth"
 PATH_AEGIS = MODELS_DIR / "Bin_0910.pth"
 MAX_MODEL_BYTES = 2 * 1024 * 1024 * 1024
 
