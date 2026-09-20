@@ -127,14 +127,22 @@ def heartbeat_age() -> float:
 
 
 def bot_is_healthy() -> bool:
-    """进程存在且心跳新鲜才算健康，避免假死进程长期占用单例。"""
+    """进程存在且心跳新鲜才算健康，若发现多个实例自动保留最新一个、清理多余残留。"""
     pids = find_bot_processes()
     if not pids:
         return False
+
+    # 若检测到多个实例残留，强制保留最后一个（最新），杀掉历史僵尸进程
+    if len(pids) > 1:
+        log(f"检测到多个 bot.py 实例存在 ({pids})，正在执行全局单例收拢...")
+        for old_pid in pids[:-1]:
+            kill_pid(old_pid)
+        pids = [pids[-1]]
+
     age = heartbeat_age()
     if age > HEARTBEAT_TIMEOUT:
         if time.time() - _bot_spawned_at < BOT_START_GRACE:
-            return True  # 刚拉起，允许心跳尚未落盘
+            return True
         log(f"bot.py heartbeat stale ({age:.0f}s > {HEARTBEAT_TIMEOUT:.0f}s); treating as hung: {pids}")
         for pid in pids:
             kill_pid(pid)
