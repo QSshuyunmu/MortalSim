@@ -74,6 +74,88 @@ def get_cached_engine(model_id: str = DEFAULT_MODEL_ID) -> Any:
     return _CACHED_ENGINES[model_id]
 
 
+def _conditional_discard_view(
+    response: dict[str, Any],
+    candidate: dict[str, Any],
+    tau: float = 0.1,
+) -> dict[str, Any]:
+    """P(discard | this exact call), over ALL legal post-call discards.
+
+    This softmax is a display normalization, not the rollout sampling policy.
+    An explicit >tile selects that tile's probability, never the argmax's.
+    """
+    from mortal_app.call_context import tile
+    if response.get("type") != "dahai":
+        raise ValueError("副露后模型未返回切牌决策")
+    meta = response.get("meta") or {}
+    mask_bits = int(meta.get("mask_bits", 0))
+    ids = [i for i in range(46) if (mask_bits >> i) & 1]
+    qs = meta.get("q_values") or []
+    if not ids or len(ids) != len(qs) or any(i >= 37 for i in ids) or any(not math.isfinite(q) for q in qs):
+        raise ValueError("副露后切牌Q/mask不完整")
+    max_q = max(qs)
+    tau_safe = max(1e-4, float(tau))
+    weights = [math.exp((q - max_q) / tau_safe) for q in qs]
+    total = sum(weights)
+    distribution = {ACTION_TO_TILE[i]: {"q": float(q), "p": w / total} for i, q, w in zip(ids, qs, weights)}
+    best_index = max(range(len(qs)), key=qs.__getitem__)
+    best_tile = ACTION_TO_TILE[ids[best_index]]
+    response_tile = tile(response.get("pai", best_tile))
+    forced = candidate.get("follow_up_discard")
+    selected = tile(forced) if forced else best_tile
+    if selected not in distribution:
+        raise ValueError(f"指定后切{selected}不在合法mask中")
+    return {"tile": selected, "mode": "forced" if forced else "model", **distribution[selected],
+            "model_tile": best_tile, "response_tile": response_tile, "distribution": distribution}
+
+
+def _meld_followup_qp(engine: Any, target_seat: int, hand: list[str], call_tile: str,
+                      prefix: list[dict[str, Any]], candidates: list[dict[str, Any]],
+                      root_qp: dict[str, Any], tau: float = 0.1) -> dict[str, Any]:
+    """Force each distinct call on a fresh bot; never share mutated branch state."""
+    import libriichi
+    from mortal_app.call_context import base, mjai, tile
+    output = {key: dict(value) for key, value in root_qp.items()}
+    cache: dict[tuple, dict[str, Any]] = {}
+    for candidate in candidates:
+        chi = candidate.get("chi")
+        pon = candidate.get("pon")
+        if not (chi or pon):
+            continue  # Pass/kan/ron are not post-call discard decisions.
+        if chi:
+            consumed = list(chi)
+            root_id = f"chi:{''.join(consumed)}"
+        else:
+            consumed = sorted((tile(t) for t in hand if base(t) == base(call_tile)), key=lambda t: not t.startswith("0"))[:2]
+            root_id = f"pon:{call_tile}"
+        # The 46-action chi head names the sequence, not red tile consumption.
+        parent = root_qp.get(root_id) or root_qp.get(f"chi:{''.join(base(t) for t in consumed)}" if chi else "pon")
+        if parent is None:
+            continue
+        forced = candidate.get("follow_up_discard")
+        cand_id = candidate.get("candidate") or root_id + (f">{forced}" if forced else "")
+        out = dict(parent)
+        try:
+            key = ("chi" if chi else "pon", tuple(consumed), call_tile)
+            if key not in cache:
+                branch = libriichi.mjai.Bot(engine, target_seat)
+                branch.react(json.dumps({"type": "start_game"}))
+                for event in prefix:
+                    branch.react(json.dumps(event))
+                action = {"type": key[0], "actor": target_seat, "target": (target_seat + 3) % 4,
+                          "pai": mjai(call_tile), "consumed": list(map(mjai, consumed))}
+                answer = branch.react(json.dumps(action))
+                if not answer:
+                    raise ValueError("副露后没有模型响应")
+                cache[key] = json.loads(answer)
+            out["follow_up"] = _conditional_discard_view(cache[key], candidate, tau=tau)
+        except Exception as exc:
+            log.warning("%s 后切Q/P缺失: %s", cand_id, exc)
+            out["follow_up"] = {"tile": forced, "mode": "forced" if forced else "model", "error": str(exc)}
+        output[cand_id] = out
+    return output
+
+
 def select_candidate_count(weights: list[float], min_x: int = 2, max_x: int = 4) -> int:
     """根据前 x 选的权重分布，动态选择候选数 x。
 
@@ -142,6 +224,10 @@ def _forward_inference(
     target_seat: int = 0,
     scores: dict[str, int] | list[int] | None = None,
     model_id: str = "distill_41b_infer",
+    call_tile: str | None = None,
+    response_prefix: list[dict[str, Any]] | None = None,
+    response_candidates: list[dict[str, Any]] | None = None,
+    tau: float | None = None,
 ) -> dict[str, Any] | None:
     """对当前局面构建一次 mjai 推断流程，返回两个视图共用的原始结果::
 
@@ -203,17 +289,77 @@ def _forward_inference(
             tehais[target_seat] = mjai_tiles
             tsumo_tile = mjai_tiles[-1]
 
-        bot.react(json.dumps({
-            "type": "start_kyoku",
-            "bakaze": bakaze,
-            "kyoku": kyoku_num,
-            "honba": honba,
-            "kyotaku": kyotaku,
-            "oya": oya,
-            "dora_marker": eval_dora,
-            "scores": score_list,
-            "tehais": tehais,
-        }))
+        if response_prefix:
+            prefix_result = None
+            for event in response_prefix:
+                result = bot.react(json.dumps(event))
+                if event["type"] == "dahai":
+                    prefix_result = result
+        else:
+            bot.react(json.dumps({
+                "type": "start_kyoku",
+                "bakaze": bakaze,
+                "kyoku": kyoku_num,
+                "honba": honba,
+                "kyotaku": kyotaku,
+                "oya": oya,
+                "dora_marker": eval_dora,
+                "scores": score_list,
+                "tehais": tehais,
+            }))
+
+        if call_tile:
+            # A response must come from the same validated prefix as simulation.
+            # Never synthesize a lone discard to make an impossible call legal.
+            if not response_prefix:
+                return None
+            res_str = prefix_result
+            if not res_str:
+                return None
+            res = json.loads(res_str)
+            meta = res.get("meta", {})
+            mask_bits = meta.get("mask_bits", 0)
+            q_vals = meta.get("q_values", [])
+            if not q_vals:
+                return {"is_meld": True, "meld_qp": {}}
+
+            max_q = max(q_vals)
+            tau_safe = max(1e-4, float(tau))
+            exps = [math.exp((q - max_q) / tau_safe) for q in q_vals]
+            sum_e = sum(exps) or 1.0
+            probs = [e / sum_e for e in exps]
+
+            try:
+                rank = 5 if call_tile[0] == "0" else int(call_tile[0])
+                suit = call_tile[1]
+            except Exception:
+                rank, suit = 0, ""
+
+            meld_qp: dict[str, dict[str, float]] = {}
+            idx = 0
+            for action_id in range(46):
+                if (mask_bits >> action_id) & 1:
+                    q = float(q_vals[idx])
+                    p = float(probs[idx])
+                    entry = {"q": q, "p": p}
+                    if action_id == 38 and suit:  # chi_low -> [rank+1, rank+2]
+                        meld_qp[f"chi:{rank+1}{suit}{rank+2}{suit}"] = entry
+                    elif action_id == 39 and suit:  # chi_mid -> [rank-1, rank+1]
+                        meld_qp[f"chi:{rank-1}{suit}{rank+1}{suit}"] = entry
+                    elif action_id == 40 and suit:  # chi_high -> [rank-2, rank-1]
+                        meld_qp[f"chi:{rank-2}{suit}{rank-1}{suit}"] = entry
+                    elif action_id == 41:  # pon
+                        meld_qp["pon"] = entry
+                        meld_qp[f"pon:{call_tile}"] = entry
+                    elif action_id == 42:  # daiminkan
+                        meld_qp["daiminkan"] = entry
+                    elif action_id == 45:  # pass
+                        meld_qp["pass"] = entry
+                    idx += 1
+            if response_candidates:
+                meld_qp = _meld_followup_qp(engine, target_seat, tiles, call_tile,
+                                           response_prefix, response_candidates, meld_qp, tau=tau_safe)
+            return {"is_meld": True, "meld_qp": meld_qp}
 
         res_str = bot.react(json.dumps({
             "type": "tsumo",
@@ -270,24 +416,10 @@ def _forward_inference(
         return None
 
 
-def _build_qp_map(raw: dict[str, Any]) -> dict[str, dict[str, float]]:
-    """把原始推断结果整理成渲染层/报表用的 Q + 归一化 P 视图。
-
-    返回结构::
-
-        {
-            "1s":         {"q": -0.42, "p": 0.31, "riichi": 0.0},
-            "riichi:1s":  {"q": -0.30, "p": 0.44, "riichi": 1.0, "reach_p": 0.62},
-            ...
-        }
-
-    ---- 两级决策分解 ----
-    第一级【当前决策点】：默听切牌 + "宣告立直"单一动作 (action 37) 共同 softmax
-      → P(打X 默听) / P(宣告立直)    【这一层才回答"要不要立直"】
-    第二级【declare 之后】：立直后的各切牌在自身池内 softmax
-      → P(打X | 已立直)             【这一层回答"立直了打哪张"】
-    不能把两级混在一个池里归一（那样立直概率会被可切牌张数稀释）。
-    """
+def _build_qp_map(raw: dict[str, Any], tau: float = 0.1) -> dict[str, dict[str, float]]:
+    """把原始推断结果整理成渲染层/报表用的 Q + 归一化 P 视图。"""
+    if raw.get("is_meld"):
+        return raw.get("meld_qp") or {}
     dama_discards = raw.get("dama") or {}
     reach_discards = raw.get("reach") or {}
     reach_declare_q = raw.get("reach_declare_q")
@@ -298,8 +430,10 @@ def _build_qp_map(raw: dict[str, Any]) -> dict[str, dict[str, float]]:
     if not first_level and not reach_discards:
         return {}
 
+    # 若未指定 tau 则默认 1.0 (保持纯切牌评估基准一致)，由调用方显式传入
+    tau_safe = max(1e-4, float(tau)) if tau is not None else 1.0
     max_q1 = max(q for _, q in first_level) if first_level else 0.0
-    exps1 = [math.exp(q - max_q1) for _, q in first_level]
+    exps1 = [math.exp((q - max_q1) / tau_safe) for _, q in first_level]
     sum1 = sum(exps1) or 1.0
     p1 = {key: e / sum1 for (key, _), e in zip(first_level, exps1)}
     reach_p = p1.get("__reach__")
@@ -310,7 +444,7 @@ def _build_qp_map(raw: dict[str, Any]) -> dict[str, dict[str, float]]:
 
     if reach_discards:
         max_q2 = max(reach_discards.values())
-        exps2 = {t: math.exp(q - max_q2) for t, q in reach_discards.items()}
+        exps2 = {t: math.exp((q - max_q2) / tau_safe) for t, q in reach_discards.items()}
         sum2 = sum(exps2.values()) or 1.0
         for t, q in reach_discards.items():
             entry = {"q": q, "p": exps2[t] / sum2, "riichi": 1.0}
@@ -377,6 +511,10 @@ def model_forward(
     model_id: str = "distill_41b_infer",
     min_k: int = 2,
     max_k: int = 4,
+    call_tile: str | None = None,
+    response_prefix: list[dict[str, Any]] | None = None,
+    response_candidates: list[dict[str, Any]] | None = None,
+    tau: float | None = None,
 ) -> dict[str, Any]:
     """统一推断入口：一次前向推断同时产出 Q/P 视图与候选视图。
 
@@ -396,11 +534,15 @@ def model_forward(
         target_seat=target_seat,
         scores=scores,
         model_id=model_id,
+        call_tile=call_tile,
+        response_prefix=response_prefix,
+        response_candidates=response_candidates,
+        tau=tau,
     )
     if raw is None:
         return {"qp": {}, "top": []}
     return {
-        "qp": _build_qp_map(raw),
+        "qp": _build_qp_map(raw, tau=tau),
         "top": _build_top_candidates(raw, min_k=min_k, max_k=max_k),
     }
 
@@ -414,8 +556,12 @@ def eval_model_qp(
     target_seat: int = 0,
     scores: dict[str, int] | list[int] | None = None,
     model_id: str = "distill_41b_infer",
-) -> dict[str, dict[str, float]]:
-    """对当前局面做一次前向推断，返回每个合法切牌动作的 Q 值与 Softmax 归一化 P。
+    call_tile: str | None = None,
+    response_prefix: list[dict[str, Any]] | None = None,
+    response_candidates: list[dict[str, Any]] | None = None,
+    tau: float | None = None,
+) -> dict[str, dict[str, Any]]:
+    """对当前局面做一次前向推断，返回每个合法切牌/副露动作的 Q 值与 Softmax 归一化 P。
 
     key 与 /sim 请求里 discards[].candidate 一致 (普通切牌 = 牌名，立直切牌 = "riichi:<牌名>")，
     便于渲染层直接用 candidate 取值。Q 为模型原始 advantage；P 为归一化概率，
@@ -430,6 +576,10 @@ def eval_model_qp(
         target_seat=target_seat,
         scores=scores,
         model_id=model_id,
+        call_tile=call_tile,
+        response_prefix=response_prefix,
+        response_candidates=response_candidates,
+        tau=tau,
     )["qp"]
 
 

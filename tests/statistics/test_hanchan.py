@@ -54,9 +54,52 @@ def row(seed, final_scores, outcome="self_win", metrics=None):
     }
 
 
-def test_final_rank_distribution_uses_earliest_seat_tie_break() -> None:
+class RecordingModel(FakeModel):
+    def __init__(self, probs):
+        super().__init__(probs)
+        self.calls = []
+
+    def predict_seat(self, scores, bakaze, kyoku_num, honba, kyotaku, oya, seat):
+        self.calls.append((list(scores), bakaze, kyoku_num, honba, kyotaku, oya, seat))
+        return super().predict_seat(scores, bakaze, kyoku_num, honba, kyotaku, oya, seat)
+
+
+def test_s4_continuation_uses_absolute_target_and_dealer_ids_once() -> None:
+    model = RecordingModel([0.5, 0.25, 0.15, 0.1])
+    rows = [row(1, [24000, 25000, 29000, 22000], outcome="other_tsumo")]
+    out = _summarize_hanchan(rows, context(bakaze="S", kyoku=8, oya=3, target_seat=2), model, target_seat=2)
+    assert out["sample"]["games"] == 1
+    assert model.calls == [([24000, 25000, 29000, 22000], "W", 1, 0, 0, 0, 2)]
+
+
+def test_s4_dealer_tenpai_only_renchans_when_dealer_is_tenpai() -> None:
+    ctx = context(bakaze="S", kyoku=8, oya=3, target_seat=2)
+    result_data = result([25000, 25000, 25000, 25000], outcome="draw")
+    assert _resolve_next_hanchan_state(ctx, result_data, {"final_tenpai": True, "dealer_tenpai": False})["kyoku_num"] == 1
+    assert _resolve_next_hanchan_state(ctx, result_data, {"final_tenpai": False, "dealer_tenpai": True})["kyoku_num"] == 4
+
+
+def test_s4_dealer_win_is_not_automatically_hanchan_end_if_not_top() -> None:
+    ctx = context(bakaze="S", kyoku=8, oya=3, target_seat=2)
+    result_data = result([36000, 24000, 29000, 11000])
+    result_data["agari_actors"] = [3]
+    state = _resolve_next_hanchan_state(ctx, result_data, {})
+    assert state is not None
+    assert state["bakaze"] == "S"
+    assert state["kyoku_num"] == 4
+    assert state["oya"] == 3
+
+
+
     assert _final_rank_distribution([25000, 25000, 20000, 20000], 1) == [0.0, 1.0, 0.0, 0.0]
     assert _final_rank_distribution([25000, 25000, 25000, 25000], 3) == [0.0, 0.0, 0.0, 1.0]
+
+
+def test_hanchan_result_declares_continuation_method_and_absolute_coordinates():
+    model = FakeModel([0.5, 0.25, 0.15, 0.1])
+    out = _summarize_hanchan([row(1, [30000, 24000, 23000, 23000])], context(), model)
+    assert out["merge_state"]["coordinate_system"] == "absolute-player-ids-v2"
+    assert out["merge_state"]["continuation_method"] == "single_kyoku_then_rank_model"
 
 
 def test_next_state_dealer_win_renchan() -> None:

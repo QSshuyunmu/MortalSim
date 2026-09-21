@@ -432,6 +432,11 @@ impl CustomKyokuRunner {
             .collect::<PyResult<Vec<_>>>()?;
 
         let effective_target = target_seat.unwrap_or(oya);
+        let is_response = first_ron || first_pass || first_chi_consumed.is_some() || first_pon || first_daiminkan;
+        if is_response && (hand.len() != 13 || first_tsumo_tile.is_some() || (x == 1 && effective_target == oya)) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "response requires 13 undrawn tiles and a preceding opponent discard"));
+        }
         let is_prefix_mode = x > 1 || target_seat.is_some_and(|s| s != oya) || opponent_rivers.is_some();
         // Subfamily (mean-field) mode: games are adaptively assembled from
         // per-player marginal subfamilies, so each game carries weight 1.0.
@@ -441,52 +446,19 @@ impl CustomKyokuRunner {
         let mut games: Vec<GameState> = Vec::with_capacity(count as usize);
 
         if is_prefix_mode {
-            // Build 14-tile target hand array
-            let target_14: [Tile; 14] = if hand.len() == 14 {
-                hand.clone().try_into().map_err(|_| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>("target hand must be 14 tiles")
-                })?
-            } else if hand.len() == 13 {
-                let mut h14 = hand.clone();
-                h14.push(first_tsumo_tile.unwrap_or(discard_tile));
-                h14.try_into().map_err(|_| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>("target hand must be 14 tiles")
-                })?
-            } else {
-                // Pad melded hands (e.g. 7 or 10 tiles) up to 14 from available non-fixed tiles
-                let mut h14 = hand.clone();
-                let mut fixed_counts = [0u8; 37];
-                for &t in &hand {
-                    fixed_counts[super::prefix::tile_bucket(t)] += 1;
+            // A reaction has 13 known tiles. Its next draw remains in the
+            // random pool; first_discard is only an action placeholder and
+            // must never be appended to the hand/wall as a guaranteed draw.
+            let mut target_14 = hand.clone();
+            if target_14.len() == 13 {
+                if let Some(tsumo) = first_tsumo_tile {
+                    target_14.push(tsumo);
                 }
-                fixed_counts[super::prefix::tile_bucket(dora_tile)] += 1;
-                for item in target_past_discards.as_ref().unwrap_or(&vec![]) {
-                    if let Ok(t) = parse(&item.0) {
-                        fixed_counts[super::prefix::tile_bucket(t)] += 1;
-                    }
-                }
-                if let Some(ref opp_r) = opponent_rivers {
-                    for r in opp_r {
-                        for item in r {
-                            if let Ok(t) = parse(&item.0) {
-                                fixed_counts[super::prefix::tile_bucket(t)] += 1;
-                            }
-                        }
-                    }
-                }
-                // Pick valid padding tiles from available buckets with remaining capacity
-                for b in 0..34 {
-                    let limit = super::prefix::bucket_limit(b);
-                    while h14.len() < 14 && fixed_counts[b] < limit {
-                        let t = Tile::try_from(b).unwrap();
-                        h14.push(t);
-                        fixed_counts[b] += 1;
-                    }
-                }
-                h14.try_into().map_err(|_| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>("target hand padding failed")
-                })?
-            };
+            }
+            if !matches!(target_14.len(), 13 | 14) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "prefix requires a complete 13/14-tile closed hand; meld padding is unsupported"));
+            }
 
             let target_past: Vec<super::prefix::DiscardSpec> = target_past_discards.clone()
                 .unwrap_or_default()
@@ -1652,7 +1624,7 @@ fn build_prefix_game(
     target_seat: u8,
     oya: u8,
     x: u8,
-    target_14: &[Tile; 14],
+    target_14: &[Tile],
     target_past: &[super::prefix::DiscardSpec],
     opponent_rivers: &[Vec<super::prefix::DiscardSpec>; 4],
     dora_tile: Tile,

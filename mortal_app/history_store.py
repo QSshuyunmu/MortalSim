@@ -207,7 +207,14 @@ def compute_canonical_fingerprint(req: Dict[str, Any]) -> str:
         "scores": scores_tuple,
         "candidates": cand_names,
         "model_id": model_id,
+        "hanchan_state_semantics": "absolute-player-ids-v2",
     }
+
+    # The response sampler formerly forced first_discard (usually 1m) as the
+    # unknown next draw. Never merge those samples into corrected 13-tile runs.
+    from .call_context import kind
+    if any(kind(c) in ("chi", "pon", "daiminkan", "ron", "pass") for c in discards):
+        canonical_obj["response_semantics"] = "undrawn-prefix-v2"
 
     serialized = json.dumps(canonical_obj, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

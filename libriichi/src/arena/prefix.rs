@@ -91,9 +91,9 @@ fn remove_tile(pool: &mut Vec<Tile>, tile: Tile) -> Result<()> {
     }
 }
 
-/// Fixed (non-sampled) tile counts: target 14 + dora indicator + all rivers.
+/// Fixed (non-sampled) tile counts: known target hand + dora + all rivers.
 pub fn fixed_tile_counts(
-    target_14: &[Tile; 14],
+    target_14: &[Tile],
     target_past: &[DiscardSpec],
     opponent_rivers: &[Vec<DiscardSpec>; 4],
     dora_marker: Tile,
@@ -150,11 +150,14 @@ pub fn validate_inputs(
     target_seat: u8,
     oya: u8,
     x: u8,
-    target_14: &[Tile; 14],
+    target_14: &[Tile],
     target_past: &[DiscardSpec],
     opponent_rivers: &[Vec<DiscardSpec>; 4],
     dora_marker: Tile,
 ) -> Result<()> {
+    ensure!(matches!(target_14.len(), 13 | 14), "target hand must have 13 or 14 tiles");
+    ensure!(target_14.len() != 13 || target_seat != oya || x > 1,
+            "dealer has no response before first draw");
     ensure!(target_seat < 4, "target_seat must be 0..3");
     ensure!(oya < 4, "oya must be 0..3");
     ensure!(x >= 1 && x <= 18, "x must be in 1..=18");
@@ -207,7 +210,7 @@ pub fn sample_prefix_game(
     target_seat: u8,
     oya: u8,
     x: u8,
-    target_14: &[Tile; 14],
+    target_14: &[Tile],
     target_past: &[DiscardSpec],
     opponent_rivers: &[Vec<DiscardSpec>; 4],
     dora_marker: Tile,
@@ -309,7 +312,7 @@ pub fn build_prefix_game_from_hands(
     target_seat: u8,
     oya: u8,
     x: u8,
-    target_14: &[Tile; 14],
+    target_14: &[Tile],
     target_past: &[DiscardSpec],
     opponent_rivers: &[Vec<DiscardSpec>; 4],
     dora_marker: Tile,
@@ -345,8 +348,8 @@ pub fn build_prefix_game_from_hands(
     }
     remove_tile(&mut pool, dora_marker)?;
 
-    // Remove target's kept draw tiles (which enter hand during prefix) and target 14th tile
-    for &t in &target_14[13 - k_target..14] {
+    // Reserve only known tiles. A 13-tile response must NOT fix its next draw.
+    for &t in &target_14[13 - k_target..] {
         remove_tile(&mut pool, t)?;
     }
 
@@ -418,7 +421,11 @@ pub fn build_prefix_game_from_hands(
 
             if !has_discard {
                 if p == target_seat && !target_decision_point_drawn {
-                    timeline_draws.push(target_14[13]);
+                    let next_draw = match target_14.get(13) {
+                        Some(&known_draw) => known_draw,
+                        None => pool.pop().context("insufficient pool for post-response draw")?,
+                    };
+                    timeline_draws.push(next_draw);
                     target_decision_point_drawn = true;
                     break 'outer;
                 }
@@ -507,7 +514,7 @@ pub fn assemble_marginal_games(
     sub_hands: &[[HandAssignment; 4]],
     log_likelihoods: &[[f64; 4]],
     target_seat: u8,
-    target_14: &[Tile; 14],
+    target_14: &[Tile],
     target_past: &[DiscardSpec],
     opponent_rivers: &[Vec<DiscardSpec>; 4],
     dora_marker: Tile,
@@ -626,6 +633,36 @@ mod tests {
             1, 0, 2, &target_14, &target_past, &opponent_rivers,
             parse_tile("8s"), 1, 0, 0, [25000; 4], (12345, 67890),
         ).unwrap()
+    }
+
+    #[test]
+    fn response_hand_does_not_condition_the_next_draw() {
+        use std::collections::HashSet;
+        let hand: Vec<Tile> = ["1m", "2m", "3m", "3m", "4m", "5m", "6m", "7m", "8m", "8m", "9m", "9s", "N"]
+            .into_iter().map(parse_tile).collect();
+        let discard = |s| DiscardSpec { tile: parse_tile(s), tsumogiri: false, is_riichi: false };
+        let past = vec![discard("E")];
+        let rivers = [vec![discard("S")], vec![discard("W")], vec![discard("3m")], vec![]];
+        let mut draws = HashSet::new();
+        for seed in 0..64 {
+            let spec = sample_prefix_game(3, 3, 2, &hand, &past, &rivers,
+                parse_tile("8p"), 8, 0, 0, [25000; 4], (seed, 42)).unwrap();
+            assert_eq!(spec.forced_steps.len(), 4);
+            assert_eq!(spec.forced_steps.last().unwrap().tile, parse_tile("3m"));
+            // Four prefix draws, followed by the previously unknown self draw.
+            draws.insert(spec.board.yama.iter().rev().nth(4).unwrap().as_u8());
+            let mut counts = [0u8; TILE_BUCKETS];
+            for h in &spec.board.haipai { assert!(add_tiles_count(&mut counts, h)); }
+            for group in [&spec.board.yama, &spec.board.rinshan, &spec.board.dora_indicators, &spec.board.ura_indicators] {
+                assert!(add_tiles_count(&mut counts, group));
+            }
+            assert_eq!(counts.iter().map(|&n| n as usize).sum::<usize>(), 136);
+            // Rebuilding/resampling must preserve all tiles and public rivers.
+            let rebuilt = build_prefix_game_from_hands(3, 3, 2, &hand, &past, &rivers,
+                parse_tile("8p"), 8, 0, 0, [25000; 4], &spec.hands, (seed, 42)).unwrap();
+            assert_eq!(rebuilt.board.yama, spec.board.yama);
+        }
+        assert!(draws.len() > 5, "next draw was accidentally fixed: {draws:?}");
     }
 
     #[test]

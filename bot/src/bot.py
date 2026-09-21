@@ -16,6 +16,7 @@ from collections import deque
 from logging.handlers import RotatingFileHandler
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import httpx
 import websocket
@@ -725,7 +726,7 @@ class Bot:
                 log.exception("unexpected error in worker loop: %s", exc)
                 await asyncio.sleep(1.0)
 
-    def _eval_model_qp(self, request: dict) -> dict[str, dict[str, float]]:
+    def _eval_model_qp(self, request: dict) -> dict[str, dict[str, Any]]:
         """对当前局面跑一次选中模型的前向推断，取各候选动作的 Q 与归一化 P。
 
         仅在 parser 未推断过（用户显式给了 c= 候选）时才需要调用；无 c= 时
@@ -736,15 +737,33 @@ class Bot:
         try:
             from model_eval import eval_model_qp
             scores = request.get("scores") or {}
+            raw_mid = request.get("model_id") or self.mortal_cfg.get("model_id", "distill_41b_infer")
+            real_model = {
+                "model_balanced": "distill_41b_infer",
+                "model_aggressive": "distill_nova",
+            }.get(raw_mid, raw_mid)
+            from mortal_app.call_context import response_context, response_events
+            context = response_context(request)
+            prefix = response_events(request, context) if context else None
+            call_tile = context["tile"] if context else None
+            # Without a response prefix model_eval's legacy draw path uses wind
+            # coordinates (dealer=0), whereas API requests use absolute IDs.
+            oya = int(str(request.get("round", "E1"))[1]) - 1
+            target = request.get("target_seat")
+            target = oya if target is None else int(target)
             return eval_model_qp(
                 hand_str=request.get("hand", ""),
                 dora_indicator=request.get("dora", ""),
                 round_str=str(request.get("round", "E1")),
                 honba=int(request.get("honba") or 0),
                 kyotaku=int(request.get("kyotaku") or 0),
-                target_seat=int(request.get("target_seat") or 0),
+                target_seat=target if context else (target - oya) % 4,
                 scores=scores,
-                model_id=request.get("model_id", "distill_41b_infer"),
+                model_id=real_model,
+                call_tile=call_tile,
+                response_prefix=prefix,
+                response_candidates=request.get("discards") if context else None,
+                tau=float(request.get("tau", 0.1)),
             )
         except Exception as exc:
             log.warning("模型 Q/P 推断失败，报表对应列将留空: %s", exc)
@@ -779,7 +798,7 @@ class Bot:
             raise MortalSimError("结果中没有候选数据")
 
         # 注入请求配置供 render_png 完整读取手牌、局况、宝牌
-        result["config"] = job.get("request", {})
+        result["config"] = {**request, **(job.get("request") or {}), **(result.get("config") or {})}
         # 手牌铺排间距渲染偏好：仅在 [render] 显式配置时下发，未配置则不改上游默认间距。
         if "hand_tile_gap" in self.render_cfg:
             result["config"].setdefault("hand_tile_gap", int(self.render_cfg["hand_tile_gap"]))
@@ -829,7 +848,7 @@ class Bot:
         action_label = f"第 {x_turn} 打" if x_turn > 1 else "第一打"
 
         # 决策语义徽章
-        dec_badge = (result.get("decision_state") or {}).get("badge") or "🌟 明确优选"
+        dec_badge = (result.get("decision_state") or {}).get("badge") or "⚠️ 尚不明确"
         cum_runs = result.get("cumulative_total_runs") or result.get("total_runs") or item["runs"]
 
         extra_info = []
@@ -847,18 +866,27 @@ class Bot:
 
         info_suffix = "".join(extra_info)
 
-        # 双规决策并列裁定：
         lbl_pt = label(pt_best)
         lbl_ml = label(ml_best)
+        def _with_follow_up(candidate: dict[str, Any], label_text: str) -> str:
+            qp = model_qp.get(candidate.get("candidate", ""), {}) if isinstance(model_qp, dict) else {}
+            follow = qp.get("follow_up") if isinstance(qp, dict) else None
+            if follow and follow.get("tile"):
+                mode = "模型后切" if follow.get("mode") == "model" else "指定后切"
+                return f"{label_text}→{follow['tile']}（{mode} {follow.get('p', 0) * 100:.1f}%）"
+            return label_text
+        lbl_pt_detail = _with_follow_up(pt_best, lbl_pt)
+        lbl_ml_detail = _with_follow_up(ml_best, lbl_ml)
+        point_detail = _with_follow_up(point_best, label(point_best))
         if lbl_pt == lbl_ml:
-            rec_summary = f"推荐{action_label}：{lbl_pt}（全规则一致最优）"
+            rec_summary = f"推荐{action_label}：{lbl_pt_detail}（全规则一致最优）"
         else:
-            rec_summary = f"推荐{action_label}：{lbl_pt}（天凤避四）/ {lbl_ml}（M规争一）"
+            rec_summary = f"推荐{action_label}：{lbl_pt_detail}（天凤避四）/ {lbl_ml_detail}（M规争一）"
 
         await self.send_group_result(
             item["group_id"],
             item["user_id"],
-            f"【{dec_badge}】{rec_summary}\n局收支最优：{label(point_best)}；天凤最优：{lbl_pt}；M规最优：{lbl_ml}。{info_suffix}",
+            f"【{dec_badge}】{rec_summary}\n局收支最优：{point_detail}；天凤最优：{lbl_pt_detail}；M规最优：{lbl_ml_detail}。{info_suffix}",
             png_path,
         )
 

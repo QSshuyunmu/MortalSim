@@ -1401,6 +1401,39 @@ mod test {
         let yaku = calc.search_yakus().unwrap();
         assert_eq!(yaku, Agari::Yakuman(3));
 
+        // 字一色 + 小四喜 + 四暗刻（门清自摸）= 三倍役满，验证复合役满可累加而非只取一个。
+        let tehai = hand("111z 222z 333z 44z 555z").unwrap();
+        let calc = AgariCalculator {
+            tehai: &tehai,
+            is_menzen: true,
+            chis: &[],
+            pons: &[],
+            minkans: &[],
+            ankans: &[],
+            bakaze: tu8!(E),
+            jikaze: tu8!(E),
+            winning_tile: tu8!(P),
+            is_ron: false,
+        };
+        let yaku = calc.search_yakus().unwrap();
+        assert_eq!(yaku, Agari::Yakuman(3));
+
+        // 同样牌型若荣和，则四暗刻不成立（荣和补刻），应降为字一色 + 小四喜 = 双倍役满。
+        let calc_ron = AgariCalculator {
+            tehai: &tehai,
+            is_menzen: true,
+            chis: &[],
+            pons: &[],
+            minkans: &[],
+            ankans: &[],
+            bakaze: tu8!(E),
+            jikaze: tu8!(E),
+            winning_tile: tu8!(P),
+            is_ron: true,
+        };
+        let yaku_ron = calc_ron.search_yakus().unwrap();
+        assert_eq!(yaku_ron, Agari::Yakuman(2));
+
         let tehai = hand("1m 789p 789s 1m").unwrap();
         let calc = AgariCalculator {
             tehai: &tehai,
