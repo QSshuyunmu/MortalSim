@@ -16,6 +16,30 @@ def load_replay_to_mjai(source_str: str) -> tuple[list[dict[str, Any]] | None, s
     metadata: dict[str, Any] = {"platform": "unknown", "id": "", "target_seat": 0}
     raw = source_str.strip()
 
+    # 0. 尝试解析天凤何切/自定义 JSON 牌谱 (例如 https://tenhou.net/6/#json=...)
+    import urllib.parse
+    if "#json=" in raw or "?json=" in raw:
+        try:
+            parsed = urllib.parse.urlparse(raw)
+            frag_qs = urllib.parse.parse_qs(parsed.fragment)
+            query_qs = urllib.parse.parse_qs(parsed.query)
+            json_raw = frag_qs.get("json", [None])[0] or query_qs.get("json", [None])[0]
+            if json_raw:
+                import json
+                import sys
+                from pathlib import Path
+                mortal_sim_dir = str(Path(__file__).resolve().parents[3])
+                if mortal_sim_dir not in sys.path: sys.path.insert(0, mortal_sim_dir)
+                from mortal_app.tenhou6_converter import parse_json6_to_mjai_events
+                from mortal_app.safe_parser import safe_parse_json_str
+                j_obj = safe_parse_json_str(json_raw)
+                events = parse_json6_to_mjai_events(j_obj)
+                metadata["platform"] = "tenhou6_custom"
+                metadata["id"] = "custom_what_cut"
+                return events, None, metadata
+        except Exception as exc:
+            return None, f"解析天凤自定义牌谱参数失败: {exc}", metadata
+
     # 1. 尝试判定是否为天凤牌谱 (URL 或 Log ID)
     tenhou_id = extract_tenhou_id(raw)
     if tenhou_id:

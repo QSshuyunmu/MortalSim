@@ -27,10 +27,12 @@ def extract_tenhou_id(url_or_id: str) -> str | None:
     return None
 
 def fetch_tenhou_xml(log_id: str, timeout: int = 15) -> str:
-    """下载天凤牌谱原始 XML。"""
+    """下载天凤牌谱原始 XML（绕过失效的系统本地代理环境变量，防止 10061）。"""
     url = f"https://tenhou.net/0/log/?{log_id}"
     req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # 强制直连天凤官网，不受未开启的本地 7890 代理影响
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
         data = resp.read()
         try:
             return gzip.decompress(data).decode('utf-8', errors='ignore')
