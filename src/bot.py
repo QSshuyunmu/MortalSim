@@ -9,12 +9,6 @@ import os
 import re
 import subprocess
 import sys
-from pathlib import Path
-
-# 确保 MortalSim 与 tenhoulib 根目录在模块加载最前列
-for _p_dir in [r"D:	enhoulib\MortalSim", r"D:	enhoulib\MortalSim\mortal_app", r"D:	enhoulib"]:
-    if _p_dir not in sys.path:
-        sys.path.insert(0, _p_dir)
 import threading
 import time
 import uuid
