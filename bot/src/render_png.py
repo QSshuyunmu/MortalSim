@@ -221,6 +221,23 @@ def _fmt_rate(v: float | None) -> str:
     if v is None: return "—"
     return f"{v * 100:.1f}%"
 
+def _resolve_ci95(
+    raw_ci: list[float] | None,
+    cum_info: dict[str, Any] | None,
+    cum_mean_key: str,
+    cum_std_key: str,
+) -> list[float] | None:
+    """优先采用大样本持久化累积矩核算的精准收敛置信区间，确保随模拟局数累加而单调收敛。"""
+    if cum_info and isinstance(cum_info, dict):
+        c_runs = int(cum_info.get("runs") or 0)
+        c_mean = cum_info.get(cum_mean_key)
+        c_std = cum_info.get(cum_std_key)
+        if c_runs >= 2 and c_mean is not None and c_std is not None:
+            crit = 1.95996
+            se = float(c_std) / math.sqrt(c_runs)
+            return [float(c_mean) - crit * se, float(c_mean) + crit * se]
+    return raw_ci
+
 def _fmt_ci95(ci: list[float] | None, prec: int = 0) -> str:
     if not ci or len(ci) != 2: return "—"
     return f"[{_fmt_signed(ci[0], prec)}, {_fmt_signed(ci[1], prec)}]"
@@ -561,7 +578,9 @@ def render_png(
         label_txt = c_lbl + (" ★" if is_rec else "")
         pt_val = info["pt_obj"].get("value")
         val_txt = _fmt_signed(pt_val, 0)
-        ci_txt = f"CI {_fmt_ci95(info['pt_obj'].get('ci95'), 0)}"
+        pt_n = info["pt_obj"].get("n")
+        resolved_pt_ci = _resolve_ci95(info["pt_obj"].get("ci95"), c.get("cumulative"), "mean_score", "stddev_score")
+        ci_txt = f"CI {_fmt_ci95(resolved_pt_ci, 0)}"
         content_w[0] = max(content_w[0], draw.textlength(label_txt, font=cell_font))
         # 局收支列 = 数值/CI 文本 + 右侧迷你条 (48px) 与间距；条的位置按列内最长文本对齐
         bar_text_w = max(bar_text_w, draw.textlength(val_txt, font=cell_font),
@@ -673,19 +692,16 @@ def render_png(
         # 天凤凤七
         pt7_obj = (han.get("dan_pt_ev") or {}).get("houou_7", {})
         pt7 = pt7_obj.get("value")
-        pt7_ci = pt7_obj.get("ci95")
+        pt7_n = pt7_obj.get("n")
+        pt7_ci = _resolve_ci95(pt7_obj.get("ci95"), c.get("cumulative"), "mean_pt", "stddev_pt")
         
-        # M-League pt EV (支持原生字段与 cumulative 回退保护)
+        # M-League pt EV (支持原生字段与 cumulative 大样本收敛校准)
         ml_obj = han.get("mleague_pt_ev") or {}
         ml_pt = ml_obj.get("value")
-        ml_ci = ml_obj.get("ci95")
         if ml_pt is None and "cumulative" in c:
             ml_pt = c["cumulative"].get("mean_mleague")
-            std_ml = c["cumulative"].get("stddev_mleague", 1.0)
-            n_runs = max(2, c["cumulative"].get("runs", 100))
-            se_ml = 1.96 * (std_ml / (n_runs ** 0.5))
-            if ml_pt is not None:
-                ml_ci = [ml_pt - se_ml, ml_pt + se_ml]
+        ml_n = ml_obj.get("n")
+        ml_ci = _resolve_ci95(ml_obj.get("ci95"), c.get("cumulative"), "mean_mleague", "stddev_mleague")
         
         # 四位概率
         r1 = rr[0].get("rate") or 0.0 if len(rr) > 0 else 0.0
