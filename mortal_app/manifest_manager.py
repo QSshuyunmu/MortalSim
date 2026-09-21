@@ -90,15 +90,24 @@ def resolve_model_path(tag_or_filename: str) -> tuple[str, Path | None, dict[str
     legacy_map = {
         "bin_0910": "Bastion",
         "aegis": "Bastion",
+        "bastion": "Bastion",
+        "b": "Bastion",
         "distill_nova": "Nova-X",
+        "distill_nova_v2": "Nova-X",
         "sol": "Nova-X",
         "nova": "Nova-X",
-        "distill_41b_infer": "Logos",
-        "41b": "Logos",
+        "novax": "Nova-X",
+        "n": "Nova-X",
+        # consensus 极简别名支持
         "consensus": "Consensus",
         "consensus_v3": "Consensus",
+        "con": "Consensus",
+        "cs": "Consensus",
+        "c": "Consensus",
+        # Shadow-J
         "luckyj": "Shadow-J",
         "shadow": "Shadow-J",
+        "j": "Shadow-J",
     }
     if target_key in legacy_map:
         official_tag = legacy_map[target_key]
@@ -109,7 +118,7 @@ def resolve_model_path(tag_or_filename: str) -> tuple[str, Path | None, dict[str
                 return official_tag, pth_path, info
 
     # 4. 默认 fallback 到 Logos
-    default_tag = manifest.get("default_model", "Logos")
+    default_tag = manifest.get("default_model", "Consensus")
     if default_tag in models_dict:
         info = models_dict[default_tag]
         pth_path = TSYPX_DIR / info["file"]

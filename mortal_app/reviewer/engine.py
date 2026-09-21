@@ -161,7 +161,7 @@ def build_chi_consumed(action_label: int, last_tile: str) -> list[str]:
 def run_multi_model_review(
     events: list[dict[str, Any]],
     target_seat: int = 0,
-    model_id: str = "distill_41b_infer",
+    model_id: str = "distill_consensus_v3",
 ) -> dict[str, Any]:
     """以 100% 官方标准生成 Killer Mortal Review 数据包。"""
     import sys

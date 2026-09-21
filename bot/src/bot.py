@@ -479,7 +479,7 @@ class Bot:
                 "【Mortal 牌谱检讨 /review】\n"
                 "格式：/review <天凤/雀魂链接> [seat=0~3] [model=模型代号]\n"
                 "• 视角座次：默认取链接中的 tw 视角，也可显式指定 seat=0~3 (0东, 1南, 2西, 3北)\n"
-                "• 模型代号：Logos(默认基准) / Bastion(避四) / Nova-X(争一) / Consensus(共识) / Shadow-J(奇策)\n"
+                "• 模型选择：Consensus(默认/可简写c,con) / Nova-X(争一/可简写n,nova) / Bastion(避四/可简写b) / Shadow-J(奇策/可简写j)\n"
                 "• 示例：/review http://tenhou.net/0/?log=...&tw=1 seat=2 model=Nova-X\n\n"
                 "【局况蒙特卡洛仿真 /sim】\n"
                 "示例：/sim 123456789m789s12p d8p c1pr,2p S1-0 seat=南 x=3 P250,250,250,250 1000\n\n"
@@ -574,8 +574,8 @@ class Bot:
         from mortal_app.reviewer.web.packager import generate_standalone_review_html
 
         # 1. 解析 model 参数
-        model_name = "distill_41b_infer"
-        official_tag_name = "Logos"
+        model_name = "distill_consensus_v3"
+        official_tag_name = "Consensus"
         clean_source = source_str
         import re
 
