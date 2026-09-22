@@ -662,6 +662,67 @@ class Bot:
                 log.exception("review_worker 出现未捕获异常: %s", exc)
                 await asyncio.sleep(1.0)
 
+def _analyze_review_attribution(review_result: dict, target_seat: int) -> str:
+    """分析对局失分与恶手归因，生成莫塔风格的定性判词。"""
+    rev = review_result.get("review", {})
+    rating = rev.get("rating", 1.0) * 100
+    fatal_losses = []
+    big_mistakes = []
+
+    for kyoku in rev.get("kyokus", []):
+        b_name = ["东", "南", "西", "北"][kyoku.get("bakaze", 0)]
+        k_num = kyoku.get("kyoku", 0) + 1
+        h_num = kyoku.get("honba", 0)
+        h_str = f"{h_num}本场" if h_num > 0 else ""
+        kyoku_name = f"{b_name}{k_num}局{h_str}"
+
+        end_status = kyoku.get("end_status", [])
+        deal_in_event = next((ev for ev in end_status if ev.get("type") == "hora" and ev.get("target") == target_seat), None)
+
+        entries = kyoku.get("entries", [])
+        deal_in_is_consistent = True
+
+        if deal_in_event:
+            pts = abs(deal_in_event.get("deltas", [0, 0, 0, 0])[target_seat])
+            if entries:
+                last_e = entries[-1]
+                if not last_e.get("is_equal", True):
+                    deal_in_is_consistent = False
+            if pts >= 7700:
+                fatal_losses.append({
+                    "kyoku": kyoku_name,
+                    "pts": pts,
+                    "consistent": deal_in_is_consistent,
+                })
+
+        for e in entries:
+            if not e.get("is_equal", True):
+                details = e.get("details", [])
+                act = e.get("actual", {})
+                act_q = next((d.get("q_value") or d.get("prob", 0) for d in details if d.get("action") == act), 0)
+                exp_q = next((d.get("q_value") or d.get("prob", 0) for d in details if d.get("action") == e.get("expected")), 0)
+                if (exp_q - act_q) >= 3.0:
+                    big_mistakes.append((kyoku_name, e.get("junme")))
+
+    # 判定 A: 高评分 (>=82) 且重大失分均与推荐一致 -> 下限方差/不可抗力
+    if rating >= 82.0 and fatal_losses and all(fl["consistent"] for fl in fatal_losses):
+        loss_desc = "、".join([f"{fl['kyoku']}-{fl['pts']}点" for fl in fatal_losses[:2]])
+        return f"判定：下限方差（不可抗力）。……失分非恶手导致。\n{loss_desc}均与 Mortal 推荐一致。"
+
+    # 判定 B: 评分偏低或多次重大恶手 -> 技术问题
+    if rating < 78.0 or len(big_mistakes) >= 3:
+        return f"判定：技术偏差。……检出 {len(big_mistakes)} 处关键恶手。\n存在明显防守或造牌失误，建议复盘。"
+
+    # 判定 C: 存在偏离推荐的放铳
+    inconsistent_losses = [fl for fl in fatal_losses if not fl["consistent"]]
+    if inconsistent_losses:
+        loss_desc = inconsistent_losses[0]["kyoku"]
+        return f"判定：攻防失准。……{loss_desc}存在偏离推荐的激进打法。"
+
+    if rating >= 85.0:
+        return "判定：发挥稳定。……无重大决策失误。"
+    return "判定：局况平稳。……存在微弱期望损耗。"
+
     def _execute_review_sync(self, group_id: int, user_id: str, source_str: str) -> None:
         """同步执行审查、生成 HTML 并双通道交付。"""
         import sys, time
@@ -752,11 +813,13 @@ class Bot:
         base_url = get_public_base_url()
         web_link = f"{base_url}/reviews/{report_token}.html"
 
-        # 精简高效文本回复，不再发送离线 html 群文件
+        attribution_verdict = _analyze_review_attribution(review_result, target_seat)
+
         summary_msg = (
             f"【Mortal 牌谱检讨】\n"
             f"视角：{seat_zh}家 ({target_seat}号位) | 共 {total_rev} 巡\n"
             f"模型：{official_tag_name} | 评分：{rating_pct} | 吻合度：{match_pct}%\n"
+            f"{attribution_verdict}\n"
             f"🌐 在线复盘：{web_link}"
         )
         self._post_group_msg_sync(group_id, summary_msg)
