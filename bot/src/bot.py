@@ -9,6 +9,13 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+
+# 确保真实 MortalSim 根目录在模块搜索路径的最前列，杜绝被历史遗留目录 shadowing
+for _p_dir in [r"D:\tenhoulib\MortalSim", r"D:\tenhoulib\MortalSim\mortal_app", r"D:\tenhoulib"]:
+    if _p_dir not in sys.path:
+        sys.path.insert(0, _p_dir)
+
 import threading
 import time
 import uuid
@@ -65,6 +72,7 @@ class Bot:
         self.mortal_cfg = cfg["mortalsim"]
         self.quota_cfg = cfg["quota"]
         self.render_cfg = cfg["render"]
+        self.llm_cfg = cfg.get("llm", {})
         self.bot_self_qq = str(cfg["bot"]["self_qq"])
 
     def reload_config(self) -> None:
@@ -509,6 +517,16 @@ class Bot:
         if text.startswith("/sim"):
             request, error = parse_sim_command(text)
             if error:
+                # 若命令格式错误但启用了 LLM，尝试智能校正
+                if self.llm_cfg.get("enabled", False) and len(text) > 8:
+                    from nl_translator import translate_natural_language
+                    fixed = await translate_natural_language(text, self.llm_cfg)
+                    if fixed and fixed.startswith("/sim"):
+                        fixed_req, fixed_err = parse_sim_command(fixed)
+                        if not fixed_err:
+                            await self.send_group_text(group_id, f"💡 格式已自动校正为：\n{fixed}\n正在加入推演队列...")
+                            await self._enqueue_sim(group_id, user_id, fixed_req)
+                            return
                 await self.send_group_text(group_id, error)
                 return
             await self._enqueue_sim(group_id, user_id, request)
@@ -530,6 +548,48 @@ class Bot:
                 except Exception:
                     pass
                 sys.exit(0)
+
+        # 兜底自然语言智能识别：未命中固定指令但 @ 了机器人时，尝试识别麻将局面
+        if self.llm_cfg.get("enabled", False):
+            await self._handle_natural_language_sim(group_id, user_id, text)
+            return
+
+    async def _handle_natural_language_sim(self, group_id: int, user_id: str, text: str) -> None:
+        """调用大模型转译口语化自然语言描述为 /sim 命令并执行。"""
+        if not self.llm_cfg.get("enabled", False):
+            return
+        if len(text.strip()) < 3:
+            return
+
+        try:
+            from nl_translator import translate_natural_language
+            translated = await translate_natural_language(text, self.llm_cfg)
+        except Exception as exc:
+            log.warning("LLM 转译异常: %s", exc)
+            return
+
+        if not translated:
+            return
+
+        if "[NON_MAHJONG]" in translated:
+            msg = "你好！我是 MortalSim 日麻推演助手。\n你可以直接用自然语言描述局面（如：手牌、宝牌、局况、碰切选择等），我会自动为你转译并推演！\n发送 /help 可查看标准格式及更多示例。"
+            await self.send_group_text(group_id, msg)
+            return
+
+        if any(w in translated for w in ("缺少手牌", "缺少宝牌", "请提供", "请补充")):
+            await self.send_group_text(group_id, translated)
+            return
+
+        if translated.startswith("/sim"):
+            request, error = parse_sim_command(translated)
+            if error:
+                await self.send_group_text(group_id, f"识别到局面但参数有误：\n{translated}\n原因：{error}")
+                return
+            await self.send_group_text(group_id, f"💡 自然语言已识别为：\n{translated}\n正在加入推演队列...")
+            await self._enqueue_sim(group_id, user_id, request)
+            return
+
+        log.info("LLM 转译输出非标准指令: %s", translated)
 
     async def _enqueue_review(self, group_id: int, user_id: str, source_str: str) -> None:
         if self.review_tasks.qsize() >= 3:
@@ -568,7 +628,18 @@ class Bot:
         import sys, time
         from pathlib import Path
         for p_dir in [r"D:\tenhoulib\MortalSim", r"D:\tenhoulib"]:
-            if p_dir not in sys.path: sys.path.insert(0, p_dir)
+            if p_dir in sys.path:
+                sys.path.remove(p_dir)
+            sys.path.insert(0, p_dir)
+
+        # 深度防御：若 sys.modules 中缓存的 mortal_app 并非来自 MortalSim，强制清退重载
+        if "mortal_app" in sys.modules:
+            mod_file = getattr(sys.modules["mortal_app"], "__file__", "") or ""
+            if "MortalSim" not in mod_file:
+                for k in list(sys.modules.keys()):
+                    if k == "mortal_app" or k.startswith("mortal_app."):
+                        del sys.modules[k]
+
         from mortal_app.reviewer.fetcher import load_replay_to_mjai
         from mortal_app.reviewer.engine import run_multi_model_review
         from mortal_app.reviewer.web.packager import generate_standalone_review_html
