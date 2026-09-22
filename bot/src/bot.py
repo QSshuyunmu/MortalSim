@@ -814,7 +814,7 @@ class Bot:
         base_url = get_public_base_url()
         web_link = f"{base_url}/reviews/{report_token}.html"
 
-        attribution_verdict = _analyze_review_attribution(review_result, target_seat)
+        attribution_verdict = self._analyze_review_attribution(review_result, target_seat)
 
         summary_msg = (
             f"【Mortal 牌谱检讨】\n"
