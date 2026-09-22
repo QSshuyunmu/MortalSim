@@ -29,5 +29,5 @@ tile_assets_dir = "D:/tenhoulib/MortalSim/apps/web/dist/tiles"
 enabled = true
 base_url = "http://43.159.137.49:8317/v1"
 api_key = "sk-share2-5cde90ee4a02"
-model = "gemini-3.8-flash-high"
-timeout = 15.0
+model = "gemini-3.5-flash-lite"
+timeout = 25.0

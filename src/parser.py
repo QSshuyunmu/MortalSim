@@ -270,6 +270,7 @@ def _generate_default_rivers(
     call_target_tile: str | None = None,
     partial_target_past: list[tuple[str, bool, bool]] | None = None,
     partial_opp_rivers: list[list[tuple[str, bool, bool]]] | None = None,
+    dora_indicator: str | None = None,
 ) -> tuple[list[tuple[str, bool, bool]], list[list[tuple[str, bool, bool]]]]:
     """当巡目 x >= 2 且用户未提供牌河时，自动生成四家物理合法、无冲突且符合牌理的牌河：
        1. 严格按 字牌 -> 幺九 -> 28 -> 37 -> 456 优先级出牌；
@@ -315,6 +316,12 @@ def _generate_default_rivers(
         elif t in ("0s", "5sr"):
             t = "5s"
         tile_used_counts[t] = tile_used_counts.get(t, 0) + 1
+    if dora_indicator:
+        d_tile = dora_indicator
+        if d_tile in ("0m", "5mr"): d_tile = "5m"
+        elif d_tile in ("0p", "5pr"): d_tile = "5p"
+        elif d_tile in ("0s", "5sr"): d_tile = "5s"
+        tile_used_counts[d_tile] = tile_used_counts.get(d_tile, 0) + 1
 
     rivers: list[list[tuple[str, bool, bool]]] = [[], [], [], []]
     if partial_target_past:
@@ -805,6 +812,7 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
             call_target_tile=call_tile,
             partial_target_past=parsed_target_past,
             partial_opp_rivers=parsed_opp_rivers,
+            dora_indicator=dora_indicator,
         )
     elif x_val >= 2 or (x_val >= 1 and effective_target_seat != 0):
         target_past, opp_rivers = _generate_default_rivers(
@@ -813,6 +821,7 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
             0,
             x_val,
             call_target_tile=call_tile,
+            dora_indicator=dora_indicator,
         )
 
     request: dict[str, Any] = {
