@@ -4,10 +4,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bot" / "src"))
 
-from bot import _analyze_review_attribution
+from bot import Bot
 
 def test_variance_bad_luck_attribution():
-    # 模拟高分 + 满贯跳满放铳但切牌一致
     res = {
         "review": {
             "rating": 0.86,
@@ -31,14 +30,13 @@ def test_variance_bad_luck_attribution():
             ]
         }
     }
-    verdict = _analyze_review_attribution(res, target_seat=1)
+    verdict = Bot._analyze_review_attribution(res, target_seat=1)
     assert "下限方差（不可抗力）" in verdict
     assert "东2局-12000点" in verdict
     assert "东4局2本场-18000点" in verdict
     assert "与 Mortal 推荐一致" in verdict
 
 def test_skill_error_attribution():
-    # 模拟低分 + 恶手放铳
     res = {
         "review": {
             "rating": 0.72,
@@ -56,5 +54,5 @@ def test_skill_error_attribution():
             ]
         }
     }
-    verdict = _analyze_review_attribution(res, target_seat=1)
+    verdict = Bot._analyze_review_attribution(res, target_seat=1)
     assert "技术偏差" in verdict
