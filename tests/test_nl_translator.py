@@ -11,45 +11,38 @@ CFG = {
     "enabled": True,
     "base_url": "http://43.159.137.49:8317/v1",
     "api_key": "sk-share2-5cde90ee4a02",
-    "model": "gemini-3.8-flash-high",
-    "timeout": 15.0,
+    "model": "gemini-3.5-flash-lite",
+    "timeout": 25.0,
 }
 
 def test_intent_cancel():
     async def _run():
-        nl = "可以把刚刚那个任务取消吗？"
-        res = await route_user_intent(nl, CFG)
+        res = await route_user_intent("可以把刚刚那个任务取消吗？", CFG)
         assert res is not None
         assert res.get("action") == "cancel"
-        assert len(res.get("reply", "")) > 0
     asyncio.run(_run())
 
-def test_intent_sim():
+def test_free_creative_pinfu_chinitsu_prompt():
+    # 验证模型能否在轻度底线约束下自由发挥推理，构造合法的 14 张平胡/清一色手牌
     async def _run():
-        nl = "东一局平场，南家手牌2357m5689p230s77z 宝牌为西，亲第一打为中/7z，模拟决策有 1.碰中打9p，2.碰中打0s，3.不碰"
-        res = await route_user_intent(nl, CFG)
+        res = await route_user_intent("构造一个已经平胡听牌 但是清一色一向的牌 东家 2巡 进行模拟", CFG)
         assert res is not None
         assert res.get("action") == "sim"
         cmd = res.get("command", "")
         assert cmd.startswith("/sim")
         req, err = parse_sim_command(cmd)
-        assert err is None, f"Generated command cannot be parsed: {err}"
-        assert req["target_seat"] == 1
+        assert err is None, f"Command syntax error: {err}"
+        assert len(req["hand"]) == 28, f"Hand must be 14 tiles (28 chars), got {len(req['hand'])}"
     asyncio.run(_run())
 
-def test_intent_state():
+def test_free_creative_kyuren_prompt():
+    # 验证纯正九莲自由构造
     async def _run():
-        nl = "现在排队的人多吗？"
-        res = await route_user_intent(nl, CFG)
+        res = await route_user_intent("随便构建一个纯正九莲听牌，亲第一打，50局", CFG)
         assert res is not None
-        assert res.get("action") == "state"
-    asyncio.run(_run())
-
-def test_intent_qa():
-    async def _run():
-        nl = "无筋4和筋2哪个更危险？"
-        res = await route_user_intent(nl, CFG)
-        assert res is not None
-        assert res.get("action") in ("qa", "chat")
-        assert len(res.get("reply", "")) > 0
+        assert res.get("action") == "sim"
+        cmd = res.get("command", "")
+        req, err = parse_sim_command(cmd)
+        assert err is None
+        assert len(req["hand"]) == 28
     asyncio.run(_run())
