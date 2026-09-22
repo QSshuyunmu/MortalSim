@@ -62,6 +62,7 @@ def ensure_tunnel_running(port: int = 50718) -> None:
             CLOUDFLARED_EXE,
             "tunnel",
             "--url", f"http://127.0.0.1:{port}",
+            "--protocol", "http2",
             "--no-autoupdate"
         ]
         with open(TUNNEL_LOG, "w", encoding="utf-8") as out:
