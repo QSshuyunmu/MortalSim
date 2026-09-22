@@ -519,14 +519,16 @@ class Bot:
             if error:
                 # 若命令格式错误但启用了 LLM，尝试智能校正
                 if self.llm_cfg.get("enabled", False) and len(text) > 8:
-                    from nl_translator import translate_natural_language
-                    fixed = await translate_natural_language(text, self.llm_cfg)
-                    if fixed and fixed.startswith("/sim"):
-                        fixed_req, fixed_err = parse_sim_command(fixed)
-                        if not fixed_err:
-                            await self.send_group_text(group_id, f"💡 格式已自动校正为：\n{fixed}\n正在加入推演队列...")
-                            await self._enqueue_sim(group_id, user_id, fixed_req)
-                            return
+                    from nl_translator import route_user_intent
+                    intent = await route_user_intent(text, self.llm_cfg)
+                    if intent and intent.get("action") == "sim":
+                        fixed = str(intent.get("command") or "").strip()
+                        if fixed.startswith("/sim"):
+                            fixed_req, fixed_err = parse_sim_command(fixed)
+                            if not fixed_err:
+                                await self.send_group_text(group_id, f"💡 格式校正：{fixed}\n正在排队演算……以上。")
+                                await self._enqueue_sim(group_id, user_id, fixed_req)
+                                return
                 await self.send_group_text(group_id, error)
                 return
             await self._enqueue_sim(group_id, user_id, request)
@@ -555,42 +557,79 @@ class Bot:
             return
 
     async def _handle_natural_language_sim(self, group_id: int, user_id: str, text: str) -> None:
-        """调用大模型转译口语化自然语言描述为 /sim 命令并执行。"""
+        """调用意图路由引擎，支持取消、推演、复盘、状态及冷萌问答。"""
         if not self.llm_cfg.get("enabled", False):
             return
-        if len(text.strip()) < 3:
+        if len(text.strip()) < 2:
             return
 
         try:
-            from nl_translator import translate_natural_language
-            translated = await translate_natural_language(text, self.llm_cfg)
+            from nl_translator import route_user_intent
+            intent = await route_user_intent(text, self.llm_cfg)
         except Exception as exc:
-            log.warning("LLM 转译异常: %s", exc)
+            log.warning("LLM 意图识别异常: %s", exc)
             return
 
-        if not translated:
+        if not intent or not isinstance(intent, dict):
             return
 
-        if "[NON_MAHJONG]" in translated:
-            msg = "你好！我是 MortalSim 日麻推演助手。\n你可以直接用自然语言描述局面（如：手牌、宝牌、局况、碰切选择等），我会自动为你转译并推演！\n发送 /help 可查看标准格式及更多示例。"
+        action = intent.get("action")
+        reply = str(intent.get("reply") or "").strip()
+
+        # 1. 任务取消 (由 Python 端严格基于消息发送者的 user_id 鉴权)
+        if action == "cancel":
+            removed = await self._cancel_user(user_id)
+            if removed:
+                msg = f"{reply}\n已终止你的 {removed} 个任务。" if reply else f"任务调度已中断。已终止你的 {removed} 个任务。"
+            else:
+                msg = "当前队列中无属于你的活跃任务。"
             await self.send_group_text(group_id, msg)
             return
 
-        if any(w in translated for w in ("缺少手牌", "缺少宝牌", "请提供", "请补充")):
-            await self.send_group_text(group_id, translated)
+        # 2. 查询排队状态
+        if action == "state":
+            usage = self.quota.usage(user_id)
+            prefix = f"{reply}\n" if reply else ""
+            state_msg = (
+                f"{prefix}"
+                f"• 仿真队列：活跃 {self.active} / 排队 {self.tasks.qsize()}\n"
+                f"• 牌谱审查：活跃 {self.review_active} / 排队 {self.review_tasks.qsize()}\n"
+                f"• 今日调用：{usage['requests']} 次 ({usage['games']} 局)"
+            )
+            await self.send_group_text(group_id, state_msg)
             return
 
-        if translated.startswith("/sim"):
-            request, error = parse_sim_command(translated)
-            if error:
-                await self.send_group_text(group_id, f"识别到局面但参数有误：\n{translated}\n原因：{error}")
+        # 3. 牌谱检讨
+        if action == "review":
+            url = str(intent.get("url") or "").strip()
+            if url:
+                if reply:
+                    await self.send_group_text(group_id, reply)
+                await self._enqueue_review(group_id, user_id, url)
                 return
-            await self.send_group_text(group_id, f"💡 自然语言已识别为：\n{translated}\n正在加入推演队列...")
-            await self._enqueue_sim(group_id, user_id, request)
+            await self.send_group_text(group_id, "缺少对局链接。请提供天凤或雀魂牌谱 URL。……以上。")
             return
 
-        log.info("LLM 转译输出非标准指令: %s", translated)
+        # 4. 局面推演
+        if action == "sim":
+            cmd = str(intent.get("command") or "").strip()
+            if cmd.startswith("/sim"):
+                request, error = parse_sim_command(cmd)
+                if error:
+                    await self.send_group_text(group_id, f"识别到局面但参数有误：\n{cmd}\n原因：{error}")
+                    return
+                prefix = f"{reply}\n" if reply else ""
+                await self.send_group_text(group_id, f"{prefix}💡 识别指令：{cmd}")
+                await self._enqueue_sim(group_id, user_id, request)
+                return
+            if reply:
+                await self.send_group_text(group_id, reply)
+            return
 
+        # 5. 战术规则问答 / 闲聊 / 质询
+        if reply:
+            await self.send_group_text(group_id, reply)
+            return
     async def _enqueue_review(self, group_id: int, user_id: str, source_str: str) -> None:
         if self.review_tasks.qsize() >= 3:
             await self.send_group_text(group_id, "当前跑谱审查队列已满 (最多排队 3 场)，请稍候再试。")
