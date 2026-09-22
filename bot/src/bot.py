@@ -607,7 +607,7 @@ class Bot:
                     await self.send_group_text(group_id, reply)
                 await self._enqueue_review(group_id, user_id, url)
                 return
-            await self.send_group_text(group_id, "缺少对局链接。请提供天凤或雀魂牌谱 URL。……以上。")
+            await self.send_group_text(group_id, "未检测到对局链接。……无法解析。请提供天凤或雀魂牌谱。")
             return
 
         # 4. 局面推演
@@ -616,7 +616,7 @@ class Bot:
             if cmd.startswith("/sim"):
                 request, error = parse_sim_command(cmd)
                 if error:
-                    await self.send_group_text(group_id, f"识别到局面但参数有误：\n{cmd}\n原因：{error}")
+                    await self.send_group_text(group_id, f"局面参数存在异常。……无法构建。\n{cmd}\n错误：{error}")
                     return
                 prefix = f"{reply}\n" if reply else ""
                 await self.send_group_text(group_id, f"{prefix}💡 识别指令：{cmd}")
