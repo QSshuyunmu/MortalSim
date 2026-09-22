@@ -1,4 +1,12 @@
 .vscode
+.idea/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+!.env.template
+*.log
 **/__pycache__/
 /.pytest_cache/
 
@@ -11,10 +19,18 @@
 *.lib
 *.exp
 *.pth
+*.pt
+*.ckpt
+*.safetensors
 *.onnx
 *.npz
 *.pte
 *.ptd
+
+# 模型权重（含 LightGBM 文本模型）—— 本地保留，不纳入版本控制
+models/hanchan_rank/*.txt
+models/**/*.bin
+models/**/*.pkl
 
 .ipynb_checkpoints
 *.ipynb
@@ -47,3 +63,8 @@
 /libriichi/test_write.txt
 data/
 *.db
+
+# QQ bot 一次性本地验证/预览脚本与产物（改渲染时临时用，不入库）
+bot/scripts/preview_render.py
+bot/scripts/rerender_with_qp.py
+bot/scripts/run_real_sim_preview.py
