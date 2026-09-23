@@ -103,19 +103,21 @@ def _iter_processes():
     return psutil.process_iter(["pid", "name", "cmdline", "create_time"])
 
 
+_MANAGED_BOT_PID: int | None = None
+
 def find_bot_processes() -> list[int]:
-    """返回所有属于本项目的 bot.py 进程 PID（排除 daemon.py 与其它项目）。"""
-    found: list[tuple[float, int]] = []
-    for proc in _iter_processes():
+    """返回当前由 daemon 直接启动且依然存活的主 bot 进程。"""
+    global _MANAGED_BOT_PID
+    if _MANAGED_BOT_PID is not None:
         try:
-            cmd = " ".join(proc.info.get("cmdline") or [])
-            if "MortalSim-Bot" not in cmd or "bot.py" not in cmd or "daemon.py" in cmd:
-                continue
-            found.append((proc.info.get("create_time") or 0.0, proc.info["pid"]))
+            import psutil
+            if psutil.pid_exists(_MANAGED_BOT_PID):
+                p = psutil.Process(_MANAGED_BOT_PID)
+                if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                    return [_MANAGED_BOT_PID]
         except Exception:
-            continue
-    found.sort()
-    return [pid for _, pid in found]
+            pass
+    return []
 
 
 def heartbeat_age() -> float:
@@ -139,14 +141,7 @@ def bot_is_healthy() -> bool:
             kill_pid(old_pid)
         pids = [pids[-1]]
 
-    age = heartbeat_age()
-    if age > HEARTBEAT_TIMEOUT:
-        if time.time() - _bot_spawned_at < BOT_START_GRACE:
-            return True
-        log(f"bot.py heartbeat stale ({age:.0f}s > {HEARTBEAT_TIMEOUT:.0f}s); treating as hung: {pids}")
-        for pid in pids:
-            kill_pid(pid)
-        return False
+    # MaiBot 架构健康度守护：进程存活即正常运行
     return True
 
 
@@ -175,12 +170,19 @@ def spawn_detached(args: list[str], cwd: Path, env: dict | None = None) -> int:
     return proc.pid
 
 
+MAIBOT_DIR = Path(r"D:\tenhoulib\MaiBot")
+MAIBOT_PYTHON = str(MAIBOT_DIR / ".venv" / "Scripts" / "python.exe")
+
 def start_bot() -> None:
-    global _bot_spawned_at
-    script = BOT_DIR / "src" / "bot.py"
-    pid = spawn_detached([PYTHON_EXE, "-u", str(script)], BOT_DIR)
+    global _bot_spawned_at, _MANAGED_BOT_PID
+    script = MAIBOT_DIR / "bot.py"
+    env = os.environ.copy()
+    env["EULA_AGREE"] = "8e6e7d647f7f82d6ea98456b73908656"
+    env["PRIVACY_AGREE"] = "91e5db7659c560bc3545e63859b6ebc0"
+    pid = spawn_detached([MAIBOT_PYTHON, str(script)], MAIBOT_DIR, env=env)
+    _MANAGED_BOT_PID = pid
     _bot_spawned_at = time.time()
-    log(f"bot.py restarted (pid={pid})")
+    log(f"MaiBot (Morta Agent) successfully started (pid={pid})")
 
 
 def port_open(port: int) -> bool:
@@ -291,6 +293,7 @@ def start_backend() -> None:
     env["MORTALSIM_DATA_DIR"] = BACKEND_DATA_DIR
     env["MORTALSIM_PORT"] = str(BACKEND_PORT)
     env["MORTALSIM_NO_BROWSER"] = "1"
+    env["MORTALSIM_ENGINE"] = "python"
     pid = spawn_detached([PYTHON_EXE, "run_mortalsim.py"], BACKEND_DIR, env)
     log(f"MortalSim backend restarted (pid={pid}, port={BACKEND_PORT})")
 
