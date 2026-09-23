@@ -106,18 +106,20 @@ def _iter_processes():
 _MANAGED_BOT_PID: int | None = None
 
 def find_bot_processes() -> list[int]:
-    """返回当前由 daemon 直接启动且依然存活的主 bot 进程。"""
-    global _MANAGED_BOT_PID
-    if _MANAGED_BOT_PID is not None:
+    """返回所有属于本项目的 bot.py 主进程 PID。"""
+    found: list[tuple[float, int]] = []
+    for proc in _iter_processes():
         try:
-            import psutil
-            if psutil.pid_exists(_MANAGED_BOT_PID):
-                p = psutil.Process(_MANAGED_BOT_PID)
-                if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
-                    return [_MANAGED_BOT_PID]
+            cmdline = proc.info.get("cmdline") or []
+            if not cmdline:
+                continue
+            cmd_str = " ".join(cmdline)
+            if "MortalSim-Bot" in cmd_str and "bot.py" in cmd_str and "daemon.py" not in cmd_str:
+                found.append((proc.info.get("create_time") or 0.0, proc.info["pid"]))
         except Exception:
-            pass
-    return []
+            continue
+    found.sort()
+    return [pid for _, pid in found]
 
 
 def heartbeat_age() -> float:
@@ -174,15 +176,11 @@ MAIBOT_DIR = Path(r"D:\tenhoulib\MaiBot")
 MAIBOT_PYTHON = str(MAIBOT_DIR / ".venv" / "Scripts" / "python.exe")
 
 def start_bot() -> None:
-    global _bot_spawned_at, _MANAGED_BOT_PID
-    script = MAIBOT_DIR / "bot.py"
-    env = os.environ.copy()
-    env["EULA_AGREE"] = "8e6e7d647f7f82d6ea98456b73908656"
-    env["PRIVACY_AGREE"] = "91e5db7659c560bc3545e63859b6ebc0"
-    pid = spawn_detached([MAIBOT_PYTHON, str(script)], MAIBOT_DIR, env=env)
-    _MANAGED_BOT_PID = pid
+    global _bot_spawned_at
+    script = BOT_DIR / "src" / "bot.py"
+    pid = spawn_detached([PYTHON_EXE, "-u", str(script)], BOT_DIR)
     _bot_spawned_at = time.time()
-    log(f"MaiBot (Morta Agent) successfully started (pid={pid})")
+    log(f"bot.py restarted (pid={pid})")
 
 
 def port_open(port: int) -> bool:

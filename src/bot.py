@@ -465,22 +465,31 @@ class Bot:
         user_id = str(event.get("user_id", ""))
         raw = str(event.get("raw_message") or "")
         segments = event.get("message") or []
-        mentioned = any(
-            seg.get("type") == "at" and str(seg.get("data", {}).get("qq", "")) == self.bot_self_qq
-            for seg in segments
-        )
-        if not mentioned:
-            return
-        whitelist = self.bot_cfg.get("group_whitelist") or []
-        if whitelist and group_id not in [int(x) for x in whitelist]:
-            return
-
-        # 只取纯文本段，去掉 @ / 图片 / CQ 代码
+        # 1. 优先提取纯文本内容与指令
         text_parts = []
         for seg in segments:
             if seg.get("type") == "text":
                 text_parts.append(str(seg.get("data", {}).get("text", "")))
         text = " ".join("".join(text_parts).split())
+
+        # 2. 判断是否是确定性指令 (/sim, /help, /state, /review, /取消)
+        is_direct_cmd = text.startswith(("/sim", "sim", "/help", "help", "帮助", "/state", "state", "状态", "/review", "review", "跑谱", "复盘", "/取消", "取消"))
+
+        # 3. 判断是否 @ 了机器人
+        mentioned = any(
+            seg.get("type") == "at" and str(seg.get("data", {}).get("qq", "")) == self.bot_self_qq
+            for seg in segments
+        )
+
+        # 只要是明确指令，或者 @ 了机器人，即放行处理；普通群员闲聊不插话
+        if not (mentioned or is_direct_cmd):
+            return
+
+        whitelist = self.bot_cfg.get("group_whitelist") or []
+        if whitelist and group_id not in [int(x) for x in whitelist]:
+            return
+
+        # 文本已在上文提取规整完毕
 
         if not text or text.startswith(("/help", "帮助", "help")):
             await self.send_group_text(
