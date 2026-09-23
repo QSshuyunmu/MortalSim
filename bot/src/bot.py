@@ -114,7 +114,8 @@ class Bot:
         sys.exit(0)
 
     def _is_admin(self, user_id: str) -> bool:
-        if user_id == "2361035324":
+        admin_list = [str(x) for x in self.bot_cfg.get("admin_qq", [])]
+        if user_id in admin_list:
             return True
         admins = self.bot_cfg.get("admin_qq") or []
         return str(user_id) in [str(x) for x in admins]
@@ -484,14 +485,17 @@ class Bot:
         if not text or text.startswith(("/help", "帮助", "help")):
             await self.send_group_text(
                 group_id,
-                "【Mortal 牌谱检讨 /review】\n"
-                "格式：/review <天凤/雀魂链接> [seat=0~3] [model=模型代号]\n"
-                "• 视角座次：默认取链接中的 tw 视角，也可显式指定 seat=0~3 (0东, 1南, 2西, 3北)\n"
-                "• 模型选择：Consensus(默认/可简写c,con) / Nova-X(争一/可简写n,nova) / Bastion(避四/可简写b) / Shadow-J(奇策/可简写j)\n"
-                "• 示例：/review http://tenhou.net/0/?log=...&tw=1 seat=2 model=Nova-X\n\n"
-                "【局况蒙特卡洛仿真 /sim】\n"
-                "示例：/sim 123456789m789s12p d8p c1pr,2p S1-0 seat=南 x=3 P250,250,250,250 1000\n\n"
-                "/state 查看队列状态 | /取消 撤回任务",
+                "【Morta 推演中枢 快速指南】\n\n"
+                "🀄 牌谱复盘：\n"
+                "/review <链接> [tw/seat=0~3] [model=c/n/b/j]\n"
+                "• 示例：/review http://tenhou.net/0/?log=...&tw=1 model=n\n"
+                "• 模型：c(共识/默认), n(争一), b(避四), j(奇策)\n\n"
+                "🎲 局况仿真：\n"
+                "/sim <14张手牌> d<宝牌> [条件...]\n"
+                "• 示例：/sim 123456789m789s12p d8p c1pr,2p S1-0 seat=南 1000\n\n"
+                "📊 状态管理：\n"
+                "• /state：查看当前 GPU 队列与状态\n"
+                "• /取消：撤回排队中或运行中的任务",
             )
             return
 
@@ -543,7 +547,7 @@ class Bot:
             return
 
         if text.startswith(("/stop", "/shutdown", "/exit", "停机", "停止")):
-            if user_id == "2361035324" or user_id in [str(x) for x in self.bot_cfg.get("admin_qq", [])]:
+            if user_id in [str(x) for x in self.bot_cfg.get("admin_qq", [])]:
                 await self.send_group_text(group_id, "收到停机指令，Bot 进程已安全停止。")
                 try:
                     _bot_lock_path().unlink(missing_ok=True)

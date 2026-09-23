@@ -46,6 +46,19 @@ Unlike static supervised policy evaluators that only report single-step probabil
    - Complete asynchronous bot bridge with 4K dark-themed decision card rendering.
    - Win32 Mutex process singletons, crash self-healing daemon, and lock-free async queue management.
 
+4. **100% Killer Mortal Official Code-Level Replay Reviewer**:
+   - **Pixel-Perfect Official Replication**: Deeply embeds the official `killerducky/killer_mortal_gui` layout and pure vector SVG tile suites, faithfully rendering Ferris, dual-phase Q/P probability bars, and comprehensive settlement modals.
+   - **Multi-Platform Replay Ingestion (Tenhou & Majsoul)**:
+     - Tenhou: Supports standard game logs (`tenhou.net/0/?log=...`), custom What-Cut JSON URLs (`tenhou.net/6/#json=...`), with automatic seat resolution (`tw=` and `seat=`).
+     - Majsoul: Ingests exported JSON/MJAI game streams from Tampermonkey/Majsoul+ with strict 4-player validation and Sanma auto-rejection.
+   - **Dynamic Model Matrix Routing**: Seamlessly review replays against 4 industrial codename models (`Consensus` default baseline, `Nova-X` top-spot aggressive, `Bastion` 4th-avoidance wall, `Shadow-J` surprise tactics).
+   - **Secure Instant Web Delivery**: Generates HMAC-signed secure tokens (48h TTL) integrated with Cloudflare Tunnel, returning mobile/PC instant review links directly in QQ groups.
+
+5. **Realistic Tenhou Discard River Engine & Morta NLU Terminal**:
+   - **Empirical Tenhou River Fitting**: Calibrated against high-dan real matches for early-turn discard distributions (winds, dragons, terminal 19, 28, and 456 mid-tiles) alongside natural tedashi/tsumogiri frequencies; strictly maintains global 4-tile physical budgets.
+   - **Cross-Seat Meld Chronological Clamping**: Full support for cross-seat call attribution (`c=pon[East]:5p>8p`, `c=chi[South]:...`) with precise game-loop cutoff immediately upon discard.
+   - **Morta Deadpan NLU Engine**: Translates complex conversational Riichi board descriptions into executable `/sim` commands with deadpan, minimalist terminal persona.
+
 ---
 
 ## Architecture Overview

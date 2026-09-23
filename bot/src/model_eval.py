@@ -33,7 +33,7 @@ import sys
 # 默认路径由本文件位置推导 (bot/src/model_eval.py -> 仓库根)，不再硬编码 D:/tenhoulib/...
 # —— 硬编码路径在换机/换盘后会让推断整体静默降级 (except 吞掉异常 -> 候选走兜底)。
 # 仓库根与 native 产物不在同一处时，用 MORTALSIM_ROOT 覆盖，不改本文件。
-MORTALSIM_ROOT = Path(os.environ.get("MORTALSIM_ROOT") or Path(__file__).resolve().parents[2]).resolve()
+MORTALSIM_ROOT = Path(os.environ.get("MORTALSIM_ROOT") or (Path(__file__).resolve().parents[2] / "MortalSim")).resolve()
 for p in [MORTALSIM_ROOT / "target" / "release", MORTALSIM_ROOT / "mortal", MORTALSIM_ROOT]:
     p_str = str(p)
     if p_str not in sys.path:
