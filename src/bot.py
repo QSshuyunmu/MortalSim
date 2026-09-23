@@ -544,6 +544,8 @@ class Bot:
                                 return
                 await self.send_group_text(group_id, error)
                 return
+            # 格式正确时，给用户即时反馈确认提示
+            await self.send_group_text(group_id, f"💡 指令已确认：{text}\n正在排队演算……以上。")
             await self._enqueue_sim(group_id, user_id, request)
             return
 
