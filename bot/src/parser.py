@@ -208,7 +208,7 @@ def _parse_river_token(token: str) -> tuple[str, bool, bool, dict[str, Any] | No
     return norm, is_tsumogiri, is_riichi, meld_info
 
 
-def _parse_river_tokens_string(discards_raw: str) -> list[tuple[str, bool, bool, dict[str, Any] | None]]:
+def _parse_river_tokens_string(discards_raw: str, *, strict: bool = False) -> list[tuple[str, bool, bool, dict[str, Any] | None]]:
     """Parse comma/space/compact separated tile tokens."""
     discards_raw = discards_raw.strip()
     if not discards_raw:
@@ -217,16 +217,20 @@ def _parse_river_tokens_string(discards_raw: str) -> list[tuple[str, bool, bool,
         raw_tokens = [d.strip() for d in re.split(r'[,，、\s]+', discards_raw) if d.strip()]
     else:
         raw_tokens = re.findall(r'[0-9][mpsz][tT\^摸rR立]{0,2}|[1-7]z[tT\^摸rR立]{0,2}|[东南西北白发中][tT\^摸rR立]{0,2}', discards_raw)
+        if strict and "".join(raw_tokens) != discards_raw:
+            raise ValueError(f"显式牌河含无法解析的舍牌：{discards_raw}")
 
     out = []
     for tok in raw_tokens:
         parsed = _parse_river_token(tok)
+        if strict and parsed is None:
+            raise ValueError(f"显式牌河含无法解析的舍牌：{tok}")
         if parsed:
             out.append(parsed)
     return out
 
 
-def _parse_river_spec(river_raw: str, target_seat: int, x: int = 1, oya: int = 0) -> tuple[list[tuple[str, bool, bool]], list[list[tuple[str, bool, bool]]] | None, list[dict[str, Any]], str | None]:
+def _parse_river_spec(river_raw: str, target_seat: int, x: int = 1, oya: int = 0, *, strict: bool = False) -> tuple[list[tuple[str, bool, bool]], list[list[tuple[str, bool, bool]]] | None, list[dict[str, Any]], str | None]:
     opponent_rivers: list[list[tuple[str, bool, bool]]] = [[], [], [], []]
     target_past: list[tuple[str, bool, bool]] = []
     melds: list[dict[str, Any]] = []
@@ -244,6 +248,9 @@ def _parse_river_spec(river_raw: str, target_seat: int, x: int = 1, oya: int = 0
             if sec:
                 sections.append(sec)
 
+        if strict and (len(sections) != 4 or indices[0] != 0):
+            return [], None, [], "显式响应牌河必须完整指定四家（东/南/西/北），缺失座位不能自动补牌"
+        seen_seats: set[int] = set()
         for sec in sections:
             parts = re.split(r'[:：=]', sec, maxsplit=1)
             if len(parts) != 2:
@@ -252,7 +259,10 @@ def _parse_river_spec(river_raw: str, target_seat: int, x: int = 1, oya: int = 0
             if seat_token not in SEAT_MAP:
                 return [], None, [], f"未知座位编号 '{parts[0]}'，支持 0-3 / E,S,W,N / 东南西北"
             seat_idx = SEAT_MAP[seat_token]
-            tokens = _parse_river_tokens_string(parts[1])
+            if strict and seat_idx in seen_seats:
+                return [], None, [], "显式响应牌河不能重复指定同一家座位"
+            seen_seats.add(seat_idx)
+            tokens = _parse_river_tokens_string(parts[1], strict=strict)
             for tok in tokens:
                 tile_s, ts, is_r, m_info = tok
                 if m_info:
@@ -264,6 +274,8 @@ def _parse_river_spec(river_raw: str, target_seat: int, x: int = 1, oya: int = 0
                 else:
                     opponent_rivers[seat_idx].append((tile_s, ts, is_r))
 
+        if strict and seen_seats != set(range(4)):
+            return [], None, [], "显式响应牌河必须指定四家不同座位"
         has_opp = any(len(r) > 0 for i, r in enumerate(opponent_rivers) if i != target_seat)
         return target_past, opponent_rivers if has_opp else None, melds, None
 
@@ -271,7 +283,7 @@ def _parse_river_spec(river_raw: str, target_seat: int, x: int = 1, oya: int = 0
     slash_sections = [s.strip() for s in re.split(r'[/|／｜]+', river_raw) if s.strip()]
     if len(slash_sections) == 4:
         for seat_idx, sec in enumerate(slash_sections):
-            tokens = _parse_river_tokens_string(sec)
+            tokens = _parse_river_tokens_string(sec, strict=strict)
             for tok in tokens:
                 tile_s, ts, is_r, m_info = tok
                 if m_info:
@@ -285,6 +297,8 @@ def _parse_river_spec(river_raw: str, target_seat: int, x: int = 1, oya: int = 0
         has_opp = any(len(r) > 0 for i, r in enumerate(opponent_rivers) if i != target_seat)
         return target_past, opponent_rivers if has_opp else None, melds, None
     elif len(slash_sections) < 4:
+        if strict:
+            return [], None, [], "显式响应牌河必须完整指定四家（东/南/西/北），缺失座位不能自动补牌"
         prec_seats = []
         cur = oya
         while cur != target_seat:
@@ -595,6 +609,8 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
     if river_m:
         river_raw = river_m.group(1).strip()
         rest = rest[:river_m.start()] + " " + rest[river_m.end():]
+    elif re.search(r"(?i)(?:^|(?<=[\s,;]))(?:river|河|牌河)[:：=]", rest):
+        return None, "显式牌河含无法解析的舍牌或字符"
 
     # 7. 提取候选 c... (支持 c=... 或 ctsumo,...)
     cand_m = re.search(r'(?i)(?:^|(?<=[\s,;]))[cC][:：=]?([a-zA-Z0-9mpszkrKR>:\-_,，、\(\)（）@\u4e00-\u9fa5]+?)(?=\s+[pPdDeEwWsSxX]|\s+\d+\b|\s*$)', rest)
@@ -958,11 +974,32 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
     effective_oya = 0
     round_oya = (int(round_raw[1]) - 1) % 4
 
-    if any(c.get("chi") or c.get("pon") or c.get("pass") or c.get("ron") or c.get("daiminkan") for c in candidates):
+    # Structural validation is shared with the service, including when the bot
+    # package is imported standalone from outside the repository cwd.
+    import sys
+    from pathlib import Path
+    root = str(Path(__file__).resolve().parents[2])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+    parsed_target_past = None
+    parsed_opp_rivers = None
+    if river_raw:
+        try:
+            parsed_target_past, parsed_opp_rivers, prefix_melds, river_err = _parse_river_spec(
+                river_raw, effective_target_seat, x_val, effective_oya, strict=is_response,
+            )
+        except ValueError as exc:
+            return None, str(exc)
+        if river_err:
+            return None, river_err
+
+    if is_response:
         if x_val == 1 and effective_target_seat == 0:
             return None, "东家(庄家)第1巡尚无上家弃牌，不能吃/碰/过；请使用真实响应时点（如 x=2）"
-        # All candidates describe ONE discard. A consumed pair can constrain the
-        # target, but an ambiguous pair must not silently choose another world.
+        # All candidates describe ONE latest discard, not an invented discard
+        # at the end of the caller's nominal turn. Chi is restricted to kamicha;
+        # pon/pass/ron may respond before the other opponents take that turn.
         possible = None
         for c in candidates:
             choices = None
@@ -974,37 +1011,42 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
             if choices is not None:
                 possible = choices if possible is None else possible & choices
         if river_raw:
-            _, explicit_rivers, _, error = _parse_river_spec(river_raw, effective_target_seat, x_val, 0)
-            if error:
-                return None, error
-            kami = (effective_target_seat + 3) % 4
-            expected = x_val - 1 if effective_target_seat == 0 else x_val
-            if explicit_rivers and len(explicit_rivers[kami]) == expected:
-                river_target = {explicit_rivers[kami][-1][0]}
-                possible = river_target if possible is None else possible & river_target
+            from mortal_app.call_context import latest_response_discard
+            explicit_rivers = [list(row) for row in parsed_opp_rivers or [[], [], [], []]]
+            explicit_rivers[effective_target_seat] = parsed_target_past or []
+            try:
+                actor, latest_tile = latest_response_discard(explicit_rivers, 0, effective_target_seat, x_val)
+            except ValueError as exc:
+                return None, str(exc)
+            if any(c.get("chi") for c in candidates) and actor != (effective_target_seat + 3) % 4:
+                return None, "吃牌只能响应上家的最新弃牌；碰牌可响应任意对手"
+            latest = {latest_tile}
+            possible = latest if possible is None else possible & latest
         if not possible:
-            return None, "副露候选与牌河必须指向同一张上家弃牌；请明确目标牌"
+            return None, "副露候选与牌河必须指向同一张最新弃牌；请明确目标牌"
         if len(possible) != 1:
-            return None, "吃牌搭子对应多个目标，请写 chi:23m(4m) 或提供上家最后弃牌"
+            return None, "吃牌搭子对应多个目标，请写 chi:23m(4m) 或提供最新弃牌"
         call_tile = next(iter(possible))
         for c in candidates:
             if c.get("chi") or c.get("pon") or c.get("daiminkan"):
                 c["call_tile"] = call_tile
 
     if river_raw:
-        parsed_target_past, parsed_opp_rivers, prefix_melds, river_err = _parse_river_spec(river_raw, effective_target_seat, x_val, effective_oya)
-        if river_err:
-            return None, river_err
-        # 增量自动补齐其余未指定或张数不足的玩家牌河
-        target_past, opp_rivers = _generate_default_rivers(
-            hand_tiles,
-            effective_target_seat,
-            effective_oya,
-            x_val,
-            call_target_tile=call_tile,
-            partial_target_past=parsed_target_past,
-            partial_opp_rivers=parsed_opp_rivers,
-        )
+        if is_response:
+            # A specified response river is evidence, not a template to pad
+            # with later invented discards. Exact clock/tiles are rechecked at
+            # the service boundary by response_context.
+            target_past, opp_rivers = parsed_target_past, parsed_opp_rivers
+        else:
+            target_past, opp_rivers = _generate_default_rivers(
+                hand_tiles,
+                effective_target_seat,
+                effective_oya,
+                x_val,
+                call_target_tile=call_tile,
+                partial_target_past=parsed_target_past,
+                partial_opp_rivers=parsed_opp_rivers,
+            )
     elif x_val >= 2 or (x_val >= 1 and effective_target_seat != 0):
         target_past, opp_rivers = _generate_default_rivers(
             hand_tiles,
@@ -1063,13 +1105,8 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
             if meld.get(key) is not None:
                 meld[key] = (round_oya + meld[key]) % 4
 
-    # Pure structural validation also runs at the service boundary, independently
-    # of the bot. Keep standalone bot/src imports working outside the repo cwd.
-    import sys
-    from pathlib import Path
-    root = str(Path(__file__).resolve().parents[2])
-    if root not in sys.path:
-        sys.path.insert(0, root)
+    # Repeat at the service boundary: a direct API request must obey the same
+    # clock and physical constraints, independent of the bot parser.
     from mortal_app.call_context import response_context
     try:
         response_context(request)

@@ -1,6 +1,7 @@
 """Portable response-context regression tests: no torch/libriichi/network needed."""
 from copy import deepcopy
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -87,9 +88,75 @@ def test_illegal_response_is_not_a_numeric_candidate(mutation, match):
 
 
 def test_explicit_river_conflict_not_overwritten():
-    req, error = parse_sim_command(COMMAND.replace(" 200", " river=北:6z 200"))
+    river = "river=东:1z/南:2z/西:5z/北:6z"
+    req, error = parse_sim_command(COMMAND.replace(" 200", f" {river} 200"))
     assert req is None
-    assert "同一张上家弃牌" in error
+    assert "同一张最新弃牌" in error
+
+
+PON_HAND = "112m13558p2236s4z"
+PON_RIVER_WEST = "东:9s,1z,8pt/南:3z,9p,5z/西:1p,3z,5p/北:9m,2z"
+PON_RIVER_EAST = "东:9s,1z,8pt,5p/南:3z,9p,5z/西:1p,3z,2p/北:9m,2z,7z"
+
+
+def response_command(x, river, *, hand=PON_HAND, candidates="pon:5p>6s,pon:5p>8p,pon:5p>1m,pass"):
+    return (f"/sim {hand} d5p seat=北 x={x} E3-0 river={river} "
+            f"P277,208,264,251 c={candidates} 50")
+
+
+@pytest.mark.parametrize("x,river,source,lengths", [
+    (3, PON_RIVER_WEST, 0, [3, 2, 3, 3]),
+    (4, PON_RIVER_EAST, 2, [3, 3, 4, 3]),
+])
+def test_specified_river_resolves_actual_last_discard_without_padding(x, river, source, lengths):
+    req = parse(response_command(x, river))
+    ct = response_context(req)
+    assert ct["target_actor"] == source
+    assert ct["tile"] == "5p"
+    assert [len(row) for row in ct["rivers"]] == lengths
+    assert response_events(req, ct)[-1] == {
+        "type": "dahai", "actor": source, "pai": "5p", "tsumogiri": False,
+    }
+    assert _table_snapshot({"config": req, "candidates": [{"candidate": "pass"}]})["response"]["target_actor"] == source
+
+
+def test_chi_requires_kamicha_even_when_latest_tile_forms_a_sequence():
+    hand = "112m13458p2236s4z"  # holds 3p4p to chi the discarded 5p
+    req = parse(response_command(3, PON_RIVER_WEST, hand=hand, candidates="chi:3p4p,pass"))
+    assert response_context(req)["target_actor"] == 0
+    req, error = parse_sim_command(response_command(4, PON_RIVER_EAST, hand=hand, candidates="chi:3p4p,pass"))
+    assert req is None
+    assert "吃牌只能响应上家" in error
+
+
+@pytest.mark.parametrize("river,match", [
+    ("东:9s,1z,8pt/南:3z,9p,5z/西:1p,3z,2p/北:9m,2z,7z", "没有可响应|最后弃牌属于自己"),
+    ("东:9s,1z,8pt/南:3z,9p,5z,1z/西:1p,3z,2p/北:9m,2z,7z", "连续的轮次前缀"),
+    ("东:9s,1z,8pt,5p/南:3z,9p,5z/西:1p,3z,2p,1z/北:9m,2z,7z", "连续的轮次前缀"),
+    ("东:9s,1z,8pt,5p/南:3z,9p,5z/西:1p,3z,5p/北:9m,2z,7z", "物理数量"),
+    ("东:9s,1z,8pt,5p/南:3z,9p,5z/西:1p,3z,2p", "必须完整指定四家"),
+    ("东:9s,1z,8pt,5p/南:3z,9p,5z/西:1p,3z,2p/东:9m,2z,7z", "重复指定"),
+    ("东:9s,1z,8pt,5p/南:3z,9p,5z/西:1p,3z,2p/北:9m,2z,7z,!", "无法解析"),
+])
+def test_specified_river_fail_closed_on_bad_clock_or_tiles(river, match):
+    req, error = parse_sim_command(response_command(4, river))
+    assert req is None
+    assert error is not None and re.search(match, error), error
+
+
+def test_backend_rejects_forged_noncontiguous_river_without_parser():
+    req = parse(response_command(4, PON_RIVER_EAST))
+    # Inject a future South discard while removing the East discard it needs.
+    req["opponent_rivers"][2].pop()
+    req["opponent_rivers"][3].append(("1z", False, False))
+    with pytest.raises(ValueError, match="连续的轮次前缀"):
+        response_context(req)
+
+
+def test_latest_discard_not_candidate_target_is_rejected():
+    req, error = parse_sim_command(response_command(4, PON_RIVER_EAST, candidates="pon:2p,pass"))
+    assert req is None
+    assert "同一张最新弃牌" in error
 
 
 def test_candidates_cannot_name_different_discard_worlds():

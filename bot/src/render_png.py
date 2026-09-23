@@ -351,7 +351,8 @@ def _table_snapshot(result_data: dict[str, Any]) -> dict[str, Any]:
             response = response_context(config)
             if response is None:
                 raise ValueError("副露结果与请求决策类型不一致")
-    return {"config": config, "target_seat": target, "target_wind": (target - oya) % 4, "response": response}
+    return {"config": config, "target_seat": target, "target_wind": (target - oya) % 4,
+            "oya": oya, "response": response}
 
 
 def render_png(
@@ -563,7 +564,10 @@ def render_png(
 
     if snapshot["response"]:
         called = snapshot["response"]["tile"]
-        draw.text((left_x + 24, left_y + left_h - 34), f"上家打出 {called} · 待响应（未摸牌）", fill=t_cfg["text_gold"], font=f_sub)
+        source_wind = (snapshot["response"]["target_actor"] - snapshot["oya"]) % 4
+        draw.text((left_x + 24, left_y + left_h - 34),
+                  f"{_seat_zh(source_wind)}家打出 {called} · 待响应（未摸牌）",
+                  fill=t_cfg["text_gold"], font=f_sub)
 
     kami_start_x = cx - 10 - rw_h
     kami_start_y = cy + 16

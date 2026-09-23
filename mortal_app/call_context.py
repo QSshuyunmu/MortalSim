@@ -54,6 +54,34 @@ def kind(candidate: Any) -> str:
     return "discard"
 
 
+def latest_response_discard(
+    rivers: list[list[tuple[str, bool, bool]]], oya: int, target: int, x: int,
+) -> tuple[int, str]:
+    """Resolve the last *actual* discard in a continuous public timeline.
+
+    x is the target player's next turn number, not a requirement that every
+    earlier seat has already discarded in that turn. A pon can interrupt any
+    opponent's turn; a chi can only interrupt the immediately preceding seat.
+    """
+    if len(rivers) != 4 or not 0 <= target < 4 or not 0 <= oya < 4 or not 1 <= x <= 18:
+        raise ValueError("响应牌河座次或巡目越界")
+    if len(rivers[target]) != x - 1:
+        raise ValueError(f"牌河时序错误：自家第{x}巡响应前必须已弃{x - 1}张牌")
+    total = sum(len(row) for row in rivers)
+    seen = [0] * 4
+    for index in range(total):
+        actor = (oya + index) % 4
+        if seen[actor] >= len(rivers[actor]):
+            raise ValueError("牌河时序错误：弃牌不构成连续的轮次前缀（禁止静默截断或补出未来弃牌）")
+        seen[actor] += 1
+    if not total or total > 4 * x or seen[target] != x - 1:
+        raise ValueError("牌河时序错误：没有可响应的最新对手弃牌")
+    actor = (oya + total - 1) % 4
+    if actor == target:
+        raise ValueError("牌河时序错误：最后弃牌属于自己，不能响应自己的弃牌")
+    return actor, rivers[actor][-1][0]
+
+
 def response_context(request: dict) -> dict | None:
     candidates = request.get("discards", [])
     if isinstance(candidates, str):
@@ -79,13 +107,12 @@ def response_context(request: dict) -> dict | None:
     if not isinstance(rivers, (list, tuple)) or len(rivers) != 4:
         raise ValueError("副露响应必须提供四家牌河，不能凭空生成响应弃牌")
     rivers = [[entry(e) for e in row] for row in rivers]
+    if rivers[target]:
+        raise ValueError("自家牌河只能通过 target_past_discards 提供，不能在 opponent_rivers 重复指定")
     rivers[target] = [entry(e) for e in request.get("target_past_discards") or []]
-    for p, row in enumerate(rivers):
-        expected = x - 1 + int((p - oya) % 4 < wind)
-        if len(row) != expected:
-            raise ValueError(f"牌河时序错误：玩家{p}应有{expected}张弃牌，实际{len(row)}张（禁止静默截断）")
-    actor = (target + 3) % 4
-    called = rivers[actor][-1][0]
+    actor, called = latest_response_discard(rivers, oya, target, x)
+    if "chi" in kinds and actor != (target + 3) % 4:
+        raise ValueError("吃牌只能响应上家的最新弃牌；碰牌可响应任意对手")
     visible = hand + [tile(request["dora"])] + [e[0] for row in rivers for e in row]
     if any(not re.fullmatch(r"[0-9][mps]|[1-7]z", t) for t in visible):
         raise ValueError("牌局中存在非法牌")
@@ -98,19 +125,19 @@ def response_context(request: dict) -> dict | None:
         if isinstance(c, str):
             c = {}
         if c.get("call_tile") and tile(c["call_tile"]) != called:
-            raise ValueError(f"副露目标{c['call_tile']}与上家最后弃牌{called}不一致")
+            raise ValueError(f"副露目标{c['call_tile']}与玩家{actor}最新弃牌{called}不一致")
         if k == "chi":
             consumed = [tile(t) for t in c.get("chi", [])]
             seq = sorted(map(base, consumed + [called]))
             if (len(consumed) != 2 or called[-1] not in "mps" or
                     len({t[-1] for t in seq}) != 1 or
                     [int(t[0]) for t in seq] != list(range(int(seq[0][0]), int(seq[0][0]) + 3))):
-                raise ValueError(f"吃牌搭子不能与上家弃牌{called}组成顺子")
+                raise ValueError(f"吃牌搭子不能与最新弃牌{called}组成顺子")
         elif k in ("pon", "daiminkan"):
             n = 2 if k == "pon" else 3
             consumed = sorted((t for t in hand if base(t) == base(called)), key=lambda t: not t.startswith("0"))[:n]
             if len(consumed) != n:
-                raise ValueError(f"手牌不足以{k}上家弃牌{called}")
+                raise ValueError(f"手牌不足以{k}最新弃牌{called}")
         else:
             consumed = []
         remaining = Counter(hand)

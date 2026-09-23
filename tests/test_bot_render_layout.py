@@ -49,6 +49,30 @@ def capture_table(renderer, monkeypatch, tmp_path, candidates, qp):
     return texts, bars
 
 
+def test_pon_report_names_the_actual_discarding_seat(renderer, monkeypatch, tmp_path):
+    from parser import parse_sim_command
+
+    command = ("/sim 112m13558p2236s4z d5p seat=北 x=4 E3-0 "
+               "river=东:9s,1z,8pt,5p/南:3z,9p,5z/西:1p,3z,2p/北:9m,2z,7z "
+               "P277,208,264,251 c=pon:5p,pass 50")
+    request, error = parse_sim_command(command)
+    assert error is None, error
+    candidate = row()
+    candidate.update(candidate="pon:5p", discard="pon:5p")
+    captured = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def capture_text(draw, xy, text, *args, **kwargs):
+        captured.append(str(text))
+        return original_text(draw, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture_text)
+    renderer.render_png({"config": request, "candidates": [candidate]},
+                        tmp_path, "fixture-font", tmp_path / "pon.png")
+    assert "东家打出 5p · 待响应（未摸牌）" in captured
+    assert not any("上家打出" in value for value in captured)
+
+
 def row():
     return {"candidate": "2z", "discard": "2z",
             "value": {"point": {"value": -237, "ci95": [-421, -52]}},

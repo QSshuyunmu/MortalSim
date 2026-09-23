@@ -116,6 +116,9 @@ def _meld_followup_qp(engine: Any, target_seat: int, hand: list[str], call_tile:
     import libriichi
     from mortal_app.call_context import base, mjai, tile
     output = {key: dict(value) for key, value in root_qp.items()}
+    # Pon can claim any opponent's latest discard, not only kamicha's. Replay
+    # the same actor used by the validated response prefix for every branch.
+    source_actor = next(event["actor"] for event in reversed(prefix) if event["type"] == "dahai")
     cache: dict[tuple, dict[str, Any]] = {}
     for candidate in candidates:
         chi = candidate.get("chi")
@@ -142,7 +145,7 @@ def _meld_followup_qp(engine: Any, target_seat: int, hand: list[str], call_tile:
                 branch.react(json.dumps({"type": "start_game"}))
                 for event in prefix:
                     branch.react(json.dumps(event))
-                action = {"type": key[0], "actor": target_seat, "target": (target_seat + 3) % 4,
+                action = {"type": key[0], "actor": target_seat, "target": source_actor,
                           "pai": mjai(call_tile), "consumed": list(map(mjai, consumed))}
                 answer = branch.react(json.dumps(action))
                 if not answer:
