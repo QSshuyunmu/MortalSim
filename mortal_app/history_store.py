@@ -210,11 +210,11 @@ def compute_canonical_fingerprint(req: Dict[str, Any]) -> str:
         "hanchan_state_semantics": "absolute-player-ids-v2",
     }
 
-    # The response sampler formerly forced first_discard (usually 1m) as the
-    # unknown next draw. Never merge those samples into corrected 13-tile runs.
+    # v3 keeps the unknown post-pass draw and opens the final response for all
+    # opponents (including lower IDs). Never mix pre-fix response rollouts.
     from .call_context import kind
     if any(kind(c) in ("chi", "pon", "daiminkan", "ron", "pass") for c in discards):
-        canonical_obj["response_semantics"] = "undrawn-prefix-v2"
+        canonical_obj["response_semantics"] = "all-seat-response-v3"
 
     serialized = json.dumps(canonical_obj, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

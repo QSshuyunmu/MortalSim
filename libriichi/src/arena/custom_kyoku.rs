@@ -106,6 +106,23 @@ impl RunProfile {
     }
 }
 
+/// Exact physical consumption for a forced pon. Legacy direct callers may omit
+/// it; service requests always bind it before simulation.
+fn forced_pon_consumption(
+    pai: Tile, count: u8, has_red: bool, requested: Option<[Tile; 2]>,
+) -> Option<[Tile; 2]> {
+    let normal = pai.deaka();
+    let consumed = requested.unwrap_or(if has_red {
+        [normal.akaize(), normal]
+    } else {
+        [normal; 2]
+    });
+    let reds = consumed.iter().filter(|t| t.is_aka()).count() as u8;
+    (count >= 2 && consumed.iter().all(|t| t.deaka() == normal)
+        && reds <= u8::from(has_red) && 2 - reds <= count - u8::from(has_red))
+        .then_some(consumed)
+}
+
 struct GameState {
     bs: super::board::BoardState,
     reactions: [EventExt; 4],
@@ -140,6 +157,21 @@ struct GameState {
     target_discards: u8,
     first_tenpai_turn: Option<u8>,
     target_agari_metrics: Option<TargetAgariMetrics>,
+}
+
+impl GameState {
+    fn open_response_boundary(&mut self, is_response: bool) {
+        if self.prefix_completed || self.prefix_index != self.prefix_steps.len() || !is_response {
+            return;
+        }
+        let cans = self.bs.agent_context().player_states[self.target_seat as usize].last_cans();
+        if cans.can_discard || !cans.can_act() {
+            self.ended = true;
+            self.error_msg = Some("first_response_boundary_unavailable".to_owned());
+        } else {
+            self.prefix_completed = true;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,6 +360,7 @@ impl CustomKyokuRunner {
             false,
             false,
             None,
+            None,
             py,
         )?;
         Ok(r.swap_remove(0))
@@ -341,7 +374,7 @@ impl CustomKyokuRunner {
                         tau = 1.0, weighted = false,
                         first_tsumo_agari = false, first_ron = false, first_pass = false,
                         first_chi = None, first_pon = false, first_daiminkan = false,
-                        first_follow_up_discard = None))]
+                        first_follow_up_discard = None, first_pon_consumed = None))]
     fn run_many(
         &self,
         engine: PyObject,
@@ -373,6 +406,7 @@ impl CustomKyokuRunner {
         first_pon: bool,
         first_daiminkan: bool,
         first_follow_up_discard: Option<String>,
+        first_pon_consumed: Option<Vec<String>>,
         py: Python<'_>,
     ) -> PyResult<Vec<PyObject>> {
         let total_started = Instant::now();
@@ -418,6 +452,13 @@ impl CustomKyokuRunner {
         let first_tsumo_tile = first_tsumo.as_ref().map(|s| parse(s)).transpose()?;
         let first_kan_tile = first_kan.as_ref().map(|s| parse(s)).transpose()?;
         let first_follow_up_tile = first_follow_up_discard.as_ref().map(|s| parse(s)).transpose()?;
+        let first_pon_tiles = first_pon_consumed.as_ref().map(|c| {
+            if !first_pon || c.len() != 2 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "first_pon_consumed requires first_pon and exactly two tiles"));
+            }
+            Ok([parse(&c[0])?, parse(&c[1])?])
+        }).transpose()?;
         let first_chi_consumed: Option<[Tile; 2]> = if let Some(ref c) = first_chi {
             if c.len() != 2 {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("first_chi must contain exactly 2 consumed tiles"));
@@ -572,7 +613,7 @@ impl CustomKyokuRunner {
                 );
                 if fallback_count > 0 {
                     eprintln!(
-                        "[CustomKyokuRunner] marginal assembly fallback used for {} of {} games (rivers may be physically contradictory)",
+                        "[CustomKyokuRunner] marginal recombination exhausted for {} of {} games; reused original jointly sampled hands (physical tile limits unchanged)",
                         fallback_count, count
                     );
                 }
@@ -683,6 +724,12 @@ impl CustomKyokuRunner {
 
             let scan_started = profiling.then(Instant::now);
             for (gi, g) in games.iter_mut().enumerate() {
+                if g.ended {
+                    continue;
+                }
+                // Open the final response boundary for ALL players before the
+                // seat loop: a lower-ID opponent may ron/preempt our forced pon.
+                g.open_response_boundary(is_response);
                 if g.ended {
                     continue;
                 }
@@ -806,16 +853,18 @@ impl CustomKyokuRunner {
                                     let kawa = st.last_kawa_tile();
                                     if let Some(pai) = kawa {
                                         let akas = st.akas_in_hand();
-                                        let can_aka = match pai.as_u8() {
+                                        let has_red = match pai.deaka().as_u8() {
                                             tu8!(5m) => akas[0],
                                             tu8!(5p) => akas[1],
                                             tu8!(5s) => akas[2],
                                             _ => false,
                                         };
-                                        let consumed = if can_aka {
-                                            [pai.akaize(), pai.deaka()]
-                                        } else {
-                                            [pai.deaka(); 2]
+                                        let Some(consumed) = forced_pon_consumption(
+                                            pai, st.tehai()[pai.deaka().as_usize()], has_red, first_pon_tiles,
+                                        ) else {
+                                            g.ended = true;
+                                            g.error_msg = Some("first_pon_consumed_invalid".to_owned());
+                                            continue;
                                         };
                                         g.reactions[pid] = EventExt::no_meta(Event::Pon {
                                             actor: pid as u8,
@@ -914,16 +963,19 @@ impl CustomKyokuRunner {
                         if g.pending_first_meld_discard {
                             g.pending_first_meld_discard = false;
                             if let Some(follow_up) = g.first_follow_up_discard.take() {
-                                if st.tehai()[follow_up.deaka().as_usize()] > 0 {
+                                if st.last_cans().can_discard && st.discard_candidates_aka()[follow_up.as_usize()] {
                                     g.reactions[pid] = EventExt::no_meta(Event::Dahai {
                                         actor: pid as u8,
                                         pai: follow_up,
                                         tsumogiri: false,
                                     });
-                                    continue;
+                                } else {
+                                    g.ended = true;
+                                    g.error_msg = Some("first_meld_follow_up_invalid".to_owned());
                                 }
+                                continue;
                             }
-                            // If no follow_up specified or not in hand, fall through to batch_map (AI decides)
+                            // Only an omitted follow-up delegates the discard to the model.
                         }
                     }
                     batch_map.push((gi, pid));
@@ -2049,6 +2101,88 @@ mod tests {
         Event, EventExt, ForcedFirstAction, RoundOutcome, classify_round_outcome,
         forced_first_action, round_balances_from_events, score_deltas, select_stable_action,
     };
+
+    #[test]
+    fn lower_id_ron_remains_eligible_against_target_pon() {
+        use super::{Board, Tile, UNSHUFFLED, build_game_state_from_spec};
+        use crate::arena::prefix::{HandAssignment, PrefixGameSpec, PrefixStep};
+        use std::str::FromStr;
+        let parse = |s: &str| Tile::from_str(s).unwrap();
+        let called = parse("C");
+        let mut pool = UNSHUFFLED.to_vec();
+        let mut take = |names: &[&str]| -> [Tile; 13] {
+            names.iter().map(|s| {
+                let t = parse(s);
+                let i = pool.iter().position(|p| *p == t).unwrap();
+                pool.remove(i)
+            }).collect::<Vec<_>>().try_into().unwrap()
+        };
+        // South can ron C with sanshoku; North can pon the same C. South's
+        // absolute ID is lower, so opening inside North's seat loop lost ron.
+        let south = take(&["1m","2m","3m","1p","2p","3p","1s","2s","3s","5s","5s","5s","C"]);
+        let north = take(&["C","C","4m","5m","6m","7m","8m","9m","4p","5p","6p","7s","8s"]);
+        let east = take(&["C","1m","2m","3m","4p","6p","7p","8p","9p","1s","2s","3s","E"]);
+        let west: [Tile; 13] = pool.drain(..13).collect::<Vec<_>>().try_into().unwrap();
+        let haipai = [east, south, west, north];
+        let board = Board {
+            kyoku: 0, honba: 0, kyotaku: 0, scores: [25000; 4], haipai,
+            rinshan: pool.drain(..4).collect(),
+            dora_indicators: pool.drain(..5).collect(),
+            ura_indicators: pool.drain(..5).collect(),
+            yama: pool,
+        };
+        let spec = PrefixGameSpec {
+            board, oya: 0, target_seat: 3,
+            forced_steps: vec![PrefixStep { actor: 0, tile: called, tsumogiri: false,
+                                          is_riichi: false, accumulate_likelihood: false }],
+            hands: std::array::from_fn(|i| HandAssignment { initial_13: haipai[i] }),
+        };
+        let mut g = build_game_state_from_spec(spec, parse("1m"), [25000; 4], 0, false, false, None, false, (1, 2));
+        g.first_pon = true;
+        g.bs.poll(Default::default()).unwrap();
+        g.bs.poll(std::array::from_fn(|i| if i == 0 {
+            EventExt::no_meta(Event::Dahai { actor: 0, pai: called, tsumogiri: false })
+        } else { EventExt::default() })).unwrap();
+        g.prefix_index = 1;
+        g.open_response_boundary(true);
+        assert!(g.prefix_completed && !g.ended);
+        let states = &g.bs.agent_context().player_states;
+        assert!(states[1].last_cans().can_ron_agari);
+        assert!(states[3].last_cans().can_pon);
+        // Both reactions reach Board's real priority resolution, not just the
+        // players visited after the target. Ron wins over pon.
+        g.bs.poll(std::array::from_fn(|i| match i {
+            1 => EventExt::no_meta(Event::Hora { actor: 1, target: 0, deltas: None, ura_markers: None }),
+            3 => EventExt::no_meta(Event::Pon { actor: 3, target: 0, pai: called, consumed: [called; 2] }),
+            _ => EventExt::default(),
+        })).unwrap();
+        let log = g.bs.take_log();
+        assert!(log.iter().any(|e| matches!(e.event, Event::Hora { actor: 1, .. })));
+        assert!(!log.iter().any(|e| matches!(e.event, Event::Pon { .. })));
+    }
+
+    #[test]
+    fn forced_pon_preserves_exact_red_or_normal_consumption() {
+        use super::{Tile, forced_pon_consumption};
+        use std::str::FromStr;
+        for suit in ["m", "p", "s"] {
+            let normal = Tile::from_str(&format!("5{suit}")).unwrap();
+            let red = normal.akaize();
+            assert_eq!(forced_pon_consumption(normal, 3, true, Some([red, normal])), Some([red, normal]));
+            assert_eq!(forced_pon_consumption(normal, 3, true, Some([normal; 2])), Some([normal; 2]));
+            assert_eq!(forced_pon_consumption(normal, 2, true, Some([normal; 2])), None);
+            assert_eq!(forced_pon_consumption(normal, 3, true, Some([red; 2])), None);
+            assert_eq!(forced_pon_consumption(red, 3, false, Some([normal; 2])), Some([normal; 2]));
+            assert_eq!(forced_pon_consumption(normal, 2, false, Some([red, normal])), None);
+        }
+        for id in 0..34 {
+            let tile = Tile::new_unchecked(id);
+            assert_eq!(forced_pon_consumption(tile, 2, false, None), Some([tile; 2]));
+            assert_eq!(forced_pon_consumption(tile, 1, false, None), None);
+            let wrong = Tile::new_unchecked((id + 1) % 34);
+            assert_eq!(forced_pon_consumption(tile, 2, false, Some([tile, wrong])), None);
+        }
+    }
 
     #[test]
     fn stable_selector_is_legal_deterministic_and_tie_stable() {

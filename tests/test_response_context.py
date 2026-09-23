@@ -195,10 +195,10 @@ def test_backend_rejects_before_native_or_model_import(monkeypatch):
         service._parse_inputs(request)
 
 
-def test_pon_follow_up_cannot_discard_the_red_five_consumed_by_runner():
+def test_pon_follow_up_cannot_discard_same_kind_even_when_red_can_be_retained():
     req, error = parse_sim_command("/sim 12550m678p789s11z d9p c=pon:5m>0m,pass x=2 E1 seat=东 200")
     assert req is None
-    assert "剩余手牌" in error
+    assert "喰替" in error
 
 
 def test_native_follow_up_checks_mask_not_only_validate_reaction(monkeypatch):

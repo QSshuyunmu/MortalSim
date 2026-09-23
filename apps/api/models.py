@@ -72,6 +72,7 @@ class DiscardCandidate(BaseModel):
     pass_action: bool = Field(default=False, alias="pass")
     chi: list[str] | None = None
     pon: bool = False
+    pon_consumed: list[str] | None = Field(default=None, min_length=2, max_length=2)
     daiminkan: bool = False
     call_tile: str | None = None
     follow_up_discard: str | None = None
@@ -97,9 +98,8 @@ class DiscardCandidate(BaseModel):
             fu = f">{self.follow_up_discard}" if self.follow_up_discard else ""
             return f"chi:{''.join(self.chi)}{fu}"
         if self.pon:
-            fu = f">{self.follow_up_discard}" if self.follow_up_discard else ""
-            target_str = f":{self.call_tile}" if self.call_tile else ""
-            return f"pon{target_str}{fu}"
+            from mortal_app.call_context import pon_id
+            return pon_id(self.model_dump())
         if self.daiminkan:
             return "daiminkan"
         if self.kyushu:

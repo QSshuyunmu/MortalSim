@@ -336,6 +336,7 @@ def _generate_default_rivers(
     call_target_tile: str | None = None,
     partial_target_past: list[tuple[str, bool, bool]] | None = None,
     partial_opp_rivers: list[list[tuple[str, bool, bool]]] | None = None,
+    dora_indicator: str | None = None,
 ) -> tuple[list[tuple[str, bool, bool]], list[list[tuple[str, bool, bool]]]]:
     """当巡目 x >= 2 且用户未提供牌河时，自动生成四家物理合法、无冲突且符合牌理的牌河。
 
@@ -408,6 +409,13 @@ def _generate_default_rivers(
             t = "5s"
         tile_used_counts[t] = tile_used_counts.get(t, 0) + 1
 
+    normal_fives = {f"5{s}": hand_tiles.count(f"5{s}") for s in "mps"}
+    if dora_indicator:
+        indicator = "5" + dora_indicator[1:] if dora_indicator.startswith("0") else dora_indicator
+        tile_used_counts[indicator] = tile_used_counts.get(indicator, 0) + 1
+        if dora_indicator in normal_fives:
+            normal_fives[dora_indicator] += 1
+
     rivers: list[list[tuple[str, bool, bool]]] = [[], [], [], []]
     if partial_target_past:
         rivers[target_seat] = list(partial_target_past)
@@ -420,10 +428,23 @@ def _generate_default_rivers(
     for p in range(4):
         for tok in rivers[p]:
             t = tok[0]
+            if t in normal_fives:
+                normal_fives[t] += 1
             if t in ("0m", "5mr"): t = "5m"
             elif t in ("0p", "5pr"): t = "5p"
             elif t in ("0s", "5sr"): t = "5s"
             tile_used_counts[t] = tile_used_counts.get(t, 0) + 1
+
+    pos_target = (target_seat + 4 - oya) % 4
+    call_round = x - 1 if pos_target == 0 else x
+    call_player = (target_seat + 3) % 4
+    if call_target_tile and len(rivers[call_player]) < call_round:
+        key = "5" + call_target_tile[1:] if call_target_tile.startswith("0") else call_target_tile
+        tile_used_counts[key] = tile_used_counts.get(key, 0) + 1
+        if call_target_tile in normal_fives:
+            normal_fives[call_target_tile] += 1
+    if any(n > 4 for n in tile_used_counts.values()) or any(n > 3 for n in normal_fives.values()):
+        raise ValueError("手牌、宝牌指示和响应弃牌存在超出物理数量的牌")
 
     # 每张牌被各家切出的历史记录（避免一家频繁来回切相同牌）
     player_discard_history: list[list[str]] = [[tok[0] for tok in rivers[p]] for p in range(4)]
@@ -433,7 +454,7 @@ def _generate_default_rivers(
         last_discard = rivers[p_idx][-1][0] if rivers[p_idx] else None
 
         def can_pick(candidate: str) -> bool:
-            if tile_used_counts.get(candidate, 0) >= 4:
+            if tile_used_counts.get(candidate, 0) >= 4 or normal_fives.get(candidate, 0) >= 3:
                 return False
             if last_discard is not None and candidate == last_discard:
                 return False
@@ -449,6 +470,8 @@ def _generate_default_rivers(
         if valid_candidates:
             best_tile = weighted_choice(valid_candidates)
             tile_used_counts[best_tile] = tile_used_counts.get(best_tile, 0) + 1
+            if best_tile in normal_fives:
+                normal_fives[best_tile] += 1
             used_this_turn.add(best_tile)
             player_discard_history[p_idx].append(best_tile)
             return best_tile
@@ -458,24 +481,24 @@ def _generate_default_rivers(
         if valid_fallback:
             best_tile = weighted_choice(valid_fallback)
             tile_used_counts[best_tile] = tile_used_counts.get(best_tile, 0) + 1
+            if best_tile in normal_fives:
+                normal_fives[best_tile] += 1
             used_this_turn.add(best_tile)
             player_discard_history[p_idx].append(best_tile)
             return best_tile
 
         # 终极保底：未满 4 张且非上一打
-        final_pool = [t for t in TILES_BY_PRIORITY if tile_used_counts.get(t, 0) < 4 and (last_discard is None or t != last_discard)]
+        final_pool = [t for t in TILES_BY_PRIORITY if can_pick(t) and not (t.endswith("z") and t in hand_tiles)]
         if final_pool:
             picked = weighted_choice(final_pool)
             tile_used_counts[picked] = tile_used_counts.get(picked, 0) + 1
+            if picked in normal_fives:
+                normal_fives[picked] += 1
             used_this_turn.add(picked)
             player_discard_history[p_idx].append(picked)
             return picked
 
-        fallback = "2z" if last_discard == "1z" else "1z"
-        tile_used_counts[fallback] = tile_used_counts.get(fallback, 0) + 1
-        used_this_turn.add(fallback)
-        player_discard_history[p_idx].append(fallback)
-        return fallback
+        raise ValueError("无法生成满足实物牌数的默认牌河，请提供完整真实牌河")
 
     pos_target = (target_seat + 4 - oya) % 4
 
@@ -502,8 +525,7 @@ def _generate_default_rivers(
             call_player = (oya + 3) % 4 if pos_target == 0 else (oya + pos_target - 1) % 4
             if call_target_tile and r == call_round and p == call_player:
                 tile = call_target_tile
-                tile_used_counts[tile] = tile_used_counts.get(tile, 0) + 1
-                used_this_turn.add(tile)
+                used_this_turn.add(tile)  # already reserved before sampling
             else:
                 tile = pick_tile_for_player(p, r, used_this_turn)
             rivers[p].append((tile, False, False))
@@ -843,52 +865,39 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
 
                 return None, f"吃牌候选格式错误：{part}，例：chi:4m>9s、chi:35m>9s 或 chi:23m(4m)>9s"
 
-            if part.startswith("pon") or part.startswith("碰"):
-                # 支持：
-                # 1. 显式指定碰牌：c=pon:5z>2p / c=碰5z>2p / c=pon5z>2p / c=pon:8m>2p
-                # 2. 简写：c=pon>2p（自动推断手牌唯一对子；若存在多个对子则提示必须指明）
-                fu_tile = None
-                call_part = part
-                if ">" in part:
-                    main_p, fu_p = part.split(">", 1)
-                    call_part = main_p.strip()
-                    fu_norm = normalize_tile_text(fu_p.strip())
-                    if len(fu_norm) != 2:
-                        return None, f"碰牌后切牌格式错误：{fu_p}"
-                    fu_tile = fu_norm
-
-                # 提取碰的目标牌
-                pon_target = None
-                m_t = re.search(r'(?i)(?:pon|碰)[:：]?([0-9mpsz]{2})', call_part)
-                if m_t:
-                    pon_target = normalize_tile_text(m_t.group(1))
-
-                # 若未显式写碰哪张牌，分析手牌中现存的所有对子/暗刻
-                if not pon_target:
+            if part.lower().startswith("pon") or part.startswith("碰"):
+                # pon:5m (all physical pairs), pon:5m@05m (exact pair),
+                # optional >discard. Bare pon binds to an explicit river first.
+                from mortal_app.call_context import base
+                match = re.fullmatch(r"(?:pon|碰)[:：]?([^>@]*)(?:@([^>]+))?(?:>(.+))?", part, re.IGNORECASE)
+                if not match:
+                    return None, f"碰牌候选格式错误：{part}"
+                raw_target, raw_consumed, raw_follow = match.groups()
+                pon_target = normalize_tile_text(raw_target) if raw_target else None
+                fu_tile = normalize_tile_text(raw_follow) if raw_follow else None
+                if pon_target and not re.fullmatch(r"[0-9][mps]|[1-7]z", pon_target):
+                    return None, f"碰牌目标必须是单张牌：{raw_target}"
+                if fu_tile and not re.fullmatch(r"[0-9][mps]|[1-7]z", fu_tile):
+                    return None, f"碰牌后切牌格式错误：{raw_follow}"
+                consumed = None
+                if raw_consumed:
+                    norm = normalize_tile_text(raw_consumed)
+                    if not re.fullmatch(r"(?:[0-9][mps]|[1-7]z){2}", norm):
+                        return None, "碰牌消耗须指定两张手牌，如 pon:5m@05m"
+                    consumed = [norm[:2], norm[2:]]
+                if not pon_target and not river_raw:
                     from collections import Counter
-                    hand_counts = Counter(hand_tiles)
-                    pairs = [t for t, count in hand_counts.items() if count >= 2]
-                    if len(pairs) == 1:
-                        pon_target = pairs[0]
-                    elif len(pairs) > 1:
-                        p_str = ", ".join(pairs)
-                        return None, (
-                            f"无法确定碰哪张牌：你的手牌中存在多个对子 [{p_str}]。\n"
-                            f"💡 请在副露中明确指出碰哪张牌，例如：c=pon:{pairs[0]}>{fu_tile or '2p'} 或 c=碰{pairs[0]}>{fu_tile or '2p'}"
-                        )
-                    else:
-                        return None, f"副露错误：手牌中没有可以碰的对子（手牌：{''.join(hand_tiles)}）"
-
+                    counts = Counter(map(base, hand_tiles))
+                    pairs = [t for t, count in counts.items() if count >= 2]
+                    if len(pairs) != 1:
+                        return None, "无法确定碰哪张牌：请提供完整牌河或写 pon:目标牌"
+                    pon_target = pairs[0]
                 cand_dict = {
-                    "tile": "pon",
-                    "riichi": False,
-                    "kan": False,
-                    "kyushu": False,
-                    "pon": True,
-                    "call_tile": pon_target,
-                    "follow_up_discard": fu_tile,
-                    "candidate": f"pon:{pon_target}>{fu_tile}" if fu_tile else f"pon:{pon_target}",
+                    "tile": "pon", "riichi": False, "kan": False, "kyushu": False,
+                    "pon": True, "call_tile": pon_target, "follow_up_discard": fu_tile,
                 }
+                if consumed is not None:
+                    cand_dict["pon_consumed"] = consumed
                 candidates.append(cand_dict)
                 continue
             if part in ("daiminkan", "minkan", "大明杠", "明杠"):
@@ -1030,31 +1039,46 @@ def parse_sim_command(message: str) -> tuple[dict[str, Any] | None, str | None]:
         for c in candidates:
             if c.get("chi") or c.get("pon") or c.get("daiminkan"):
                 c["call_tile"] = call_tile
+        from mortal_app.call_context import pon_options, pon_consumed, pon_id
+        expanded = []
+        for c in candidates:
+            if not c.get("pon"):
+                expanded.append(c)
+                continue
+            try:
+                if c.get("pon_consumed") is not None:
+                    options = [pon_consumed(hand_tiles, call_tile, c["pon_consumed"])]
+                else:
+                    options = pon_options(hand_tiles, call_tile)
+                    if not options:
+                        raise ValueError(f"手牌不足以pon最新弃牌{call_tile}")
+            except ValueError as exc:
+                return None, str(exc)
+            for consumed in options:
+                branch = dict(c)
+                if len(options) > 1 or c.get("pon_consumed") is not None:
+                    branch["pon_consumed"] = consumed
+                branch["candidate"] = pon_id(branch)
+                expanded.append(branch)
+        candidates = expanded
+        ids = [c.get("candidate") or c["tile"] for c in candidates]
+        if len(set(ids)) != len(ids):
+            return None, "响应候选重复，请勿重复指定相同吃/碰/过牌分支"
 
-    if river_raw:
-        if is_response:
-            # A specified response river is evidence, not a template to pad
-            # with later invented discards. Exact clock/tiles are rechecked at
-            # the service boundary by response_context.
-            target_past, opp_rivers = parsed_target_past, parsed_opp_rivers
-        else:
+    if river_raw and is_response:
+        # A specified river is evidence, never a template to pad with future discards.
+        target_past, opp_rivers = parsed_target_past, parsed_opp_rivers
+    elif river_raw or x_val >= 2 or effective_target_seat != 0:
+        try:
             target_past, opp_rivers = _generate_default_rivers(
-                hand_tiles,
-                effective_target_seat,
-                effective_oya,
-                x_val,
+                hand_tiles, effective_target_seat, effective_oya, x_val,
                 call_target_tile=call_tile,
                 partial_target_past=parsed_target_past,
                 partial_opp_rivers=parsed_opp_rivers,
+                dora_indicator=dora_indicator,
             )
-    elif x_val >= 2 or (x_val >= 1 and effective_target_seat != 0):
-        target_past, opp_rivers = _generate_default_rivers(
-            hand_tiles,
-            effective_target_seat,
-            effective_oya,
-            x_val,
-            call_target_tile=call_tile,
-        )
+        except ValueError as exc:
+            return None, str(exc)
 
     request: dict[str, Any] = {
         "model_id": model_id_val,

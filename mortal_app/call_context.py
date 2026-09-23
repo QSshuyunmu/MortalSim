@@ -54,6 +54,35 @@ def kind(candidate: Any) -> str:
     return "discard"
 
 
+def pon_options(hand: list[str], called: str) -> list[list[str]]:
+    """Distinct physical two-tile consumptions, not permutations of copies."""
+    from itertools import combinations
+    matching = sorted(tile(t) for t in hand if base(t) == base(called))
+    return [list(pair) for pair in sorted(set(combinations(matching, 2)))]
+
+
+def pon_consumed(hand: list[str], called: str, requested: list[str] | None = None) -> list[str]:
+    options = pon_options(hand, called)
+    if requested is not None:
+        selected = sorted(tile(t) for t in requested)
+        if selected not in options:
+            raise ValueError("碰牌消耗必须是手中两张与最新弃牌同种的实物牌（赤五不等于普通五）")
+        return selected
+    if not options:
+        raise ValueError(f"手牌不足以pon最新弃牌{called}")
+    if len(options) != 1:
+        raise ValueError("碰牌有多种赤五/普通五消耗，请指定 pon_consumed；/sim pon:目标牌 可自动展开")
+    return options[0]
+
+
+def pon_id(candidate: dict) -> str:
+    called = f":{tile(candidate['call_tile'])}" if candidate.get("call_tile") else ""
+    consumed = candidate.get("pon_consumed")
+    binding = "@" + "".join(sorted(tile(t) for t in consumed)) if consumed is not None else ""
+    follow = f">{tile(candidate['follow_up_discard'])}" if candidate.get("follow_up_discard") else ""
+    return f"pon{called}{binding}{follow}"
+
+
 def latest_response_discard(
     rivers: list[list[tuple[str, bool, bool]]], oya: int, target: int, x: int,
 ) -> tuple[int, str]:
@@ -91,6 +120,8 @@ def response_context(request: dict) -> dict | None:
         return None
     if any(k not in ("chi", "pon", "daiminkan", "ron", "pass") for k in kinds):
         raise ValueError("不能在同一决策点混合摸牌切牌与吃/碰/过牌候选")
+    if "daiminkan" in kinds:
+        raise ValueError("大明杠暂不模拟：需要独立的岭上摸牌与后续切牌支路")
     hand = tiles(request["hand"])
     if len(hand) != 13 or request.get("first_tsumo") or request.get("prefix_melds"):
         raise ValueError("副露响应目前仅支持未副露的13张手牌；不能填入摸牌或省略已有副露")
@@ -121,9 +152,14 @@ def response_context(request: dict) -> dict | None:
         raise ValueError("手牌、宝牌指示和牌河存在超出物理数量的牌")
     if any(e[2] for e in rivers[target]) and any(k in ("chi", "pon", "daiminkan") for k in kinds):
         raise ValueError("立直后不能吃/碰/大明杠")
+    identities = set()
     for c, k in zip(candidates, kinds):
         if isinstance(c, str):
+            if k in ("chi", "pon"):
+                raise ValueError("API吃碰候选请使用动作对象（pon、call_tile、pon_consumed），不要传未解析的命令字符串")
             c = {}
+        if c.get("pon_consumed") is not None and k != "pon":
+            raise ValueError("pon_consumed 只能用于碰牌候选")
         if c.get("call_tile") and tile(c["call_tile"]) != called:
             raise ValueError(f"副露目标{c['call_tile']}与玩家{actor}最新弃牌{called}不一致")
         if k == "chi":
@@ -133,11 +169,8 @@ def response_context(request: dict) -> dict | None:
                     len({t[-1] for t in seq}) != 1 or
                     [int(t[0]) for t in seq] != list(range(int(seq[0][0]), int(seq[0][0]) + 3))):
                 raise ValueError(f"吃牌搭子不能与最新弃牌{called}组成顺子")
-        elif k in ("pon", "daiminkan"):
-            n = 2 if k == "pon" else 3
-            consumed = sorted((t for t in hand if base(t) == base(called)), key=lambda t: not t.startswith("0"))[:n]
-            if len(consumed) != n:
-                raise ValueError(f"手牌不足以{k}最新弃牌{called}")
+        elif k == "pon":
+            consumed = pon_consumed(hand, called, c.get("pon_consumed"))
         else:
             consumed = []
         remaining = Counter(hand)
@@ -145,8 +178,14 @@ def response_context(request: dict) -> dict | None:
         if any(n < 0 for n in remaining.values()):
             raise ValueError("吃牌搭子不在手牌中")
         follow = c.get("follow_up_discard")
+        if follow and k == "pon" and base(follow) == base(called):
+            raise ValueError("碰后不能切与碰牌同种的牌（喰替；赤五与普通五同种）")
         if follow and remaining[tile(follow)] <= 0:
             raise ValueError("指定吃碰后切牌不在剩余手牌中，不能静默改为模型自动切牌")
+        identity = (k, tuple(sorted(consumed)), tile(follow) if follow else None)
+        if identity in identities:
+            raise ValueError("响应候选重复：相同实物消耗和后切不能重复统计")
+        identities.add(identity)
     return {"kind": "response", "target_actor": actor, "tile": called, "target_seat": target,
             "oya": oya, "x": x, "rivers": rivers, "hand": hand}
 
@@ -220,7 +259,7 @@ def validate_native_response(request: dict, context: dict) -> None:
             if k == "chi":
                 consumed = c["chi"]
             else:
-                consumed = sorted((t for t in context["hand"] if base(t) == base(context["tile"])), key=lambda t: not t.startswith("0"))[:2 if k == "pon" else 3]
+                consumed = pon_consumed(context["hand"], context["tile"], c.get("pon_consumed"))
             action["consumed"] = list(map(mjai, consumed))
         _, mask = state.encode_obs(4, False)
         if k == "chi":

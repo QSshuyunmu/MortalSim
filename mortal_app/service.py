@@ -160,9 +160,8 @@ def normalize_candidate(value: Any) -> dict[str, Any]:
             fu_str = f">{fu_val}" if fu_val else ""
             c_id = f"chi:{''.join(chi_val)}{fu_str}"
         elif pon_val:
-            fu_str = f">{fu_val}" if fu_val else ""
-            call_str = f":{value['call_tile']}" if value.get("call_tile") else ""
-            c_id = f"pon{call_str}{fu_str}"
+            from .call_context import pon_id
+            c_id = pon_id(value)
         elif minkan_val:
             c_id = "daiminkan"
         else:
@@ -178,6 +177,7 @@ def normalize_candidate(value: Any) -> dict[str, Any]:
             "pass": False,
             "chi": chi_val,
             "pon": pon_val,
+            "pon_consumed": value.get("pon_consumed"),
             "daiminkan": minkan_val,
             "call_tile": value.get("call_tile"),
             "follow_up_discard": fu_val,
@@ -196,8 +196,8 @@ def candidate_identity(value: Any) -> str:
             fu = f">{value.get('follow_up_discard')}" if value.get("follow_up_discard") else ""
             return f"chi:{''.join(value['chi'])}{fu}"
         if value.get("pon"):
-            fu = f">{value.get('follow_up_discard')}" if value.get("follow_up_discard") else ""
-            return f"pon{fu}"
+            from .call_context import pon_id
+            return pon_id(value)
         if value.get("daiminkan"):
             return "daiminkan"
         if value.get("discard"):
@@ -1662,6 +1662,12 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
             raw_chi = first_action.get("chi")
             first_chi = [_one_tile(str(t), "吃牌搭子") for t in raw_chi] if raw_chi else None
             first_pon = bool(first_action.get("pon", False)) or str(first_action.get("candidate", "")).startswith("pon")
+            pon_kwargs = {}
+            if first_pon:
+                from .call_context import pon_consumed, response_context
+                response = response_context(request)
+                consumed = pon_consumed(response["hand"], response["tile"], first_action.get("pon_consumed"))
+                pon_kwargs["first_pon_consumed"] = [_one_tile(t, "碰牌消耗") for t in consumed]
             first_daiminkan = bool(first_action.get("daiminkan", False)) or first_action.get("candidate") == "daiminkan"
             raw_fu = first_action.get("follow_up_discard")
             first_follow_up_discard = _one_tile(str(raw_fu), "副露后跟切") if raw_fu else None
@@ -1692,6 +1698,7 @@ def run_analysis(request: dict[str, Any], emit: Callable[[dict[str, Any]], None]
                 first_pass=first_pass,
                 first_chi=first_chi,
                 first_pon=first_pon,
+                **pon_kwargs,
                 first_daiminkan=first_daiminkan,
                 first_follow_up_discard=first_follow_up_discard,
                 seed_start=(seed + offset, 0xDEAD),

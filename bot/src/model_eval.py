@@ -114,7 +114,7 @@ def _meld_followup_qp(engine: Any, target_seat: int, hand: list[str], call_tile:
                       root_qp: dict[str, Any], tau: float = 0.1) -> dict[str, Any]:
     """Force each distinct call on a fresh bot; never share mutated branch state."""
     import libriichi
-    from mortal_app.call_context import base, mjai, tile
+    from mortal_app.call_context import mjai, pon_consumed, pon_id
     output = {key: dict(value) for key, value in root_qp.items()}
     # Pon can claim any opponent's latest discard, not only kamicha's. Replay
     # the same actor used by the validated response prefix for every branch.
@@ -129,15 +129,20 @@ def _meld_followup_qp(engine: Any, target_seat: int, hand: list[str], call_tile:
             consumed = list(chi)
             root_id = f"chi:{''.join(consumed)}"
         else:
-            consumed = sorted((tile(t) for t in hand if base(t) == base(call_tile)), key=lambda t: not t.startswith("0"))[:2]
+            consumed = pon_consumed(hand, call_tile, candidate.get("pon_consumed"))
             root_id = f"pon:{call_tile}"
         # The 46-action chi head names the sequence, not red tile consumption.
         parent = root_qp.get(root_id) or root_qp.get(f"chi:{''.join(base(t) for t in consumed)}" if chi else "pon")
         if parent is None:
             continue
         forced = candidate.get("follow_up_discard")
-        cand_id = candidate.get("candidate") or root_id + (f">{forced}" if forced else "")
+        cand_id = (candidate.get("candidate") or root_id + (f">{forced}" if forced else "")) if chi else pon_id({**candidate, "call_tile": call_tile})
         out = dict(parent)
+        if pon:
+            # The model has ONE pon action (41), not a red-consumption head.
+            # Repeated parent P is shared, never a separate branch probability.
+            out["p_scope"] = "pon_action"
+            out["pon_consumed"] = consumed
         try:
             key = ("chi" if chi else "pon", tuple(consumed), call_tile)
             if key not in cache:

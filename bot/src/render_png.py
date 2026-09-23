@@ -305,7 +305,12 @@ def _label_zh(c: dict[str, Any], pass_kind: str = "agari") -> str:
     if cand_name.startswith("chi:"):
         return _format_chi_suffix(cand_name[4:])
     if cand_name.startswith("pon"):
-        return f"碰 {cand_name[3:].lstrip(':')}" if len(cand_name) > 3 else "碰"
+        core, sep, follow = cand_name[3:].lstrip(":").partition(">")
+        called, binding, consumed = core.partition("@")
+        if binding:
+            compact = _format_chi_suffix(consumed).removesuffix("吃")
+            return f"碰{called}({compact})" + (f">{follow}" if sep else "")
+        return f"碰 {core}" + (f">{follow}" if sep else "") if core else "碰"
     if cand_name == "daiminkan":
         return "大明杠"
     base = c.get("discard") or cand_name
@@ -874,7 +879,7 @@ def render_png(
         fits = (cur_y + 22 + 18 * min(len(distinctive_yaku), 3)) <= (hand_bar_y - 30)
         if fits:
             hy = ["役种名称"] + [lbl for lbl, _ in candidate_yaku_maps]
-            wy = [100] + [75] * len(candidate_yaku_maps)
+            wy = [100] + [max(75, (p_inner_w - 100) // len(candidate_yaku_maps))] * len(candidate_yaku_maps)
             draw.rectangle([p_inner_x, cur_y, p_inner_x + p_inner_w, cur_y + 22], fill=(10, 14, 20, 255))
             tx = p_inner_x + 6
             for title, col_w in zip(hy, wy):
@@ -952,6 +957,8 @@ def render_png(
 
     # Footer
     foot_str = "MortalSim 日麻对局决策推演 · 基于早巡物理对局引擎与半庄段位顺位模型 (95% Confidence Interval)"
+    if any("@" in str(c.get("candidate") or "") and str(c.get("candidate") or "").startswith("pon") for c in cands):
+        foot_str += " · 碰(牌)=手牌消耗；同种不同消耗共享碰P"
     draw.text((28, H - 16), foot_str, fill=t_cfg["text_muted"], font=f_foot)
 
     img.save(str(output_path), "PNG")

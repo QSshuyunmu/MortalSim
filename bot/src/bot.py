@@ -845,7 +845,11 @@ class Bot:
             model_qp=model_qp,
         )
         x_turn = item.get("request", {}).get("x", 1)
-        action_label = f"第 {x_turn} 打" if x_turn > 1 else "第一打"
+        is_response = any(
+            isinstance(c, dict) and (c.get("chi") or c.get("pon") or c.get("pass") or c.get("ron"))
+            for c in request.get("discards", [])
+        )
+        action_label = f"第 {x_turn} 巡响应" if is_response else (f"第 {x_turn} 打" if x_turn > 1 else "第一打")
 
         # 决策语义徽章
         dec_badge = (result.get("decision_state") or {}).get("badge") or "⚠️ 尚不明确"
@@ -864,6 +868,8 @@ class Bot:
             if weighting.get("ess_warning"):
                 extra_info.append("\n⚠️ 对手牌河拟合度较低，模拟方差较大")
 
+        if any(isinstance(c, dict) and c.get("pon_consumed") for c in request.get("discards", [])):
+            extra_info.append("\n注：赤五/普通五碰分支共享 P(碰)，不能相加；后切 P 为各分支条件概率。")
         info_suffix = "".join(extra_info)
 
         lbl_pt = label(pt_best)
@@ -873,7 +879,8 @@ class Bot:
             follow = qp.get("follow_up") if isinstance(qp, dict) else None
             if follow and follow.get("tile"):
                 mode = "模型后切" if follow.get("mode") == "model" else "指定后切"
-                return f"{label_text}→{follow['tile']}（{mode} {follow.get('p', 0) * 100:.1f}%）"
+                suffix = "" if label_text.endswith(f">{follow['tile']}") else f"→{follow['tile']}"
+                return f"{label_text}{suffix}（{mode} {follow.get('p', 0) * 100:.1f}%）"
             return label_text
         lbl_pt_detail = _with_follow_up(pt_best, lbl_pt)
         lbl_ml_detail = _with_follow_up(ml_best, lbl_ml)
