@@ -74,6 +74,7 @@ class DiscardCandidate(BaseModel):
     pon: bool = False
     daiminkan: bool = False
     call_tile: str | None = None
+    call_from_seat: int | None = None
     follow_up_discard: str | None = None
     candidate: str | None = None
 
