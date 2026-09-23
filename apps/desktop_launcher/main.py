@@ -45,7 +45,7 @@ def write_startup_error(message: str) -> None:
 def main() -> None:
     mp.freeze_support()
     try:
-        engine = os.environ.get("MORTALSIM_ENGINE", "lite").strip().lower()
+        engine = os.environ.get("MORTALSIM_ENGINE", "python").strip().lower()
         if engine == "lite" and getattr(sys, "frozen", False):
             os.environ.setdefault("MORTALSIM_LITE_RUNTIME_DIR", str(Path(sys._MEIPASS) / "lite_runtime"))
         import uvicorn
