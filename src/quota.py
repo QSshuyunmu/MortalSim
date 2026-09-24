@@ -74,9 +74,9 @@ class QuotaStore:
         usage = self.usage(user_id)
         if usage["requests"] >= int(limits.get("max_requests_per_user_per_day", 5)):
             return False, f"今日模拟次数已达上限（{limits.get('max_requests_per_user_per_day', 5)} 次），请明天再试。"
-        if usage["games"] + runs > int(limits.get("max_games_per_user_per_day", 2000)):
+        if usage["games"] + runs > int(limits.get("max_games_per_user_per_day", 20000)):
             return False, (
-                f"今日模拟局数已达上限（{limits.get('max_games_per_user_per_day', 2000)} 局）；"
+                f"今日模拟局数已达上限（{limits.get('max_games_per_user_per_day', 20000)} 局）；"
                 f"当前已用 {usage['games']} 局，本次 {runs} 局会超额。"
             )
         return True, None

@@ -14,6 +14,7 @@ default_runs = 500
 rayon_threads = 20
 engine = "python"
 decision_contract = "stable_advantage_v2"
+max_runs = 10000
 
 [quota]
 db_path = "data/quota.db"

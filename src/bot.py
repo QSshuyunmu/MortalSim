@@ -422,7 +422,7 @@ class Bot:
     async def _enqueue_sim(self, group_id: int, user_id: str, request: dict) -> None:
         runs = int(request.get("runs") or self.mortal_cfg.get("default_runs", 500))
         if not self._is_admin(user_id):
-            max_runs = int(self.mortal_cfg.get("max_runs", 2000))
+            max_runs = int(self.mortal_cfg.get("max_runs", 10000))
             if runs > max_runs:
                 await self.send_group_text(group_id, f"单次局数不能超过 {max_runs} 局（当前为 {runs} 局）。")
                 return
@@ -539,13 +539,19 @@ class Bot:
                         if fixed.startswith("/sim"):
                             fixed_req, fixed_err = parse_sim_command(fixed)
                             if not fixed_err:
-                                await self.send_group_text(group_id, f"💡 格式校正：{fixed}\n正在排队演算……以上。")
+                                f_runs = int(fixed_req.get("runs") or 500)
+                                f_cands = fixed_req.get("discards", [])
+                                f_tip = "，高精度推演耗时约 2~5 分钟，请稍候" if f_runs * max(1, len(f_cands)) >= 10000 else ""
+                                await self.send_group_text(group_id, f"💡 格式校正：{fixed}\n正在排队演算{f_tip}……以上。")
                                 await self._enqueue_sim(group_id, user_id, fixed_req)
                                 return
                 await self.send_group_text(group_id, error)
                 return
             # 格式正确时，给用户即时反馈确认提示
-            await self.send_group_text(group_id, f"💡 指令已确认：{text}\n正在排队演算……以上。")
+            r_runs = int(request.get("runs") or 500)
+            r_cands = request.get("discards", [])
+            r_tip = "，高精度推演耗时约 2~5 分钟，请稍候" if r_runs * max(1, len(r_cands)) >= 10000 else ""
+            await self.send_group_text(group_id, f"💡 指令已确认：{text}\n正在排队演算{r_tip}……以上。")
             await self._enqueue_sim(group_id, user_id, request)
             return
 
@@ -634,7 +640,10 @@ class Bot:
                     await self.send_group_text(group_id, f"局面参数存在异常。……无法构建。\n{cmd}\n错误：{error}")
                     return
                 prefix = f"{reply}\n" if reply else ""
-                await self.send_group_text(group_id, f"{prefix}💡 识别指令：{cmd}")
+                nl_runs = int(request.get("runs") or 500)
+                nl_cands = request.get("discards", [])
+                nl_tip = "\n高精度推演耗时约 2~5 分钟，请稍候……以上。" if nl_runs * max(1, len(nl_cands)) >= 10000 else ""
+                await self.send_group_text(group_id, f"{prefix}💡 识别指令：{cmd}{nl_tip}")
                 await self._enqueue_sim(group_id, user_id, request)
                 return
             if reply:
