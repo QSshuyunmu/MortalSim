@@ -21,8 +21,8 @@ while ($true) {
         Start-Sleep -Seconds 60
         continue
     }
-    "[$(Get-Date -Format yyyy-MM-dd HH:mm:ss)] [LadderGuardian] launch #$n (batch=16 tables=3 onnx_intra=1)" | Add-Content "C:\arena\ladder\ladder_exit.txt"
-    $p = Start-Process -FilePath $py -ArgumentList "-X","utf8","C:\arena\ladder\ladder_arena_atozuke.py","--batch-seeds","16","--tables-per-room","3" -WorkingDirectory "C:\arena\ladder" -RedirectStandardOutput "C:\arena\ladder\ladder_stdout.log" -RedirectStandardError "C:\arena\ladder\ladder_stderr.log" -PassThru -WindowStyle Hidden
+    "[$(Get-Date -Format yyyy-MM-dd HH:mm:ss)] [LadderGuardian] launch #$n (batch=16 tables_total=6 onnx_intra=1)" | Add-Content "C:\arena\ladder\ladder_exit.txt"
+    $p = Start-Process -FilePath $py -ArgumentList "-X","utf8","C:\arena\ladder\ladder_arena_atozuke.py","--batch-seeds","16","--tables-total","6" -WorkingDirectory "C:\arena\ladder" -RedirectStandardOutput "C:\arena\ladder\ladder_stdout.log" -RedirectStandardError "C:\arena\ladder\ladder_stderr.log" -PassThru -WindowStyle Hidden
     $p.WaitForExit()
     "[$(Get-Date -Format yyyy-MM-dd HH:mm:ss)] [LadderGuardian] exit=$($p.ExitCode)" | Add-Content "C:\arena\ladder\ladder_exit.txt"
     Start-Sleep -Seconds 15

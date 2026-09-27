@@ -48,7 +48,10 @@ def main():
     ap.add_argument("--season-id", default="atozuke-ladder-v1")
     ap.add_argument("--total-seeds", type=int, default=2000)
     ap.add_argument("--batch-seeds", type=int, default=16)
-    ap.add_argument("--tables-per-room", type=int, default=2)
+    ap.add_argument("--tables-total", type=int, default=6,
+                    help="全场并发桌数上限（实测 CPU 甜点区 6；10 张会过载崩到 1.7 半庄/分）")
+    ap.add_argument("--tables-per-room", type=int, default=0,
+                    help="单卓桌数上限；0=不设，桌位由 --tables-total 按卓优先级分配")
     ap.add_argument("--heartbeat", type=int, default=60, help="心跳秒数，0=关闭")
     ap.add_argument("--seed-base", type=int, default=300000)
     ap.add_argument("--fresh", action="store_true", help="忽略段位快照，按配置初始值起跑")
@@ -63,7 +66,7 @@ def main():
     a = ap.parse_args()
 
     if a.smoke:
-        a.total_seeds, a.batch_seeds, a.tables_per_room, a.heartbeat = 2, 2, 1, 0
+        a.total_seeds, a.batch_seeds, a.tables_total, a.heartbeat = 2, 2, 1, 0
 
     root = Path(a.root)
     models_dir = Path(a.models_dir) if a.models_dir else root / "models" / "tsypx"
@@ -581,6 +584,28 @@ def main():
     fourp = libriichi.arena.FourPlayer(disable_progress_bar=True)
     ROOM_CN = {"houou": "凤凰", "tokujou": "特上", "joukyuu": "上级", "ippan": "一般"}
 
+    def allocate_tables(room_pools, total, per_room=0):
+        """按【卓优先级】贪心分配桌位，总数卡在 total。
+
+        顺序 凤凰 → 特上 → 上级 → 一般，每卓取 min(合格池//4, 剩余预算)：
+        凤凰优先吃满自己的池（凤7→1桌、凤8→2桌、凤11→2桌余3席轮空），
+        剩下的预算才给特上。
+
+        之前是"每卓固定 3 张"，问题有两个：一是凤8 本来能开 2 桌却被
+        低段位桌的固定配额挡住；二是特上 23 席也只开 3 张，白轮空十几席。
+        现在全局只有总桌数这一个约束，且高段位优先。
+        每桌仍只从【本卓合格池】取人，绝不跨卓借调（池 <4 席则该卓开 0 桌）。
+        """
+        budget = max(0, int(total))
+        out = {}
+        for room in ("houou", "tokujou", "joukyuu", "ippan"):
+            n = min(len(room_pools.get(room) or []) // 4, budget)
+            if per_room:
+                n = min(n, int(per_room))
+            out[room] = n
+            budget -= n
+        return out
+
     def pick_tables(pool, n_tables):
         """只用【本卓合格池】内的账号组桌；池不足以组成 n_tables 张桌时按池大小缩减。
 
@@ -739,7 +764,7 @@ def main():
               f"本桌 {len(rows)} 半庄 {time.time()-submitted_at:.1f}s | "
               f"累计 {done_hanchans} 半庄 {done_hanchans/(time.time()-t0)*60:.0f} 半庄/分", flush=True)
 
-    workers = max(4, a.tables_per_room * 3 + 2)
+    workers = max(8, a.tables_total + 2)
     t0 = time.time()
     done_hanchans = 0
     done_tables = 0
@@ -748,8 +773,8 @@ def main():
 
     print()
     print(f"=== 启动：BATCH_SEEDS={a.batch_seeds}（每桌 {a.batch_seeds*4} 副牌）  "
-          f"{a.tables_per_room}桌/卓别 × {workers} 线程  "
-          f"单批上限 ≈ {a.tables_per_room*3*a.batch_seeds*4} 半庄 ===")
+          f"总桌数上限 {a.tables_total} × {workers} 线程  "
+          f"单批上限 ≈ {a.tables_total*a.batch_seeds*4} 半庄 ===")
     print("=== 首批 [桌完] 视 CPU 而定；此间以 [心跳] 为准 ===")
     print()
 
@@ -788,16 +813,15 @@ def main():
                 if p.retired:
                     continue
                 room_pools[p.get_room()].append(aid)
-            active_rooms = [r for r in ("houou", "tokujou", "joukyuu")
-                            if len(room_pools[r]) >= 4]
+
+            room_tables = allocate_tables(room_pools, a.tables_total, a.tables_per_room)
 
             futures = {}
-            for room in active_rooms:
-                # 只用本卓合格池（active_rooms 已保证 >=4 席）。
-                # 历史上这里有一段"池不足就跨卓借人"的逻辑，语义正是我们不要的：
-                # 会让低段位账号进高段位桌并按高段位 PT 结算。已移除。
+            for room in ("houou", "tokujou", "joukyuu", "ippan"):
+                if not room_tables[room]:
+                    continue
                 avail = list(room_pools[room])
-                for table in pick_tables(avail, a.tables_per_room):
+                for table in pick_tables(avail, room_tables[room]):
                     futures[pool_ex.submit(run_one, table, room, seed_cursor,
                                            a.batch_seeds)] = time.time()
                     seed_cursor += a.batch_seeds
@@ -828,7 +852,11 @@ def main():
                 break
 
             print(f"--- Batch {batch_no} 完 | 池: 凤{len(room_pools['houou'])} "
-                  f"特{len(room_pools['tokujou'])} 上{len(room_pools['joukyuu'])} ---", flush=True)
+                  f"特{len(room_pools['tokujou'])} 上{len(room_pools['joukyuu'])} "
+                  f"| 桌: 凤{room_tables['houou']} 特{room_tables['tokujou']} "
+                  f"上{room_tables['joukyuu']} 共{sum(room_tables.values())}/{a.tables_total} "
+                  f"| 轮空 {sum(len(room_pools[r]) - 4*room_tables[r] for r in room_pools)} 席 ---",
+                  flush=True)
             # UI 三件套每批刷新（约 55 分钟一次；实测占批墙钟 <0.2%）
             flush_stats()
             export_ui()
