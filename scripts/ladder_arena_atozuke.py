@@ -54,6 +54,12 @@ def main():
     ap.add_argument("--fresh", action="store_true", help="忽略段位快照，按配置初始值起跑")
     ap.add_argument("--no-onnx", action="store_true", help="禁用 ONNX 通路（强制 PyTorch）")
     ap.add_argument("--smoke", action="store_true", help="冒烟：极小规模跑通全链路")
+    ap.add_argument("--log-dir", default=None,
+                    help="mjai 牌谱落盘目录（默认 <root>/ladder_logs）")
+    ap.add_argument("--no-dump-logs", action="store_true",
+                    help="关闭牌谱落盘（默认开启；落盘后可对全量语料统一重算统计）")
+    ap.add_argument("--log-sample-every", type=int, default=1,
+                    help="牌谱采样率：1=全量落盘，N=每 N 局落一局（磁盘紧张时用）")
     a = ap.parse_args()
 
     if a.smoke:
@@ -69,6 +75,9 @@ def main():
     local_db = root / "ladder_results.db"
     state_path = root / "ladder_state.json"
     backup_dir = root / "backup_ladder"
+    log_dir = Path(a.log_dir) if a.log_dir else root / "ladder_logs"
+    dump_logs = not a.no_dump_logs
+    log_sample_every = max(1, a.log_sample_every)
     stop_file = root / "LADDER_STOP"
 
     # ---- 环境引导（复刻 pool_arena.py 生产配置）----
@@ -173,6 +182,8 @@ def main():
 
     root.mkdir(parents=True, exist_ok=True)
     print(f"[init] DB {local_db} 现有 {row_count(local_db)} 行")
+    print(f"[init] 牌谱落盘: {'开启 -> ' + str(log_dir) if dump_logs else '关闭'}"
+          + (f"（采样 1/{log_sample_every}）" if dump_logs and log_sample_every > 1 else ""))
     print(f"[init] 引擎通路: {'ONNX优先' if use_onnx else 'PyTorch'} "
           f"(onnx_dir={onnx_dir}, intra={onnx_intra}, torch_threads={torch_threads})")
 
@@ -210,6 +221,44 @@ def main():
         arena.model_engines[mid] = eng
         print(f"   [ok] {mid:<26} -> {kind}")
     print(f"[init] 引擎构建完成（{time.time()-t_eng:.1f}s）")
+
+    # ---- 逐局统计累加器（和/铳/副露/立直），跨重启持久化于 player_stats 表 ----
+    stats_acc = {}
+
+    def load_stats():
+        try:
+            with sqlite3.connect(str(local_db), timeout=30) as c:
+                c.execute("CREATE TABLE IF NOT EXISTS player_stats ("
+                          "avatar_id TEXT PRIMARY KEY, games INT, rounds INT, agari INT, "
+                          "houjuu INT, fuuro INT, fuuro_num INT, riichi INT)")
+                for aid, g, rd, ag, hj, fu, fn_, rc in c.execute(
+                        "SELECT avatar_id, games, rounds, agari, houjuu, fuuro, "
+                        "fuuro_num, riichi FROM player_stats"):
+                    stats_acc[aid] = {"games": g, "rounds": rd, "agari": ag,
+                                      "houjuu": hj, "fuuro": fu, "fuuro_num": fn_,
+                                      "riichi": rc}
+                print(f"[init] 已加载 {len(stats_acc)} 席历史统计")
+        except Exception:
+            pass
+
+    def flush_stats():
+        try:
+            with sqlite3.connect(str(local_db), timeout=30) as c:
+                c.execute("CREATE TABLE IF NOT EXISTS player_stats ("
+                          "avatar_id TEXT PRIMARY KEY, games INT, rounds INT, agari INT, "
+                          "houjuu INT, fuuro INT, fuuro_num INT, riichi INT)")
+                c.executemany(
+                    "INSERT OR REPLACE INTO player_stats VALUES (?,?,?,?,?,?,?,?)",
+                    [(aid, v["games"], v["rounds"], v["agari"], v["houjuu"],
+                      v["fuuro"], v["fuuro_num"], v["riichi"])
+                     for aid, v in stats_acc.items()])
+                c.commit()
+            return True
+        except Exception as e:
+            print(f"   [warn] 统计落盘失败: {type(e).__name__}: {str(e)[:90]}")
+            return False
+
+    load_stats()
 
     # ---- 断点续跑 ----
     _STATE_FIELDS = ("dan", "pt", "rating", "games", "r1", "r2", "r3", "r4",
@@ -398,12 +447,46 @@ def main():
         rows = fourp.py_vs_py_detailed(*engines, (seed_start, 0), batch_seeds)
         return room, table_avatars, avg_r, rows
 
+    import gzip
+
+    def dump_game_log(log_str: str, seed: int, key: int, split: int,
+                      table_avatars: list, n_hanchan_seen: int) -> bool:
+        """落盘一局 mjai 牌谱（gzip jsonl）。
+
+        关键：把 start_game.names 改写为 avatar_id。引擎的 name 传的是 model_id，
+        同模型的多个 avatar 同桌时日志内名字会撞车，导致 Stat.from_dir 按名字
+        统计时无法区分。改写后整份语料可按 avatar 统一重算任意指标。
+        座位映射与结算一致：seat s 的模型来自 table[(s - split) % 4]。
+        """
+        if not dump_logs:
+            return False
+        if log_sample_every > 1 and (n_hanchan_seen % log_sample_every) != 0:
+            return False
+        try:
+            day = time.strftime("%Y%m%d")
+            d = log_dir / day
+            d.mkdir(parents=True, exist_ok=True)
+            lines = log_str.split(chr(10))
+            if lines and lines[0].startswith("{"):
+                import json as _json
+                head = _json.loads(lines[0])
+                if head.get("type") == "start_game":
+                    head["names"] = [table_avatars[(s - split) % 4] for s in range(4)]
+                    lines[0] = _json.dumps(head, ensure_ascii=False)
+            with gzip.open(d / f"{seed}_{key}_{split}.json.gz", "wt",
+                           encoding="utf-8", compresslevel=1) as f:
+                f.write(chr(10).join(lines))
+            return True
+        except Exception as e:
+            print(f"   [warn] 牌谱落盘失败: {type(e).__name__}: {str(e)[:90]}", flush=True)
+            return False
+
     def settle(fut, submitted_at):
         """结算一桌：先写库（含簿记列），提交成功后更新内存榜。只在主线程调用。"""
         nonlocal done_hanchans, done_tables
         room, table, avg_r, rows = fut.result()
         params, effects = [], []
-        for seed, _k, split, ranks, scores in rows:
+        for seed, _k, split, ranks, scores, log_str in rows:
             for seat in range(4):
                 aid = table[(seat - int(split)) % 4]
                 p = arena.players[aid]
@@ -420,6 +503,39 @@ def main():
                 "rank, score, pt_before, pt_after, dan_before, dan_after, "
                 "rating_before, rating_after, table_avg_r) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params)
+        # 逐局 mjai 统计：和/铳/副露/立直（per-round 口径，与 libriichi.stat 一致）
+        for row in rows:
+            _seed, _k, split, _ranks, _scores, log_str = row
+            for seat in range(4):
+                aid = table[(seat - int(split)) % 4]
+                try:
+                    st = libriichi.stat.Stat.from_log(log_str, seat)
+                    acc = stats_acc.setdefault(aid, {"games": 0, "rounds": 0,
+                                                     "agari": 0, "houjuu": 0,
+                                                     "fuuro": 0, "fuuro_num": 0,
+                                                     "riichi": 0})
+                    acc["games"] += 1
+                    acc["rounds"] += st.round
+                    acc["agari"] += st.agari
+                    acc["houjuu"] += st.houjuu
+                    acc["fuuro"] += st.fuuro
+                    acc["fuuro_num"] += st.fuuro_num
+                    acc["riichi"] += st.riichi
+                except Exception:
+                    continue
+
+        # 牌谱落盘（全量，供后续统一重算统计）
+        if dump_logs:
+            n_logged = 0
+            for i, row in enumerate(rows):
+                seed, key, split, _ranks, _scores, log_str = row
+                # 采样计数用全局半庄序（单调），保证 1/N 均匀覆盖
+                if dump_game_log(log_str, int(seed), int(key), int(split),
+                                 table, done_hanchans + i + 1):
+                    n_logged += 1
+            if n_logged:
+                print(f"   [log] 本桌落盘 {n_logged} 局牌谱 -> {log_dir}", flush=True)
+
         done_hanchans += len(rows)
         done_tables += 1
         print(f"[桌完] {ROOM_CN.get(room, room)} | "
@@ -508,6 +624,7 @@ def main():
             print(f"--- Batch {batch_no} 完 | 池: 凤{len(room_pools['houou'])} "
                   f"特{len(room_pools['tokujou'])} 上{len(room_pools['joukyuu'])} ---", flush=True)
             if batch_no == 1 or batch_no % 5 == 0:
+                flush_stats()
                 if snapshot_all():
                     pass
             if batch_no % 10 == 0:

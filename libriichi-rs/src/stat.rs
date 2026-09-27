@@ -443,6 +443,41 @@ impl Stat {
 
 #[pymethods]
 impl Stat {
+    #[getter]
+    pub fn game(&self) -> i64 {
+        self.game
+    }
+
+    #[getter]
+    pub fn round(&self) -> i64 {
+        self.round
+    }
+
+    #[getter]
+    pub fn agari(&self) -> i64 {
+        self.agari
+    }
+
+    #[getter]
+    pub fn houjuu(&self) -> i64 {
+        self.houjuu
+    }
+
+    #[getter]
+    pub fn fuuro(&self) -> i64 {
+        self.fuuro
+    }
+
+    #[getter]
+    pub fn fuuro_num(&self) -> i64 {
+        self.fuuro_num
+    }
+
+    #[getter]
+    pub fn riichi(&self) -> i64 {
+        self.riichi
+    }
+
     #[staticmethod]
     #[pyo3(signature = (dir, player_name, disable_progress_bar=false))]
     pub fn from_dir(dir: &str, player_name: &str, disable_progress_bar: bool) -> Result<Self> {

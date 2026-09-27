@@ -68,6 +68,38 @@ def transition_of(dan_before: int, dan_after: int) -> str:
     return "none"
 
 
+def room_of(dan: int, rating) -> str:
+    """天凤双门槛：凤凰(7段+R2000) / 特上(4段+R1800) / 其余上级。"""
+    if dan >= 7 and (rating or 0) >= 2000:
+        return "houou"
+    if dan >= 4 and (rating or 0) >= 1800:
+        return "tokujou"
+    return "joukyuu"
+
+
+def _stable_dan_room(aid: str, room: str, room_agg: dict,
+                     min_games: int = 100, min_r4: int = 25):
+    """单个卓别的安定段位（天凤官方「段位相当」口径）。
+
+    官方定义（系数即该卓的 PT 结构）：
+      鳳凰 = ((１位*60 + ２位*30)/４位 - 20)/10 = (6*r1 + 3*r2)/r4 - 2
+      特上 = ((１位*50 + ２位*20)/４位 - 20)/10 = (5*r1 + 2*r2)/r4 - 2
+    注意 `- 2` 不能漏（等价于分子 -20 后再 /10）。
+
+    只取【该卓内】的对局：两个卓的系数与对手强度都不同，跨卓混算会把两套
+    口径搅在一起，得到没有意义的数。
+
+    样本门槛 min_games=100 且 min_r4=25：本估计以 r4 为分母，r4 的泊松相对
+    标准误约 1/sqrt(r4)，r4=12 时误差可达 ±3.5 段（纯噪声，实测有账号因此
+    虚高到 12.25）。门槛以下返回 None，宁可留空也不给误导性的数字。
+    """
+    ra = (room_agg.get(aid) or {}).get(room) or {}
+    if ra.get("games", 0) < min_games or (ra.get("r4") or 0) < min_r4:
+        return None
+    a, b = (6.0, 3.0) if room == "houou" else (5.0, 2.0)
+    return round((a * ra["r1"] + b * ra["r2"]) / ra["r4"] - 2.0, 2)
+
+
 def _atomic_write(path: Path, data: str) -> None:
     tmp = str(path) + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="") as f:
@@ -110,7 +142,20 @@ def export_all(db_path, state_path, config_path, data_root,
                for a in avatars}
         ledger_rows = defaultdict(list)
         curve_rows = defaultdict(list)
+        # 逐局统计（和/铳/副露/立直 per-round 口径），由 runner 累计落盘
+        pstats = {}
+        try:
+            with sqlite3.connect(str(db_path), timeout=30) as c2:
+                has_ps = {r[1] for r in c2.execute("PRAGMA table_info(player_stats)")}
+                if "agari" in has_ps:
+                    for aid2, g2, rd2, ag2, hj2, fu2, rc2 in c2.execute(
+                            "SELECT avatar_id, games, rounds, agari, houjuu, fuuro, riichi FROM player_stats"):
+                        pstats[aid2] = {"games": g2, "rounds": rd2, "agari": ag2,
+                                        "houjuu": hj2, "fuuro": fu2, "riichi": rc2}
+        except Exception:
+            pstats = {}
         db_current = {}   # avatar_id -> (dan, pt, rating) 最后一局簿记
+        room_agg = {}     # avatar_id -> room -> {games,r1..r4}（安定段位按卓分别算）
         total_games = 0
         for row in con.execute(sel):
             total_games += 1
@@ -121,6 +166,10 @@ def export_all(db_path, state_path, config_path, data_root,
                                      "max_dan": 0, "game_idx": 0})
             g["games"] += 1
             g[f"r{int(rank)}"] += 1
+            _ra = room_agg.setdefault(aid, {}).setdefault(
+                room, {"games": 0, "r1": 0, "r2": 0, "r3": 0, "r4": 0})
+            _ra["games"] += 1
+            _ra[f"r{int(rank)}"] += 1
             if not has_bk:
                 continue
             (pt_b, pt_a, dan_b, dan_a, r_b, r_a) = row[6:12]
@@ -224,6 +273,13 @@ def export_all(db_path, state_path, config_path, data_root,
             if rating is None:
                 rating = a.get("init_rating")
         is_tenhou = bool(s.get("is_tenhou")) or dan >= 11
+        ps = pstats.get(aid) or {}
+        agari_rate = houjuu_rate = fuuro_rate = riichi_rate = None
+        if ps and ps.get("rounds"):
+            agari_rate = ps["agari"] / ps["rounds"]
+            houjuu_rate = ps["houjuu"] / ps["rounds"]
+            fuuro_rate = ps["fuuro"] / ps["rounds"]
+            riichi_rate = ps["riichi"] / ps["rounds"]
         rid = rank_id_of(dan)
         target = pt_target_of(dan)
         pt_cur = float(pt) if pt is not None else 0.0
@@ -244,6 +300,14 @@ def export_all(db_path, state_path, config_path, data_root,
             "promotions": g["promotions"],
             "demotions": g["demotions"],
             "highest_rank_id": rank_id_of(highest_dan),
+            "highest_rank_name": RANK_NAMES_CN.get(highest_dan, str(highest_dan)),
+            # 特/凤局数分列（让读者看清每个安定段背后的样本量）
+            "games_houou": (room_agg.get(aid, {}).get("houou", {}) or {}).get("games", 0),
+            "games_tokujou": (room_agg.get(aid, {}).get("tokujou", {}) or {}).get("games", 0),
+            # 特/凤安定分卓计算：各卓用各自公式与各自对局
+            "stable_dan_houou": _stable_dan_room(aid, "houou", room_agg),
+            "stable_dan_tokujou": _stable_dan_room(aid, "tokujou", room_agg),
+            "stable_dan": _stable_dan_room(aid, room_of(dan, rating), room_agg),
             "tenhou_reached": is_tenhou,
             "total_pt_delta": (g["pt_delta_sum"] if g["bk_games"] else None),
             "avg_pt_delta": (round(g["pt_delta_sum"] / g["bk_games"], 3)
@@ -253,9 +317,10 @@ def export_all(db_path, state_path, config_path, data_root,
             "avg_rank": (round(avg_rank, 4) if avg_rank is not None else None),
             "avg_rank_pt": None,
             # 四项细 stats 本期无牌谱统计源，置空（前端 null-safe 显示 —）
-            "agari_rate": None, "houjuu_rate": None,
-            "fuuro_rate": None, "riichi_rate": None,
-            "stats_games": None, "stats_coverage": None,
+            "agari_rate": agari_rate, "houjuu_rate": houjuu_rate,
+            "fuuro_rate": fuuro_rate, "riichi_rate": riichi_rate,
+            "stats_games": ps.get("rounds"),
+            "stats_coverage": (ps["games"] / games if ps and games else None),
         })
 
     summary = {
