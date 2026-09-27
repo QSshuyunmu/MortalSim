@@ -181,6 +181,23 @@ def main():
             return -1
 
     root.mkdir(parents=True, exist_ok=True)
+
+    # ---- 单实例锁 ----
+    # 计划任务 + 手动 /Run 会拉起多个 guardian，它们的"是否已有运行器"检查有竞态：
+    # 若运行器恰好挂掉、两个 guardian 同时在醒来窗口检查，就会并发拉起两个运行器，
+    # 用相同 seed 重复对局并重复结算，污染数据库。锁放在运行器自身最可靠——
+    # 进程退出（含崩溃）时由操作系统释放，不会留下需要人工清理的僵尸锁。
+    import msvcrt
+    _lock_path = root / "ladder_runner.lock"
+    _lock_fh = open(_lock_path, "w")
+    try:
+        msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        print(f"[fatal] 已有天梯运行器在运行（{_lock_path} 被占用），本实例退出。"
+              "若确认无运行器，删除该文件后重试。")
+        return 1
+    print(f"[init] 已获取单实例锁 {_lock_path}")
+
     print(f"[init] DB {local_db} 现有 {row_count(local_db)} 行")
     print(f"[init] 牌谱落盘: {'开启 -> ' + str(log_dir) if dump_logs else '关闭'}"
           + (f"（采样 1/{log_sample_every}）" if dump_logs and log_sample_every > 1 else ""))
@@ -418,10 +435,15 @@ def main():
     ROOM_CN = {"houou": "凤凰", "tokujou": "特上", "joukyuu": "上级", "ippan": "一般"}
 
     def pick_tables(pool, n_tables):
-        # 席位公平性优先：同一 avatar 同批只上一张桌（跨桌按 avatar 去重），
-        # 未上过桌的优先补位，池耗尽才复用。同桌模型互不相同保证对手多样性。
+        """只用【本卓合格池】内的账号组桌；池不足以组成 n_tables 张桌时按池大小缩减。
+
+        绝不允许跨卓补人：那样会让低段位账号进高段位桌，并按高段位 PT 结算
+        （实测出现过 4 段打凤凰桌、3 段打特上桌，扭曲了阶梯本身）。
+        池内凑不满 4 人时宁可少开桌——账号空闲一轮，但阶梯保持干净。
+        """
         pool = list(pool)
         random.shuffle(pool)
+        n_tables = min(n_tables, len(pool) // 4)
         used_across, used_avatars, tables = set(), set(), []
         for _ in range(n_tables):
             picked, picked_models = [], set()
@@ -439,17 +461,15 @@ def main():
                 if len(picked) == 4:
                     break
             if len(picked) < 4:
+                # 放宽"同桌模型互不相同"，仍只在池内取
                 for aid in pool:
                     if len(picked) == 4:
                         break
                     if aid in picked or aid in used_avatars:
                         continue
                     picked.append(aid)
-            all_aids = list(arena.players.keys())
-            while len(picked) < 4:
-                c = random.choice(all_aids)
-                if c not in picked:
-                    picked.append(c)
+            if len(picked) < 4:
+                break          # 池内已无可用账号：停止组桌，绝不外借
             tables.append(picked)
             used_avatars |= set(picked)
             used_across |= {arena.players[x].model_id for x in picked}
@@ -607,11 +627,10 @@ def main():
 
             futures = {}
             for room in active_rooms:
+                # 只用本卓合格池（active_rooms 已保证 >=4 席）。
+                # 历史上这里有一段"池不足就跨卓借人"的逻辑，语义正是我们不要的：
+                # 会让低段位账号进高段位桌并按高段位 PT 结算。已移除。
                 avail = list(room_pools[room])
-                if len(avail) < 4:
-                    for other in ("tokujou", "houou", "joukyuu"):
-                        if other != room:
-                            avail += room_pools[other]
                 for table in pick_tables(avail, a.tables_per_room):
                     futures[pool_ex.submit(run_one, table, room, seed_cursor,
                                            a.batch_seeds)] = time.time()
