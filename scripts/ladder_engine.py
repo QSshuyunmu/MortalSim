@@ -140,6 +140,9 @@ class PlayerState:
         self.peak_rating = rating
         self.is_tenhou = (dan >= 11)
         self.reset_count = 0
+        # 已回收离场：数据留库，但不再参与组桌（上级卓合格池永远不足 4 人，
+        # 掉进去的账号开不了桌，只能换同模型新账号从四段水面重新入场）。
+        self.retired = False
 
     def get_room(self) -> str:
         # 1. 凤凰卓双门槛：7段且 R>=2000.0 (天凤位永久在位)
@@ -462,7 +465,9 @@ class TenhouRankedLadderArena:
                 self.print_standings()
 
     def print_standings(self):
-        all_players = list(self.players.values())
+        # 已回收账号单独成段：它们已经离场，混在在位战区里会让人误以为还在打
+        all_players = [p for p in self.players.values() if not p.retired]
+        retired_list = [p for p in self.players.values() if p.retired]
         tenhou_list = [p for p in all_players if p.is_tenhou]
         houou_list = [p for p in all_players if not p.is_tenhou and p.get_room() == "houou"]
         tokujou_list = [p for p in all_players if not p.is_tenhou and p.get_room() == "tokujou"]
@@ -487,6 +492,10 @@ class TenhouRankedLadderArena:
         if other_list:
             print("\n■ ── 【上级卓/降级战区 (跌破特上双门槛 4段/R1800)】 ──")
             self._print_sub_table(sorted(other_list, key=sort_fn, reverse=True))
+
+        if retired_list:
+            print(f"\n■ ── 【已回收离场 (上级卓无法组桌，换同模型新账号续位) · {len(retired_list)} 席】 ──")
+            self._print_sub_table(sorted(retired_list, key=sort_fn, reverse=True))
 
         print("═"*125 + "\n")
 

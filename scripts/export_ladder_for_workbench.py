@@ -116,7 +116,36 @@ def export_all(db_path, state_path, config_path, data_root,
 
     cfg = json.loads(config_path.read_text(encoding="utf-8"))
     phys = {pm["model_id"]: pm for pm in cfg.get("physical_models", [])}
-    avatars = cfg.get("avatars", [])
+    avatars = list(cfg.get("avatars", []))
+
+    # 名册里的世代账号（上级卓回收后新补的席位）不在配置里，必须补进榜单，
+    # 否则它们打的局会凭空消失。同时带回 gen/retired_seed 供前端标注。
+    roster_meta = {}
+    try:
+        with sqlite3.connect(str(db_path), timeout=30) as _rc:
+            if _rc.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                           "AND name='ladder_roster'").fetchone():
+                for r in _rc.execute(
+                        "SELECT avatar_id, model_id, display_name, role, role_desc, "
+                        "init_dan, init_pt, init_rating, gen, parent_id, retired_seed "
+                        "FROM ladder_roster"):
+                    roster_meta[r[0]] = {
+                        "model_id": r[1], "display_name": r[2], "role": r[3],
+                        "role_desc": r[4], "init_dan": r[5], "init_pt": r[6],
+                        "init_rating": r[7], "gen": r[8] or 1, "parent_id": r[9],
+                        "retired_seed": r[10]}
+    except Exception:
+        roster_meta = {}
+    _known = {a["avatar_id"] for a in avatars}
+    for _aid, _m in roster_meta.items():
+        if _aid in _known:
+            continue
+        avatars.append({"avatar_id": _aid, "model_id": _m["model_id"],
+                        "display_name": _m["display_name"] or _aid,
+                        "role": _m["role"] or "tokujou_native",
+                        "role_desc": _m["role_desc"] or "",
+                        "init_dan": _m["init_dan"], "init_pt": _m["init_pt"],
+                        "init_rating": _m["init_rating"]})
 
     state = {}
     if state_path and Path(state_path).is_file():
@@ -321,6 +350,12 @@ def export_all(db_path, state_path, config_path, data_root,
             "fuuro_rate": fuuro_rate, "riichi_rate": riichi_rate,
             "stats_games": ps.get("rounds"),
             "stats_coverage": (ps["games"] / games if ps and games else None),
+            # 回收/世代：gen>1 表示这是上级卓回收后补进来的新席位；
+            # retired=true 表示该账号已停止出场（历史数据仍全部保留在库里）
+            "generation": (roster_meta.get(aid, {}) or {}).get("gen", 1),
+            "retired": bool((roster_meta.get(aid, {}) or {}).get("retired_seed")),
+            "retired_seed": (roster_meta.get(aid, {}) or {}).get("retired_seed"),
+            "lineage": (roster_meta.get(aid, {}) or {}).get("parent_id"),
         })
 
     summary = {

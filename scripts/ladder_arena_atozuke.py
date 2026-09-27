@@ -92,7 +92,8 @@ def main():
 
     import torch  # noqa: E402
     import libriichi  # noqa: E402
-    from ladder_engine import TenhouRankedLadderArena, PolicyNetHead  # noqa: E402
+    from ladder_engine import (TenhouRankedLadderArena, PolicyNetHead,  # noqa: E402
+                           PlayerState, DAN_NAMES)
     from model import Brain, DQN  # noqa: E402
     from engine import MortalEngine  # noqa: E402
 
@@ -198,6 +199,20 @@ def main():
         return 1
     print(f"[init] 已获取单实例锁 {_lock_path}")
 
+    # ---- --fresh：先归档再重开，绝不原地清空 ----
+    # 历史教训：--fresh 原本只跳过状态快照却不清库，于是拿配置初值往旧库里续写，
+    # 把已累积的段位/PT/R 整段抹平（审计在库中查到 34 处这样的状态链断裂）。
+    if a.fresh and (local_db.is_file() or state_path.is_file()):
+        arch = root / "archive" / (time.strftime("%Y%m%d_%H%M%S") + "_fresh")
+        arch.mkdir(parents=True, exist_ok=True)
+        moved = []
+        for p in (local_db, state_path, Path(str(local_db) + "-wal"),
+                  Path(str(local_db) + "-shm")):
+            if p.is_file():
+                p.replace(arch / p.name)
+                moved.append(p.name)
+        print(f"[fresh] 已归档 {len(moved)} 个旧文件 -> {arch}")
+
     print(f"[init] DB {local_db} 现有 {row_count(local_db)} 行")
     print(f"[init] 牌谱落盘: {'开启 -> ' + str(log_dir) if dump_logs else '关闭'}"
           + (f"（采样 1/{log_sample_every}）" if dump_logs and log_sample_every > 1 else ""))
@@ -227,7 +242,67 @@ def main():
                 pass
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA synchronous=NORMAL")
+        # 赛季名册：记录本赛季出现过的每一个账号（含回收后新加的世代账号）。
+        # 账号被回收后数据留库、但不参与组桌，因此必须有张表记住"谁在场、谁离场"，
+        # 否则重启后这些世代账号会凭空消失。
+        c.execute("CREATE TABLE IF NOT EXISTS ladder_roster ("
+                  "avatar_id TEXT PRIMARY KEY, model_id TEXT NOT NULL,"
+                  "display_name TEXT, role TEXT, role_desc TEXT,"
+                  "init_dan INT, init_pt INT, init_rating REAL,"
+                  "gen INT DEFAULT 1, parent_id TEXT,"
+                  "spawned_seed INT, spawned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+                  "retired_seed INT, retired_at TIMESTAMP)")
         c.commit()
+
+    # ---- 名册：把配置里的初始账号登记入库（幂等）----
+    def roster_register(aid, model_id, display_name, role, role_desc,
+                        init_dan, init_pt, init_rating, gen=1, parent_id=None,
+                        spawned_seed=None):
+        with sqlite3.connect(str(local_db), timeout=30) as c:
+            c.execute("INSERT OR IGNORE INTO ladder_roster "
+                      "(avatar_id, model_id, display_name, role, role_desc, "
+                      "init_dan, init_pt, init_rating, gen, parent_id, spawned_seed) "
+                      "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                      (aid, model_id, display_name, role, role_desc,
+                       int(init_dan), int(init_pt), float(init_rating),
+                       int(gen), parent_id, spawned_seed))
+
+    # 世代账号形如 `抽象-1#2`；根账号是 # 之前的部分，用于判断同一血脉
+    def _root_id(aid: str) -> str:
+        return aid.split("#", 1)[0]
+
+    cfg_avatars = json.loads(config_path.read_text(encoding="utf-8")).get("avatars", [])
+    cfg_ids = {x["avatar_id"] for x in cfg_avatars}
+    for _a in cfg_avatars:
+        roster_register(_a["avatar_id"], _a["model_id"],
+                        _a.get("display_name", _a["avatar_id"]),
+                        _a.get("role", ""), _a.get("role_desc", ""),
+                        _a.get("init_dan", 1), _a.get("init_pt", 200 * _a.get("init_dan", 1)),
+                        _a.get("init_rating", 1500.0))
+
+    with sqlite3.connect(str(local_db), timeout=30) as c:
+        _roster = c.execute(
+            "SELECT avatar_id, model_id, display_name, role, role_desc, "
+            "init_dan, init_pt, init_rating, retired_seed FROM ladder_roster").fetchall()
+    _added = 0
+    _retired_ids = set()
+    for _aid, _mid, _dn, _role, _rd, _idan, _ipt, _iR, _rseed in _roster:
+        if _rseed is not None:
+            _retired_ids.add(_aid)
+            continue
+        if _aid in cfg_ids or _aid in arena.players:
+            continue
+        if _mid not in arena.physical_models:
+            print(f"   [warn] 名册里的 {_aid} 用了未知模型 {_mid}，跳过")
+            continue
+        arena.players[_aid] = PlayerState(
+            avatar_id=_aid, model_id=_mid, display_name=_dn or _aid,
+            role=_role or "tokujou_native", role_desc=_rd or "",
+            dan=int(_idan), pt=int(_ipt), rating=float(_iR))
+        _added += 1
+    _n_retired = len(_retired_ids)
+    print(f"[init] 名册 {len(_roster)} 席（配置 {len(cfg_avatars)} + 装回世代 {_added}）"
+          + (f"，其中已回收离场 {_n_retired} 席" if _n_retired else ""))
 
     # 双通路构建引擎
     print(f"[init] 构建 {len(arena.physical_models)} 款物理引擎 ...")
@@ -280,7 +355,7 @@ def main():
     # ---- 断点续跑 ----
     _STATE_FIELDS = ("dan", "pt", "rating", "games", "r1", "r2", "r3", "r4",
                      "fly_count", "total_score", "peak_dan", "peak_rating",
-                     "is_tenhou", "reset_count")
+                     "is_tenhou", "reset_count", "retired")
 
     def save_state() -> bool:
         data = {"saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -367,6 +442,50 @@ def main():
             print("   [snapshot] 库与断点状态已备份", flush=True)
         return ok_db and ok_st
 
+    def recycle_stuck(at_seed: int) -> list:
+        """回收掉进上级卓的账号，换同模型新账号从四段水面重新入场。
+
+        上级卓的合格池（dan<=3 或 R<1800）永远凑不满 4 人——池里只可能装着
+        "刚从特上掉下来"的账号，而它们掉下去就再也开不了桌，等于永久冻结
+        （实测已冻 368 个半庄位）。真实天凤靠庞大人口自然消化这一层，
+        30 席规模下做不到，所以改成回收：
+
+          旧账号：停止出场，段位/PT/R/战绩全部原样留库（不虚构、不篡改）
+          新账号：同模型，从四段水面（四段 / 800pt / R1800）重新入场，席位不空
+
+        这样阶梯不会因为"最底层开不了桌"而丢席，历史也不会被污染——
+        旧账号的战绩仍是它真实打出来的，新账号另起一条干净曲线。
+        """
+        out = []
+        for aid, p in list(arena.players.items()):
+            if p.retired or p.is_tenhou or p.get_room() != "joukyuu":
+                continue
+            root = _root_id(aid)
+            kin = {x for x in arena.players if _root_id(x) == root}
+            new_id = next((f"{root}#{g}" for g in range(2, 500)
+                           if f"{root}#{g}" not in kin), None)
+            if new_id is None:
+                print(f"   [warn] {aid} 血脉世代号已用尽，本批不补席", flush=True)
+                continue
+            gen = int(new_id.rsplit("#", 1)[1])
+            old = (int(p.dan), int(p.pt), float(p.rating), int(p.games))
+            p.retired = True
+            with sqlite3.connect(str(local_db), timeout=30) as c:
+                c.execute("UPDATE ladder_roster SET retired_seed=?, "
+                          "retired_at=CURRENT_TIMESTAMP WHERE avatar_id=?",
+                          (int(at_seed), aid))
+            arena.players[new_id] = PlayerState(
+                avatar_id=new_id, model_id=p.model_id, display_name=new_id,
+                role=p.role, role_desc=p.role_desc,
+                dan=4, pt=800, rating=1800.0,
+                floor_dan=p.floor_dan, floor_rating=p.floor_rating)
+            roster_register(new_id, p.model_id, new_id, p.role, p.role_desc,
+                            4, 800, 1800.0, gen=gen, parent_id=aid,
+                            spawned_seed=int(at_seed))
+            last_seed[new_id] = -1          # 新席优先上桌
+            out.append((aid, old, new_id, p.model_id, gen))
+        return out
+
     def replay_from_db() -> bool:
         """无状态快照时，从 DB 簿记列回放各账号真实段位/PT/R 与战绩计数。
 
@@ -420,13 +539,41 @@ def main():
         resumed = replay_from_db()
         if resumed:
             save_state()
+
+    # 回收标记以名册为准，且在状态恢复之后才施加：状态快照可能早于名册里的
+    # 回收记录（进程正好在"写名册"与"写快照"之间崩掉），若先标记就会被
+    # load_state 用旧值覆盖回来，让已回收的账号复活。
+    for _aid in _retired_ids:
+        _p = arena.players.get(_aid)
+        if _p is not None and not _p.retired:
+            _p.retired = True
+    if _retired_ids:
+        _revived = [a for a in _retired_ids if not arena.players.get(a, None)]
+        print(f"[init] 已按名册标记回收离场 {len(_retired_ids)} 席"
+              + (f"（其中 {len(_revived)} 席已不在配置里）" if _revived else ""))
     if not resumed:
-        print("[init] 段位榜按配置初始值起跑")
+        # 安全阀：库中已有历史却恢复不出状态 => 拒绝起跑。
+        # seed 游标无论如何都从 DB 续接，所以"恢复失败还照跑"的后果是：
+        # 拿配置初值往同一个库续写，把该账号已累积的段位/PT/R 整段抹平。
+        # 审计在历史库中查到 34 处这种断裂（涉及 20 席，seed 300032~300576）。
+        with sqlite3.connect(str(local_db), timeout=30) as c:
+            n_hist = c.execute("SELECT COUNT(*) FROM ladder_games WHERE seed_idx >= ?",
+                               (a.seed_base,)).fetchone()[0]
+        if n_hist:
+            print(f"[fatal] 库中已有 {n_hist} 行历史，但状态快照与 DB 回放都恢复失败。")
+            print(f"        继续起跑会用配置初值覆盖已累积的段位/PT/R，故中止。")
+            print(f"        处理：修好 {state_path} 后重启；确实要重开请显式加 --fresh（会先归档）。")
+            return 1
+        print("[init] 段位榜按配置初始值起跑（库中无历史）")
 
     # ---- seed 自动续接 ----
     with sqlite3.connect(str(local_db), timeout=30) as c:
         mx = c.execute("SELECT COALESCE(MAX(seed_idx)+1, 0) FROM ladder_games "
                        "WHERE seed_idx >= ?", (a.seed_base,)).fetchone()[0]
+        # 轮转年龄的基准：每席最后一次上桌的 seed（从 DB 取，重启后不丢）
+        last_seed = dict(c.execute(
+            "SELECT avatar_id, MAX(seed_idx) FROM ladder_games WHERE seed_idx >= ? "
+            "GROUP BY avatar_id", (a.seed_base,)).fetchall())
     seed_cursor = max(a.seed_base, int(mx or 0))
     print(f"[init] seed 从 {seed_cursor} 起跑（自动避开已入库区间）")
 
@@ -440,28 +587,33 @@ def main():
         绝不允许跨卓补人：那样会让低段位账号进高段位桌，并按高段位 PT 结算
         （实测出现过 4 段打凤凰桌、3 段打特上桌，扭曲了阶梯本身）。
         池内凑不满 4 人时宁可少开桌——账号空闲一轮，但阶梯保持干净。
+
+        取人按【轮转年龄】排序而非随机，并且【不做跨桌模型去重】。这两件事
+        是同一个问题的两面：跨桌要求"模型互不相同"等于把桌位按模型配额化——
+        池内只有 11 款模型而每轮要 12 个座位，于是只有一个分身的模型永远必选，
+        分身多的模型互相抢剩下的名额。实测（特上池 21 席开 3 桌）：
+          旧：分身数↔上桌率 相关 -0.95，单分身 100%、5 分身 49%，极差 66.7pp
+          新：全员 56~62%，极差 13.0pp（理论公平值 = 12 座 / 21 席 = 57%）
+        上桌率被分身数左右会直接污染模型间的强弱对比，故必须解耦。
+        同桌仍要求模型互不相同（picked_models），保证对手多样性。
         """
-        pool = list(pool)
-        random.shuffle(pool)
+        pool = sorted(pool, key=lambda aid: (last_seed.get(aid, -1), random.random()))
         n_tables = min(n_tables, len(pool) // 4)
-        used_across, used_avatars, tables = set(), set(), []
+        used_avatars, tables = set(), []
         for _ in range(n_tables):
             picked, picked_models = [], set()
-            for strict in (True, False):
-                for aid in pool:
-                    if aid in picked or aid in used_avatars:
-                        continue
-                    mid = arena.players[aid].model_id
-                    if mid in picked_models or (strict and mid in used_across):
-                        continue
-                    picked.append(aid)
-                    picked_models.add(mid)
-                    if len(picked) == 4:
-                        break
+            for aid in pool:
+                if aid in picked or aid in used_avatars:
+                    continue
+                mid = arena.players[aid].model_id
+                if mid in picked_models:
+                    continue
+                picked.append(aid)
+                picked_models.add(mid)
                 if len(picked) == 4:
                     break
             if len(picked) < 4:
-                # 放宽"同桌模型互不相同"，仍只在池内取
+                # 池内不足 4 款模型时放宽"同桌模型互不相同"，仍只在池内取
                 for aid in pool:
                     if len(picked) == 4:
                         break
@@ -472,7 +624,6 @@ def main():
                 break          # 池内已无可用账号：停止组桌，绝不外借
             tables.append(picked)
             used_avatars |= set(picked)
-            used_across |= {arena.players[x].model_id for x in picked}
         return tables
 
     def run_one(table_avatars, room, seed_start, batch_seeds):
@@ -579,6 +730,10 @@ def main():
 
         done_hanchans += len(rows)
         done_tables += 1
+        # 轮转年龄：本桌四席刚刚上过桌，下一批让位给更久没打的席位
+        _latest = max(int(r[0]) for r in rows)
+        for aid in table:
+            last_seed[aid] = _latest
         print(f"[桌完] {ROOM_CN.get(room, room)} | "
               f"{' '.join(arena.players[x].display_name for x in table)} | "
               f"本桌 {len(rows)} 半庄 {time.time()-submitted_at:.1f}s | "
@@ -619,8 +774,19 @@ def main():
                 stop_file.unlink(missing_ok=True)
                 break
 
+            # 上级卓回收：掉进去的账号开不了桌，当场换同模型新账号从四段水面续位
+            recy = recycle_stuck(seed_cursor)
+            if recy:
+                for _aid, _old, _nid, _mid, _gen in recy:
+                    print(f"[回收] {_aid}（{_mid}）{DAN_NAMES.get(_old[0], str(_old[0]) + '段')}"
+                          f"/{_old[1]}pt/R{_old[2]:.0f}/{_old[3]}半庄 停止出场，"
+                          f"换第{_gen}代新席 {_nid} 从四段水面入场", flush=True)
+                save_state()
+
             room_pools = {"houou": [], "tokujou": [], "joukyuu": [], "ippan": []}
             for aid, p in arena.players.items():
+                if p.retired:
+                    continue
                 room_pools[p.get_room()].append(aid)
             active_rooms = [r for r in ("houou", "tokujou", "joukyuu")
                             if len(room_pools[r]) >= 4]
@@ -666,9 +832,14 @@ def main():
             # UI 三件套每批刷新（约 55 分钟一次；实测占批墙钟 <0.2%）
             flush_stats()
             export_ui()
-            # 全库备份 + 断点状态每 5 批一次（成本随库规模增长，不需要同频）
+            # 状态快照必须与 DB 同频：否则非正常终止（掉电/强杀）时，重启会用
+            # 最陈旧的一份快照覆盖内存态，把最多 4 批（64 局）的段位/PT/R 回滚掉。
+            # 快照只是 30 席的 JSON，成本可忽略。
+            if not save_state():
+                print("   [warn] 状态快照失败，重启可能回滚本批", flush=True)
+            # 全库备份成本随库规模增长，保持每 5 批一次
             if batch_no == 1 or batch_no % 5 == 0:
-                snapshot_all()
+                backup_db()
             if batch_no % 10 == 0:
                 arena.print_standings()
     finally:
