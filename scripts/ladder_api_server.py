@@ -272,21 +272,55 @@ def season_public(store: LadderStore, season_id: str, is_default: bool = True) -
 
 
 def downsample_curve(points: list[dict], max_points: int) -> list[dict]:
-    if max_points <= 0 or len(points) <= max_points:
+    """等距降采样，但**必须包含真末点**。
+
+    这里踩过一个坑：原先写成 `step = len/max`、`points[int(i*step)]`，
+    最后一个 i=max-1 的索引是 `int((max-1)*step)`，永远取不到 len-1。
+    实测 896 局时末点停在第 892 号索引（第 893 局，pt 860），而当前 PT 是
+    第 896 局的 815 —— 前端图表徽标取 `points[length-1]`，于是"曲线末值"
+    比页头"当前 PT"落后几局，表现为"pt 曲线和实际当前 pt 对不上"
+    （截图里 768 局时为 pt 1515 vs 页头 1440，正是第 765 局 vs 第 768 局）。
+    口径与前端加载器一致：抽 max_points-1 个，再强制追加真末点。
+    """
+    if max_points <= 0:
+        return []
+    if max_points == 1:
+        return points[-1:] if points else []
+    if len(points) <= max_points:
         return points
-    step = len(points) / max_points
-    picked, seen = [], set()
-    for i in range(max_points):
-        p = points[min(int(i * step), len(points) - 1)]
+    step = (len(points) - 1) / (max_points - 1)
+    picked: list[dict] = []
+    seen: set = set()
+    for i in range(max_points - 1):
+        p = points[min(int(round(i * step)), len(points) - 1)]
         if p["games"] not in seen:
             seen.add(p["games"])
             picked.append(p)
+    last = points[-1]
+    if not picked or picked[-1]["games"] != last["games"]:
+        picked.append(last)          # 真末点无条件保留
     return picked
 
 
 def create_app(data_root: Path, dist_dir: Path | None) -> FastAPI:
     app = FastAPI(title="Atozuke Ladder API", docs_url=None, redoc_url=None)
     store = LadderStore(data_root)
+
+    @app.middleware("http")
+    async def _no_store_api(request: Request, call_next):
+        """API 响应一律禁缓存。
+
+        踩过的坑：GET 且不带 Cache-Control 时浏览器可启发式缓存，于是同一页上
+        「头部当前 PT」和「曲线末点」可能来自相差一次导出的两版数据——实测
+        LuckyJ2-分身 截图里头部 pt=1440（第 768 局）而曲线末点 pt=1515（第 765 局），
+        相差 3 局，正是图表的 payload 被浏览器缓存住旧版所致。数据本身没错，
+        错在两块 UI 读到了不同版本，所以从源头掐掉缓存。
+        """
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+        return response
 
     def _season_or_404(season_id: str) -> dict:
         try:
