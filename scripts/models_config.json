@@ -1,0 +1,423 @@
+{
+  "version": "2.3",
+  "comment": "Tenhou Multi-Tier Arena: 30 席 Avatar；凤桌初始 R2100 / 特上初始 R1900（100R 缓冲）；全员走完整降卓链路（四段跌破 0pt 降至三段并跌入上级卓），未启用任何段位下限保护",
+  "official_stats": {
+    "source": "https://tenhou.net/stat/dan.js",
+    "active_4p_accounts": 217573,
+    "houou_population": 2861,
+    "tokujou_population": 16276,
+    "pyramid_ratio_tokujou_to_houou": 5.69
+  },
+  "rooms": {
+    "houou": {
+      "name": "凤凰卓",
+      "min_dan": 7,
+      "min_rating": 2000.0,
+      "bonus": [
+        90.0,
+        45.0,
+        0.0
+      ]
+    },
+    "tokujou": {
+      "name": "特上卓",
+      "min_dan": 4,
+      "min_rating": 1800.0,
+      "bonus": [
+        75.0,
+        30.0,
+        0.0
+      ]
+    },
+    "joukyuu": {
+      "name": "上级卓",
+      "min_dan": 1,
+      "min_rating": 1600.0,
+      "bonus": [
+        60.0,
+        15.0,
+        0.0
+      ]
+    },
+    "ippan": {
+      "name": "一般卓",
+      "min_dan": 0,
+      "min_rating": 0.0,
+      "bonus": [
+        30.0,
+        15.0,
+        0.0
+      ]
+    }
+  },
+  "physical_models": [
+    {
+      "model_id": "luckyj_clone_v1",
+      "file": "luckyj_clone_v1.pth",
+      "type": "dqn",
+      "style": "铁壁防守 / 和铳差+9.5% (自弈胜者组头名)"
+    },
+    {
+      "model_id": "awr_luckyj",
+      "file": "awr_luckyj.pth",
+      "type": "policy_net",
+      "style": "AWR强化拟态 / 实测力克LuckyJv1与Consensus (带PolicyNet头)"
+    },
+    {
+      "model_id": "distill_nova_v2",
+      "file": "distill_nova_v2.pth",
+      "type": "dqn",
+      "style": "重炮门清 / 极致和点 (平均和点7109)"
+    },
+    {
+      "model_id": "Bin_0910",
+      "file": "Bin_0910.pth",
+      "type": "dqn",
+      "style": "鸣牌速攻控盘 (放铳率11.9%避四流)"
+    },
+    {
+      "model_id": "distill_consensus_v3",
+      "file": "distill_consensus_v3.pth",
+      "type": "dqn",
+      "style": "多重共识仲裁 / 极稳深厚 (纯净胜者组)"
+    },
+    {
+      "model_id": "xiaolin_clone_v1_infer",
+      "file": "xiaolin_clone_v1_infer.pth",
+      "type": "dqn",
+      "style": "小林刚拟态 / 副露防守与精准局况 (梦幻情怀)"
+    },
+    {
+      "model_id": "ext_mortal",
+      "file": "ext_mortal.pth",
+      "type": "dqn",
+      "style": "原作者官方基准锚点 (ResNet-54 91MB)"
+    },
+    {
+      "model_id": "distill_nova",
+      "file": "distill_nova.pth",
+      "type": "dqn",
+      "style": "极强避四 / 稳定防守 (被飞率6.5%)"
+    },
+    {
+      "model_id": "distill_41b_infer",
+      "file": "distill_41b_infer.pth",
+      "type": "dqn",
+      "style": "41B蒸馏轻量版 / 快速听牌 (Luna)"
+    },
+    {
+      "model_id": "zensoku",
+      "file": "zensoku.pth",
+      "type": "dqn",
+      "style": "狂飙极限速攻 (副露率39.2%和牌率全场最高)"
+    },
+    {
+      "model_id": "chouxiang",
+      "file": "chouxiang.pth",
+      "type": "policy_net",
+      "style": "未经实力校验 / 特上鲶鱼探索 (带PolicyNet头)"
+    }
+  ],
+  "avatars": [
+    {
+      "avatar_id": "LuckyJ-v2",
+      "model_id": "awr_luckyj",
+      "display_name": "LuckyJ-v2",
+      "role": "contender",
+      "role_desc": "AWR强化拟态冲顶主力 (实测力克LuckyJv1与Consensus)",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "Shadow-J",
+      "model_id": "luckyj_clone_v1",
+      "display_name": "Shadow-J",
+      "role": "contender",
+      "role_desc": "顶级避四冲顶主力 (胜者组头名)",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "Nova-X",
+      "model_id": "distill_nova_v2",
+      "display_name": "Nova-X",
+      "role": "contender",
+      "role_desc": "重炮火力争一冲顶主力",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "Bastion",
+      "model_id": "Bin_0910",
+      "display_name": "Bastion",
+      "role": "contender",
+      "role_desc": "极低铳率铁壁避四冲顶主力",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "Consensus",
+      "model_id": "distill_consensus_v3",
+      "display_name": "Consensus",
+      "role": "contender",
+      "role_desc": "多模型蒸馏稳态大模型冲顶主力",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "梦幻情怀-A",
+      "model_id": "xiaolin_clone_v1_infer",
+      "display_name": "梦幻情怀-A",
+      "role": "elevator",
+      "role_desc": "小林刚拟态特凤升降机主力 (六段冲凤临门一脚)",
+      "init_dan": 6,
+      "init_pt": 2200,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "V4Best-A",
+      "model_id": "ext_mortal",
+      "display_name": "V4Best-A",
+      "role": "elevator",
+      "role_desc": "官方Mortal作者基准凤桌守门员",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "V4Best-B",
+      "model_id": "ext_mortal",
+      "display_name": "V4Best-B",
+      "role": "elevator",
+      "role_desc": "官方Mortal作者基准凤桌守门员",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "V4Best-C",
+      "model_id": "ext_mortal",
+      "display_name": "V4Best-C",
+      "role": "elevator",
+      "role_desc": "官方Mortal作者基准凤桌守门员",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "Nova1-A",
+      "model_id": "distill_nova",
+      "display_name": "Nova1-A",
+      "role": "elevator",
+      "role_desc": "低被飞防守型特凤升降机",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "Nova1-B",
+      "model_id": "distill_nova",
+      "display_name": "Nova1-B",
+      "role": "elevator",
+      "role_desc": "低被飞防守型特凤升降机",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "Luna-A",
+      "model_id": "distill_41b_infer",
+      "display_name": "Luna-A",
+      "role": "elevator",
+      "role_desc": "41B蒸馏轻量速听特凤升降机",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "Luna-B",
+      "model_id": "distill_41b_infer",
+      "display_name": "Luna-B",
+      "role": "elevator",
+      "role_desc": "41B蒸馏轻量速听特凤升降机",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "LuckyJ2-分身",
+      "model_id": "awr_luckyj",
+      "display_name": "LuckyJ2-分身",
+      "role": "elevator",
+      "role_desc": "AWR强化拟态特凤守门分身",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "梦幻情怀-B",
+      "model_id": "xiaolin_clone_v1_infer",
+      "display_name": "梦幻情怀-B",
+      "role": "tokujou_native",
+      "role_desc": "小林刚拟态特上常驻副露防守阻尼",
+      "init_dan": 5,
+      "init_pt": 1000,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "全速-1",
+      "model_id": "zensoku",
+      "display_name": "全速-1",
+      "role": "tokujou_native",
+      "role_desc": "狂飙极限速攻特上原住民",
+      "init_dan": 5,
+      "init_pt": 1000,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "全速-2",
+      "model_id": "zensoku",
+      "display_name": "全速-2",
+      "role": "tokujou_native",
+      "role_desc": "狂飙极限速攻特上原住民",
+      "init_dan": 5,
+      "init_pt": 1000,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "全速-3",
+      "model_id": "zensoku",
+      "display_name": "全速-3",
+      "role": "tokujou_native",
+      "role_desc": "狂飙极限速攻特上原住民",
+      "init_dan": 5,
+      "init_pt": 1000,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "全速-4",
+      "model_id": "zensoku",
+      "display_name": "全速-4",
+      "role": "tokujou_native",
+      "role_desc": "特上四段高速鸣牌搅局者",
+      "init_dan": 4,
+      "init_pt": 800,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "抽象-1",
+      "model_id": "chouxiang",
+      "display_name": "抽象-1",
+      "role": "tokujou_native",
+      "role_desc": "未验证特上鲶鱼奇策探索",
+      "init_dan": 5,
+      "init_pt": 1000,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "抽象-2",
+      "model_id": "chouxiang",
+      "display_name": "抽象-2",
+      "role": "tokujou_native",
+      "role_desc": "未验证特上鲶鱼奇策探索",
+      "init_dan": 5,
+      "init_pt": 1000,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "抽象-3",
+      "model_id": "chouxiang",
+      "display_name": "抽象-3",
+      "role": "tokujou_native",
+      "role_desc": "未验证特上鲶鱼奇策探索",
+      "init_dan": 5,
+      "init_pt": 1000,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "抽象-4",
+      "model_id": "chouxiang",
+      "display_name": "抽象-4",
+      "role": "tokujou_native",
+      "role_desc": "特上四段奇策搅局分身",
+      "init_dan": 4,
+      "init_pt": 800,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "抽象-5",
+      "model_id": "chouxiang",
+      "display_name": "抽象-5",
+      "role": "tokujou_native",
+      "role_desc": "特上四段奇策搅局分身",
+      "init_dan": 4,
+      "init_pt": 800,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "抽象-特6",
+      "model_id": "chouxiang",
+      "display_name": "抽象-特6",
+      "role": "tokujou_native",
+      "role_desc": "特上四段鲶鱼底座分身",
+      "init_dan": 4,
+      "init_pt": 800,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "V4Best-特1",
+      "model_id": "ext_mortal",
+      "display_name": "V4Best-特1",
+      "role": "tokujou_native",
+      "role_desc": "特上五段高防守官方原装阻尼",
+      "init_dan": 5,
+      "init_pt": 1000,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "V4Best-特2",
+      "model_id": "ext_mortal",
+      "display_name": "V4Best-特2",
+      "role": "tokujou_native",
+      "role_desc": "特上五段高防守官方原装阻尼",
+      "init_dan": 5,
+      "init_pt": 1000,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "Nova1-特1",
+      "model_id": "distill_nova",
+      "display_name": "Nova1-特1",
+      "role": "tokujou_native",
+      "role_desc": "特上五段低铳防守阻尼",
+      "init_dan": 5,
+      "init_pt": 1000,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "Nova1-特2",
+      "model_id": "distill_nova",
+      "display_name": "Nova1-特2",
+      "role": "tokujou_native",
+      "role_desc": "特上五段低铳防守阻尼",
+      "init_dan": 5,
+      "init_pt": 1000,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "全速-特5",
+      "model_id": "zensoku",
+      "display_name": "全速-特5",
+      "role": "tokujou_native",
+      "role_desc": "特上四段高副露速攻分身",
+      "init_dan": 4,
+      "init_pt": 800,
+      "init_rating": 1900.0
+    }
+  ]
+}
