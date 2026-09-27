@@ -320,19 +320,35 @@ def main():
             print(f"   [warn] 备份失败（数据完好）: {type(e).__name__}: {str(e)[:90]}")
             return False
 
-    def snapshot_all() -> bool:
-        ok_db = backup_db()
-        ok_st = save_state()
+    def export_ui() -> bool:
+        """只刷新 UI 三件套（每批一次）。
+
+        成本 O(库行数)：实测 0.18s/万行，30 万行约 5.3s。推理跑在 Rust 工作线程里
+        且已释放 GIL，导出期间对局照常推进；本函数只推迟「下一批的提交时机」，
+        占 55 分钟批墙钟 <0.2%，对吞吐无可测影响。
+        """
         try:
             info = xport.export_all(db_path=local_db, state_path=state_path,
                                     config_path=config_path, data_root=data_root,
                                     season_id=a.season_id)
-            print(f"   [snapshot] 库/状态已备份；UI 三件套已刷新 "
-                  f"({info['accounts']}席/{info['games']}局, ledger {info['ledger_rows']}行)")
-            return ok_db and ok_st
+            print(f"   [ui] 三件套已刷新（{info['accounts']}席/{info['games']}局，"
+                  f"ledger {info['ledger_rows']}行）", flush=True)
+            return True
         except Exception as e:
             print(f"   [warn] UI 数据导出失败（不影响天梯）: {type(e).__name__}: {str(e)[:120]}")
-            return ok_db and ok_st
+            return False
+
+    def snapshot_all() -> bool:
+        """全库备份 + 断点状态快照（每 5 批一次）。
+
+        备份是整库复制，成本随库规模线性增长（30 万行约 1.2s），且与崩溃恢复
+        相关，因此不与 UI 导出同频——UI 要新鲜，备份不必。
+        """
+        ok_db = backup_db()
+        ok_st = save_state()
+        if ok_db and ok_st:
+            print("   [snapshot] 库与断点状态已备份", flush=True)
+        return ok_db and ok_st
 
     def replay_from_db() -> bool:
         """无状态快照时，从 DB 簿记列回放各账号真实段位/PT/R 与战绩计数。
@@ -444,7 +460,12 @@ def main():
         # 多桌推理，独占会话后各桌推理完全并行（构建 ~5s/批，相对批周期可忽略）。
         engines = [build_engine(arena.players[x].model_id) for x in table_avatars]
         avg_r = sum(arena.players[x].rating for x in table_avatars) / 4.0
-        rows = fourp.py_vs_py_detailed(*engines, (seed_start, 0), batch_seeds)
+        # 必须用 with_logs 变体：settle 需要末位的 mjai 日志串做逐局统计与牌谱落盘
+        rows = fourp.py_vs_py_detailed_with_logs(*engines, (seed_start, 0), batch_seeds)
+        if rows and len(rows[0]) != 6:
+            raise RuntimeError(
+                f"py_vs_py_detailed_with_logs 返回 {len(rows[0])} 元组，期望 6 "
+                f"（疑似 pyd 版本不匹配：请确认部署的是带 with_logs 的构建）")
         return room, table_avatars, avg_r, rows
 
     import gzip
@@ -623,10 +644,12 @@ def main():
 
             print(f"--- Batch {batch_no} 完 | 池: 凤{len(room_pools['houou'])} "
                   f"特{len(room_pools['tokujou'])} 上{len(room_pools['joukyuu'])} ---", flush=True)
+            # UI 三件套每批刷新（约 55 分钟一次；实测占批墙钟 <0.2%）
+            flush_stats()
+            export_ui()
+            # 全库备份 + 断点状态每 5 批一次（成本随库规模增长，不需要同频）
             if batch_no == 1 or batch_no % 5 == 0:
-                flush_stats()
-                if snapshot_all():
-                    pass
+                snapshot_all()
             if batch_no % 10 == 0:
                 arena.print_standings()
     finally:
@@ -637,6 +660,8 @@ def main():
         else:
             print("\n[收尾] 确认所有桌已结束...")
             pool_ex.shutdown(wait=True)
+            flush_stats()
+            export_ui()
             if snapshot_all():
                 print("[收尾] 库/状态/UI 三件套均已存档，下次启动自动续跑。")
     el = time.time() - t0
