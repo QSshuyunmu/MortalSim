@@ -138,6 +138,8 @@ def main():
                                                          onnx_intra, name=mid),
                 lambda: libriichi.arena.MortalOnnxEngine(str(onnx_path), 0, False,
                                                          onnx_intra, mid),
+                lambda: libriichi.arena.MortalOnnxEngine(str(onnx_path), 0, False,
+                                                         onnx_intra),
             ):
                 try:
                     return call()
@@ -608,48 +610,70 @@ def main():
 
     def pick_tables(pool, n_tables):
         """只用【本卓合格池】内的账号组桌；池不足以组成 n_tables 张桌时按池大小缩减。
+        绝不允许跨卓补人。
 
-        绝不允许跨卓补人：那样会让低段位账号进高段位桌，并按高段位 PT 结算
-        （实测出现过 4 段打凤凰桌、3 段打特上桌，扭曲了阶梯本身）。
-        池内凑不满 4 人时宁可少开桌——账号空闲一轮，但阶梯保持干净。
-
-        取人按【轮转年龄】排序而非随机，并且【不做跨桌模型去重】。这两件事
-        是同一个问题的两面：跨桌要求"模型互不相同"等于把桌位按模型配额化——
-        池内只有 11 款模型而每轮要 12 个座位，于是只有一个分身的模型永远必选，
-        分身多的模型互相抢剩下的名额。实测（特上池 21 席开 3 桌）：
-          旧：分身数↔上桌率 相关 -0.95，单分身 100%、5 分身 49%，极差 66.7pp
-          新：全员 56~62%，极差 13.0pp（理论公平值 = 12 座 / 21 席 = 57%）
-        上桌率被分身数左右会直接污染模型间的强弱对比，故必须解耦。
-        同桌仍要求模型互不相同（picked_models），保证对手多样性。
+        智能排位机制：
+          1. 候选池按轮转年龄 (last_seed) 优先（最久没上桌的席位优先考虑）
+          2. 多桌全局分配：尽量避免两个相同物理模型的账号同桌。
+             若池内模型种类充足，确保每张桌子 4 人来自 4 款互不相同的物理模型；
+             若池内模型不均导致必然重复，将同模型尽量分散到不同桌子，最小化桌内冲突。
         """
-        pool = sorted(pool, key=lambda aid: (last_seed.get(aid, -1), random.random()))
+        pool = list(pool)
         n_tables = min(n_tables, len(pool) // 4)
-        used_avatars, tables = set(), []
-        for _ in range(n_tables):
-            picked, picked_models = [], set()
-            for aid in pool:
-                if aid in picked or aid in used_avatars:
-                    continue
+        if n_tables <= 0:
+            return []
+
+        best_tables = None
+        best_cost = float("inf")
+
+        for attempt in range(50):
+            shuffled_pool = list(pool)
+            if attempt == 0:
+                shuffled_pool.sort(key=lambda a: last_seed.get(a, -1))
+            else:
+                shuffled_pool.sort(key=lambda a: last_seed.get(a, -1) + random.uniform(0, 0.4))
+
+            tables = [[] for _ in range(n_tables)]
+            table_models = [set() for _ in range(n_tables)]
+            assigned = set()
+
+            # 第一阶段：严格模式，相同模型绝不进同一桌
+            for aid in shuffled_pool:
                 mid = arena.players[aid].model_id
-                if mid in picked_models:
-                    continue
-                picked.append(aid)
-                picked_models.add(mid)
-                if len(picked) == 4:
-                    break
-            if len(picked) < 4:
-                # 池内不足 4 款模型时放宽"同桌模型互不相同"，仍只在池内取
-                for aid in pool:
-                    if len(picked) == 4:
-                        break
-                    if aid in picked or aid in used_avatars:
+                valid_tables = [i for i in range(n_tables)
+                                if len(tables[i]) < 4 and mid not in table_models[i]]
+                if valid_tables:
+                    best_t = min(valid_tables, key=lambda i: len(tables[i]))
+                    tables[best_t].append(aid)
+                    table_models[best_t].add(mid)
+                    assigned.add(aid)
+
+            # 第二阶段：补齐未满的桌（模型种类不足时的兜底），优先选该模型出现次数最少的桌
+            unfilled = [i for i in range(n_tables) if len(tables[i]) < 4]
+            if unfilled:
+                for aid in shuffled_pool:
+                    if aid in assigned:
                         continue
-                    picked.append(aid)
-            if len(picked) < 4:
-                break          # 池内已无可用账号：停止组桌，绝不外借
-            tables.append(picked)
-            used_avatars |= set(picked)
-        return tables
+                    unfilled = [i for i in range(n_tables) if len(tables[i]) < 4]
+                    if not unfilled:
+                        break
+                    mid = arena.players[aid].model_id
+                    best_t = min(unfilled, key=lambda i: (1 if mid in table_models[i] else 0, len(tables[i])))
+                    tables[best_t].append(aid)
+                    table_models[best_t].add(mid)
+                    assigned.add(aid)
+
+            if all(len(t) == 4 for t in tables):
+                dup_count = sum(4 - len(set(arena.players[x].model_id for x in t)) for t in tables)
+                age_cost = sum(last_seed.get(x, -1) for t in tables for x in t)
+                cost = dup_count * 1000000 + age_cost
+                if cost < best_cost:
+                    best_cost = cost
+                    best_tables = tables
+                    if dup_count == 0:
+                        break
+
+        return best_tables or []
 
     def run_one(table_avatars, room, seed_start, batch_seeds):
         # 每批为本桌新建独占引擎实例：同模型共享时 Mutex<Session> 会串行化

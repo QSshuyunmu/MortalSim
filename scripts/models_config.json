@@ -116,6 +116,12 @@
       "file": "chouxiang.pth",
       "type": "policy_net",
       "style": "未经实力校验 / 特上鲶鱼探索 (带PolicyNet头)"
+    },
+    {
+      "model_id": "distill_41b_v2",
+      "file": "distill_41b_v2.pth",
+      "type": "dqn",
+      "style": "41B在线强化升级版 / 900步强化微调 (Luna2)"
     }
   ],
   "avatars": [
@@ -418,6 +424,26 @@
       "init_dan": 4,
       "init_pt": 800,
       "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "Luna2-A",
+      "model_id": "distill_41b_v2",
+      "display_name": "Luna2-A",
+      "role": "contender",
+      "role_desc": "41B在线强化版冲顶主力 (Luna2)",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "Luna2-B",
+      "model_id": "distill_41b_v2",
+      "display_name": "Luna2-B",
+      "role": "contender",
+      "role_desc": "41B在线强化版特凤主力 (Luna2)",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
     }
   ]
 }
