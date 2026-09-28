@@ -481,7 +481,11 @@ def main():
             if p.retired or p.is_tenhou or p.get_room() != "joukyuu":
                 continue
             root = _root_id(aid)
-            kin = {x for x in arena.players if _root_id(x) == root}
+            with sqlite3.connect(str(local_db), timeout=30) as c:
+                kin = {r[0] for r in c.execute(
+                    "SELECT avatar_id FROM ladder_roster WHERE avatar_id = ? OR avatar_id LIKE ?",
+                    (root, f"{root}#%"))}
+            kin.update({x for x in arena.players if _root_id(x) == root})
             new_id = next((f"{root}#{g}" for g in range(2, 500)
                            if f"{root}#{g}" not in kin), None)
             if new_id is None:

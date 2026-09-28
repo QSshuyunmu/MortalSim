@@ -490,11 +490,11 @@
       "init_rating": 1900.0
     },
     {
-      "avatar_id": "BC-2",
-      "model_id": "bc_clean_latest",
-      "display_name": "BC-2",
+      "avatar_id": "Bin-Inf-3",
+      "model_id": "bin_infer",
+      "display_name": "Bin-Inf-3",
       "role": "tokujou_native",
-      "role_desc": "行为克隆弱基准原住民 (800k)",
+      "role_desc": "CQL保守离线基线原住民",
       "init_dan": 4,
       "init_pt": 800,
       "init_rating": 1900.0
