@@ -484,10 +484,10 @@ def main():
             arena.players[new_id] = PlayerState(
                 avatar_id=new_id, model_id=p.model_id, display_name=new_id,
                 role=p.role, role_desc=p.role_desc,
-                dan=4, pt=800, rating=1800.0,
+                dan=4, pt=800, rating=1900.0,
                 floor_dan=p.floor_dan, floor_rating=p.floor_rating)
             roster_register(new_id, p.model_id, new_id, p.role, p.role_desc,
-                            4, 800, 1800.0, gen=gen, parent_id=aid,
+                            4, 800, 1900.0, gen=gen, parent_id=aid,
                             spawned_seed=int(at_seed))
             last_seed[new_id] = -1          # 新席优先上桌
             out.append((aid, old, new_id, p.model_id, gen))

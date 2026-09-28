@@ -122,6 +122,30 @@
       "file": "distill_41b_v2.pth",
       "type": "dqn",
       "style": "41B在线强化升级版 / 900步强化微调 (Luna2)"
+    },
+    {
+      "model_id": "Anonymous",
+      "file": "Anonymous.pth",
+      "type": "policy_net",
+      "style": "未知强力策略头模型 / 纯PolicyNet架构冲顶候选"
+    },
+    {
+      "model_id": "bc_clean_latest",
+      "file": "bc_clean_latest.pth",
+      "type": "dqn",
+      "style": "800k纯行为克隆基线 / 缺乏强化对抗学习 (特上分母)"
+    },
+    {
+      "model_id": "bin_infer",
+      "file": "bin_infer.pth",
+      "type": "dqn",
+      "style": "离线CQL保守约束基线 / 打法偏保守 (特上底座)"
+    },
+    {
+      "model_id": "distill_full_latest",
+      "file": "distill_full_latest.pth",
+      "type": "dqn",
+      "style": "490k全量蒸馏中期检查点 / 梯度过渡 (特上底座)"
     }
   ],
   "avatars": [
@@ -444,6 +468,76 @@
       "init_dan": 7,
       "init_pt": 1400,
       "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "Anonymous",
+      "model_id": "Anonymous",
+      "display_name": "Anonymous",
+      "role": "contender",
+      "role_desc": "未知强力冲顶主力 (Anonymous)",
+      "init_dan": 7,
+      "init_pt": 1400,
+      "init_rating": 2100.0
+    },
+    {
+      "avatar_id": "BC-1",
+      "model_id": "bc_clean_latest",
+      "display_name": "BC-1",
+      "role": "tokujou_native",
+      "role_desc": "行为克隆弱基准原住民 (800k)",
+      "init_dan": 4,
+      "init_pt": 800,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "BC-2",
+      "model_id": "bc_clean_latest",
+      "display_name": "BC-2",
+      "role": "tokujou_native",
+      "role_desc": "行为克隆弱基准原住民 (800k)",
+      "init_dan": 4,
+      "init_pt": 800,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "Bin-Inf-1",
+      "model_id": "bin_infer",
+      "display_name": "Bin-Inf-1",
+      "role": "tokujou_native",
+      "role_desc": "CQL保守离线基线原住民",
+      "init_dan": 4,
+      "init_pt": 800,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "Bin-Inf-2",
+      "model_id": "bin_infer",
+      "display_name": "Bin-Inf-2",
+      "role": "tokujou_native",
+      "role_desc": "CQL保守离线基线原住民",
+      "init_dan": 4,
+      "init_pt": 800,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "Distill-Full-1",
+      "model_id": "distill_full_latest",
+      "display_name": "Distill-Full-1",
+      "role": "tokujou_native",
+      "role_desc": "全量蒸馏中期基线原住民 (490k)",
+      "init_dan": 4,
+      "init_pt": 800,
+      "init_rating": 1900.0
+    },
+    {
+      "avatar_id": "Distill-Full-2",
+      "model_id": "distill_full_latest",
+      "display_name": "Distill-Full-2",
+      "role": "tokujou_native",
+      "role_desc": "全量蒸馏中期基线原住民 (490k)",
+      "init_dan": 4,
+      "init_pt": 800,
+      "init_rating": 1900.0
     }
   ]
 }
