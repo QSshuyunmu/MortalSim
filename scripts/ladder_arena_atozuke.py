@@ -418,17 +418,19 @@ def main():
             return False
 
     def export_ui() -> bool:
-        """只刷新 UI 三件套（每批一次）。
+        """只刷新 UI 三件套与对战矩阵（每批一次）。
 
         成本 O(库行数)：实测 0.18s/万行，30 万行约 5.3s。推理跑在 Rust 工作线程里
         且已释放 GIL，导出期间对局照常推进；本函数只推迟「下一批的提交时机」，
         占 55 分钟批墙钟 <0.2%，对吞吐无可测影响。
         """
         try:
+            import importlib
+            importlib.reload(xport)
             info = xport.export_all(db_path=local_db, state_path=state_path,
                                     config_path=config_path, data_root=data_root,
                                     season_id=a.season_id)
-            print(f"   [ui] 三件套已刷新（{info['accounts']}席/{info['games']}局，"
+            print(f"   [ui] 榜单/矩阵已刷新（{info['accounts']}席/{info['games']}局，"
                   f"ledger {info['ledger_rows']}行）", flush=True)
             return True
         except Exception as e:

@@ -62,9 +62,11 @@ class LadderStore:
         reg_path = self._registry_path(season_id)
         snap = self._snapshot_dir(season_id)
         summary_path = snap / "account_summary.json"
+        matchups_path = snap / "model_matchups.json"
         if not reg_path.is_file() or not summary_path.is_file():
             raise FileNotFoundError(season_id)
-        stamp = max(reg_path.stat().st_mtime, summary_path.stat().st_mtime)
+        m_mtime = matchups_path.stat().st_mtime if matchups_path.is_file() else 0.0
+        stamp = max(reg_path.stat().st_mtime, summary_path.stat().st_mtime, m_mtime)
         cached = self._cache.get(season_id)
         if cached and cached[0] == stamp:
             return cached[1]
