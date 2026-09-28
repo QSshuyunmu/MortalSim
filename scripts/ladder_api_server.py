@@ -318,18 +318,20 @@ def create_app(data_root: Path, dist_dir: Path | None) -> FastAPI:
 
     @app.middleware("http")
     async def _no_store_api(request: Request, call_next):
-        """API 响应一律禁缓存。
+        """全站（API + HTML + 静态资源）强力防浏览器陈旧缓存。
 
-        踩过的坑：GET 且不带 Cache-Control 时浏览器可启发式缓存，于是同一页上
-        「头部当前 PT」和「曲线末点」可能来自相差一次导出的两版数据——实测
-        LuckyJ2-分身 截图里头部 pt=1440（第 768 局）而曲线末点 pt=1515（第 765 局），
-        相差 3 局，正是图表的 payload 被浏览器缓存住旧版所致。数据本身没错，
-        错在两块 UI 读到了不同版本，所以从源头掐掉缓存。
+        1. /api/ 接口：no-store, must-revalidate（毫秒级实时数据）
+        2. HTML 页面（SPA 单页入口）：no-cache, no-store, must-revalidate（每次刷新必须拉最新入口）
+        3. /assets/ 资源：no-cache, must-revalidate（必须与服务器校验 ETag，绝不盲目使用磁盘旧缓存）
         """
         response = await call_next(request)
-        if request.url.path.startswith("/api/"):
-            response.headers["Cache-Control"] = "no-store, must-revalidate"
+        path = request.url.path
+        if path.startswith("/api/") or path == "/" or not "." in path.split("/")[-1]:
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
             response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        else:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
 
     def _season_or_404(season_id: str) -> dict:
