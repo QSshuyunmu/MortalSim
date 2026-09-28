@@ -277,16 +277,15 @@ def export_all(db_path, state_path, config_path, data_root,
                for a in avatars}
         ledger_rows = defaultdict(list)
         curve_rows = defaultdict(list)
-        # 逐局统计（和/铳/副露/立直 per-round 口径），由 runner 累计落盘
+        # 逐局统计（和/铳/副露/立直及微观风格指标），由 runner 累计落盘
         pstats = {}
         try:
             with sqlite3.connect(str(db_path), timeout=30) as c2:
+                c2.row_factory = sqlite3.Row
                 has_ps = {r[1] for r in c2.execute("PRAGMA table_info(player_stats)")}
                 if "agari" in has_ps:
-                    for aid2, g2, rd2, ag2, hj2, fu2, rc2 in c2.execute(
-                            "SELECT avatar_id, games, rounds, agari, houjuu, fuuro, riichi FROM player_stats"):
-                        pstats[aid2] = {"games": g2, "rounds": rd2, "agari": ag2,
-                                        "houjuu": hj2, "fuuro": fu2, "riichi": rc2}
+                    for r_ps in c2.execute("SELECT * FROM player_stats"):
+                        pstats[r_ps["avatar_id"]] = dict(r_ps)
         except Exception:
             pstats = {}
         db_current = {}   # avatar_id -> (dan, pt, rating) 最后一局簿记
@@ -412,11 +411,58 @@ def export_all(db_path, state_path, config_path, data_root,
         is_tenhou = bool(s.get("is_tenhou")) or dan >= 11
         ps = pstats.get(aid) or {}
         agari_rate = houjuu_rate = fuuro_rate = riichi_rate = None
-        if ps and ps.get("rounds"):
-            agari_rate = ps["agari"] / ps["rounds"]
-            houjuu_rate = ps["houjuu"] / ps["rounds"]
-            fuuro_rate = ps["fuuro"] / ps["rounds"]
-            riichi_rate = ps["riichi"] / ps["rounds"]
+        agari_rate_after_fuuro = houjuu_rate_after_fuuro = None
+        agari_rate_after_riichi = houjuu_rate_after_riichi = None
+        avg_point_per_agari = avg_point_per_houjuu = gain_loss_ratio = None
+        dama_agari_rate = tobi_rate = ryukyoku_rate = None
+        avg_agari_jun = avg_houjuu_jun = avg_riichi_jun = None
+        total_delta_score = None
+        stats_rounds = ps.get("rounds")
+        stats_games = ps.get("games")
+
+        if ps and stats_rounds:
+            rounds_cnt = float(stats_rounds)
+            ag_cnt = float(ps.get("agari") or 0)
+            hj_cnt = float(ps.get("houjuu") or 0)
+            fu_cnt = float(ps.get("fuuro") or 0)
+            rc_cnt = float(ps.get("riichi") or 0)
+
+            agari_rate = round(ag_cnt / rounds_cnt, 4)
+            houjuu_rate = round(hj_cnt / rounds_cnt, 4)
+            fuuro_rate = round(fu_cnt / rounds_cnt, 4)
+            riichi_rate = round(rc_cnt / rounds_cnt, 4)
+
+            if fu_cnt > 0:
+                agari_rate_after_fuuro = round(float(ps.get("fuuro_agari") or 0) / fu_cnt, 4)
+                houjuu_rate_after_fuuro = round(float(ps.get("fuuro_houjuu") or 0) / fu_cnt, 4)
+
+            if rc_cnt > 0:
+                agari_rate_after_riichi = round(float(ps.get("riichi_agari") or 0) / rc_cnt, 4)
+                houjuu_rate_after_riichi = round(float(ps.get("riichi_houjuu") or 0) / rc_cnt, 4)
+
+            if ag_cnt > 0:
+                avg_point_per_agari = round(float(ps.get("agari_points") or 0) / ag_cnt, 1)
+                dama_agari_rate = round(float(ps.get("dama_agari") or 0) / ag_cnt, 4)
+                if ps.get("agari_jun"):
+                    avg_agari_jun = round(float(ps.get("agari_jun")) / ag_cnt, 1)
+
+            if hj_cnt > 0:
+                avg_point_per_houjuu = round(float(ps.get("houjuu_points") or 0) / hj_cnt, 1)
+                if ps.get("houjuu_jun"):
+                    avg_houjuu_jun = round(float(ps.get("houjuu_jun")) / hj_cnt, 1)
+
+            if rc_cnt > 0 and ps.get("riichi_jun"):
+                avg_riichi_jun = round(float(ps.get("riichi_jun")) / rc_cnt, 1)
+
+            if avg_point_per_agari and avg_point_per_houjuu and avg_point_per_houjuu > 0:
+                gain_loss_ratio = round(avg_point_per_agari / avg_point_per_houjuu, 2)
+
+            if stats_games and stats_games > 0:
+                tobi_rate = round(float(ps.get("tobi") or 0) / float(stats_games), 4)
+
+            ryukyoku_rate = round(float(ps.get("ryukyoku") or 0) / rounds_cnt, 4)
+            total_delta_score = int(ps.get("score_delta_total") or 0)
+
         rid = rank_id_of(dan)
         target = pt_target_of(dan)
         pt_cur = float(pt) if pt is not None else 0.0
@@ -453,11 +499,28 @@ def export_all(db_path, state_path, config_path, data_root,
             "rank_1": g["r1"], "rank_2": g["r2"], "rank_3": g["r3"], "rank_4": g["r4"],
             "avg_rank": (round(avg_rank, 4) if avg_rank is not None else None),
             "avg_rank_pt": None,
-            # 四项细 stats 本期无牌谱统计源，置空（前端 null-safe 显示 —）
-            "agari_rate": agari_rate, "houjuu_rate": houjuu_rate,
-            "fuuro_rate": fuuro_rate, "riichi_rate": riichi_rate,
-            "stats_games": ps.get("rounds"),
-            "stats_coverage": (ps["games"] / games if ps and games else None),
+            # 全量行为指标与微观风格指标
+            "agari_rate": agari_rate,
+            "houjuu_rate": houjuu_rate,
+            "fuuro_rate": fuuro_rate,
+            "riichi_rate": riichi_rate,
+            "agari_rate_after_fuuro": agari_rate_after_fuuro,
+            "houjuu_rate_after_fuuro": houjuu_rate_after_fuuro,
+            "agari_rate_after_riichi": agari_rate_after_riichi,
+            "houjuu_rate_after_riichi": houjuu_rate_after_riichi,
+            "avg_point_per_agari": avg_point_per_agari,
+            "avg_point_per_houjuu": avg_point_per_houjuu,
+            "gain_loss_ratio": gain_loss_ratio,
+            "dama_agari_rate": dama_agari_rate,
+            "tobi_rate": tobi_rate,
+            "ryukyoku_rate": ryukyoku_rate,
+            "avg_agari_jun": avg_agari_jun,
+            "avg_houjuu_jun": avg_houjuu_jun,
+            "avg_riichi_jun": avg_riichi_jun,
+            "total_delta_score": total_delta_score,
+            "stats_games": stats_games,
+            "stats_rounds": stats_rounds,
+            "stats_coverage": (float(stats_games) / float(games) if stats_games and games else None),
             # 回收/世代：gen>1 表示这是上级卓回收后补进来的新席位；
             # retired=true 表示该账号已停止出场（历史数据仍全部保留在库里）
             "generation": (roster_meta.get(aid, {}) or {}).get("gen", 1),

@@ -319,35 +319,48 @@ def main():
         print(f"   [ok] {mid:<26} -> {kind}")
     print(f"[init] 引擎构建完成（{time.time()-t_eng:.1f}s）")
 
-    # ---- 逐局统计累加器（和/铳/副露/立直），跨重启持久化于 player_stats 表 ----
+    # ---- 逐局全量统计累加器（微观行为指标），跨重启持久化于 player_stats 表 ----
     stats_acc = {}
+
+    STAT_COLS = (
+        "games", "rounds", "agari", "houjuu", "fuuro", "fuuro_num", "riichi",
+        "fuuro_agari", "fuuro_houjuu", "riichi_agari", "riichi_houjuu", "dama_agari",
+        "tobi", "ryukyoku", "agari_points", "houjuu_points", "agari_jun", "houjuu_jun", "riichi_jun",
+        "score_delta_total"
+    )
 
     def load_stats():
         try:
             with sqlite3.connect(str(local_db), timeout=30) as c:
-                c.execute("CREATE TABLE IF NOT EXISTS player_stats ("
-                          "avatar_id TEXT PRIMARY KEY, games INT, rounds INT, agari INT, "
-                          "houjuu INT, fuuro INT, fuuro_num INT, riichi INT)")
-                for aid, g, rd, ag, hj, fu, fn_, rc in c.execute(
-                        "SELECT avatar_id, games, rounds, agari, houjuu, fuuro, "
-                        "fuuro_num, riichi FROM player_stats"):
-                    stats_acc[aid] = {"games": g, "rounds": rd, "agari": ag,
-                                      "houjuu": hj, "fuuro": fu, "fuuro_num": fn_,
-                                      "riichi": rc}
-                print(f"[init] 已加载 {len(stats_acc)} 席历史统计")
-        except Exception:
-            pass
+                # 检查现有列并自适应升级表结构
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS player_stats (
+                        avatar_id TEXT PRIMARY KEY, games INT, rounds INT, agari INT,
+                        houjuu INT, fuuro INT, fuuro_num INT, riichi INT
+                    )
+                """)
+                existing = {r[1] for r in c.execute("PRAGMA table_info(player_stats)")}
+                for col in STAT_COLS[7:]:
+                    if col not in existing:
+                        c.execute(f"ALTER TABLE player_stats ADD COLUMN {col} INT DEFAULT 0")
+                c.commit()
+
+                cols_str = ", ".join(STAT_COLS)
+                for r in c.execute(f"SELECT avatar_id, {cols_str} FROM player_stats"):
+                    aid = r[0]
+                    stats_acc[aid] = {col: r[i + 1] or 0 for i, col in enumerate(STAT_COLS)}
+                print(f"[init] 已加载 {len(stats_acc)} 席历史完整统计")
+        except Exception as e:
+            print(f"   [warn] 加载 player_stats 失败: {e}")
 
     def flush_stats():
         try:
             with sqlite3.connect(str(local_db), timeout=30) as c:
-                c.execute("CREATE TABLE IF NOT EXISTS player_stats ("
-                          "avatar_id TEXT PRIMARY KEY, games INT, rounds INT, agari INT, "
-                          "houjuu INT, fuuro INT, fuuro_num INT, riichi INT)")
+                cols_str = ", ".join(STAT_COLS)
+                placeholders = ", ".join(["?"] * (len(STAT_COLS) + 1))
                 c.executemany(
-                    "INSERT OR REPLACE INTO player_stats VALUES (?,?,?,?,?,?,?,?)",
-                    [(aid, v["games"], v["rounds"], v["agari"], v["houjuu"],
-                      v["fuuro"], v["fuuro_num"], v["riichi"])
+                    f"INSERT OR REPLACE INTO player_stats (avatar_id, {cols_str}) VALUES ({placeholders})",
+                    [tuple([aid] + [v.get(col, 0) for col in STAT_COLS])
                      for aid, v in stats_acc.items()])
                 c.commit()
             return True
@@ -746,17 +759,14 @@ def main():
                 "rank, score, pt_before, pt_after, dan_before, dan_after, "
                 "rating_before, rating_after, table_avg_r) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params)
-        # 逐局 mjai 统计：和/铳/副露/立直（per-round 口径，与 libriichi.stat 一致）
+        # 逐局 mjai 统计：全面记录行为攻守与巡目指标（与 libriichi.stat 一致）
         for row in rows:
             _seed, _k, split, _ranks, _scores, log_str = row
             for seat in range(4):
                 aid = table[(seat - int(split)) % 4]
                 try:
                     st = libriichi.stat.Stat.from_log(log_str, seat)
-                    acc = stats_acc.setdefault(aid, {"games": 0, "rounds": 0,
-                                                     "agari": 0, "houjuu": 0,
-                                                     "fuuro": 0, "fuuro_num": 0,
-                                                     "riichi": 0})
+                    acc = stats_acc.setdefault(aid, {col: 0 for col in STAT_COLS})
                     acc["games"] += 1
                     acc["rounds"] += st.round
                     acc["agari"] += st.agari
@@ -764,6 +774,19 @@ def main():
                     acc["fuuro"] += st.fuuro
                     acc["fuuro_num"] += st.fuuro_num
                     acc["riichi"] += st.riichi
+                    acc["fuuro_agari"] += st.fuuro_agari
+                    acc["fuuro_houjuu"] += st.fuuro_houjuu
+                    acc["riichi_agari"] += st.riichi_agari
+                    acc["riichi_houjuu"] += st.riichi_houjuu
+                    acc["dama_agari"] += st.dama_agari
+                    acc["tobi"] += st.tobi
+                    acc["ryukyoku"] += st.ryukyoku
+                    acc["agari_points"] += int(st.agari_point_oya + st.agari_point_ko)
+                    acc["houjuu_points"] += int(abs(st.houjuu_point_to_oya + st.houjuu_point_to_ko))
+                    acc["agari_jun"] += int(st.agari_jun)
+                    acc["houjuu_jun"] += int(st.houjuu_jun)
+                    acc["riichi_jun"] += int(st.riichi_jun)
+                    acc["score_delta_total"] += int(st.point)
                 except Exception:
                     continue
 

@@ -316,6 +316,14 @@ export interface LadderAccountRow {
   agari_rate_after_riichi: number | null;
   houjuu_rate_after_riichi: number | null;
   avg_point_per_agari: number | null;
+  avg_point_per_houjuu?: number | null;
+  gain_loss_ratio?: number | null;
+  dama_agari_rate?: number | null;
+  tobi_rate?: number | null;
+  ryukyoku_rate?: number | null;
+  avg_agari_jun?: number | null;
+  avg_houjuu_jun?: number | null;
+  avg_riichi_jun?: number | null;
   total_delta_score: number | null;
   /** R12-A：详细牌谱统计覆盖率（完整牌谱场数/总局数/覆盖率） */
   stats_games?: number | null;
