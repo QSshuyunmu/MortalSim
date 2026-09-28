@@ -118,9 +118,17 @@ class LadderStore:
                             point[k] = int(v) if k == "pt_target" else v
                     curve_by_aid.setdefault(row.get("account_id"), []).append(point)
 
+        matchups = {}
+        matchups_path = snap / "model_matchups.json"
+        if matchups_path.is_file():
+            try:
+                matchups = json.loads(matchups_path.read_text(encoding="utf-8"))
+            except Exception:
+                matchups = {}
+
         data = {"registry": registry, "summary": summary,
                 "reg_index": reg_index, "ledger": ledger_by_aid,
-                "curve": curve_by_aid,
+                "curve": curve_by_aid, "matchups": matchups,
                 "snapshot_meta": {"snapshot_id": snap.name,
                                   "updated_at": int(summary_path.stat().st_mtime)}}
         self._cache[season_id] = (stamp, data)
@@ -361,6 +369,13 @@ def create_app(data_root: Path, dist_dir: Path | None) -> FastAPI:
         rows = sorted_rows(enrich_rows(store, season_id), sort)
         return {"season": sp, "sort": sort, "accounts": rows,
                 "models": summarize_models(rows)}
+
+    @app.get("/api/ladder/seasons/{season_id}/matchups")
+    def get_matchups(season_id: str):
+        sp = _season_or_404(season_id)
+        data = store.load_season(season_id)
+        matchups = data.get("matchups") or {"schema": "keqing.ladder.matchups.v1", "models": [], "matrix": {}}
+        return {"season": sp, "matchups": matchups}
 
     @app.get("/api/ladder/seasons/{season_id}/accounts/{account_id}")
     def get_account(season_id: str, account_id: str, request: Request):

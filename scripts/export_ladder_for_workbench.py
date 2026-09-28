@@ -100,6 +100,112 @@ def _stable_dan_room(aid: str, room: str, room_agg: dict,
     return round((a * ra["r1"] + b * ra["r2"]) / ra["r4"] - 2.0, 2)
 
 
+def compute_model_matchups(con: sqlite3.Connection, model_ids: list[str]) -> dict:
+    """计算模型两两同桌对决矩阵 (Head-to-Head Matchup Matrix)。
+
+    口径定义：
+      - 同桌对决：若同一桌（seed_idx, split）同时包含模型 A 与模型 B
+      - 胜负判定：若 rank_A < rank_B（A 顺位优于 B），计 A 胜；反之计 B 胜（麻将东家优先规则无平局）
+      - 场均 PT 相对优势：(sum(pt_delta_A) - sum(pt_delta_B)) / 对决场数
+    """
+    has_bk = "pt_before" in {r[1] for r in con.execute("PRAGMA table_info(ladder_games)")}
+    pt_expr = "(pt_after - pt_before)" if has_bk else "0"
+    query = f"""
+        SELECT seed_idx, split, room, model_id, rank, {pt_expr} as pt_delta
+        FROM ladder_games
+        ORDER BY match_id
+    """
+    tables = defaultdict(list)
+    for seed, split, room, mid, rk, ptd in con.execute(query):
+        tables[(seed, split)].append((room, mid, int(rk), int(ptd or 0)))
+
+    # 包含所有传入的物理模型
+    all_models = list(model_ids)
+    # 也加入实际在库中出现过的模型
+    for seats in tables.values():
+        for _, m, _, _ in seats:
+            if m not in all_models:
+                all_models.append(m)
+
+    matrix = {}
+    for mA in all_models:
+        matrix[mA] = {}
+        for mB in all_models:
+            if mA == mB:
+                continue
+            matrix[mA][mB] = {
+                "games": 0, "wins_a": 0, "wins_b": 0, "win_rate": 0.5,
+                "pt_delta_a": 0, "pt_delta_b": 0, "avg_pt_diff": 0.0, "total_pt_diff": 0,
+                "rooms": {
+                    "houou": {"games": 0, "wins_a": 0, "wins_b": 0, "win_rate": 0.5},
+                    "tokujou": {"games": 0, "wins_a": 0, "wins_b": 0, "win_rate": 0.5},
+                }
+            }
+
+    for (seed, split), seats in tables.items():
+        if len(seats) != 4:
+            continue
+        room = seats[0][0]
+        for i in range(len(seats)):
+            _, mA, rA, ptA = seats[i]
+            for j in range(i + 1, len(seats)):
+                _, mB, rB, ptB = seats[j]
+                if mA == mB:
+                    continue
+
+                # A vs B
+                cell = matrix[mA][mB]
+                cell["games"] += 1
+                if rA < rB:
+                    cell["wins_a"] += 1
+                else:
+                    cell["wins_b"] += 1
+                cell["pt_delta_a"] += ptA
+                cell["pt_delta_b"] += ptB
+                if room in cell["rooms"]:
+                    cell["rooms"][room]["games"] += 1
+                    if rA < rB:
+                        cell["rooms"][room]["wins_a"] += 1
+                    else:
+                        cell["rooms"][room]["wins_b"] += 1
+
+                # B vs A
+                cell_b = matrix[mB][mA]
+                cell_b["games"] += 1
+                if rB < rA:
+                    cell_b["wins_a"] += 1
+                else:
+                    cell_b["wins_b"] += 1
+                cell_b["pt_delta_a"] += ptB
+                cell_b["pt_delta_b"] += ptA
+                if room in cell_b["rooms"]:
+                    cell_b["rooms"][room]["games"] += 1
+                    if rB < rA:
+                        cell_b["rooms"][room]["wins_a"] += 1
+                    else:
+                        cell_b["rooms"][room]["wins_b"] += 1
+
+    # 衍生比率计算
+    for mA in matrix:
+        for mB in matrix[mA]:
+            c = matrix[mA][mB]
+            g = c["games"]
+            if g > 0:
+                c["win_rate"] = round(c["wins_a"] / g, 4)
+                c["total_pt_diff"] = c["pt_delta_a"] - c["pt_delta_b"]
+                c["avg_pt_diff"] = round(c["total_pt_diff"] / g, 2)
+            for rk in c["rooms"]:
+                rg = c["rooms"][rk]["games"]
+                if rg > 0:
+                    c["rooms"][rk]["win_rate"] = round(c["rooms"][rk]["wins_a"] / rg, 4)
+
+    return {
+        "schema": "keqing.ladder.matchups.v1",
+        "models": all_models,
+        "matrix": matrix,
+    }
+
+
 def _atomic_write(path: Path, data: str) -> None:
     tmp = str(path) + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="") as f:
@@ -243,6 +349,8 @@ def export_all(db_path, state_path, config_path, data_root,
                 ("" if pt_target_of(dan_a) is None else str(pt_target_of(dan_a))),
                 g["games"],
             ])
+        # 离线计算模型两两对战胜率与 PT 关系矩阵（仅消耗 ~30ms，零延迟下发前端）
+        matchup_data = compute_model_matchups(con, [pm["model_id"] for pm in cfg.get("physical_models", [])])
     finally:
         con.close()
 
@@ -391,6 +499,8 @@ def export_all(db_path, state_path, config_path, data_root,
         for r in curve_rows[aid]:
             w.writerow(r)
     _atomic_write(snap_dir / "rating_curve.csv", buf.getvalue())
+    _atomic_write(snap_dir / "model_matchups.json",
+                  json.dumps(matchup_data, ensure_ascii=False, indent=1))
 
     return {"accounts": len(summary_accounts), "games": total_games,
             "ledger_rows": sum(len(v) for v in ledger_rows.values()),

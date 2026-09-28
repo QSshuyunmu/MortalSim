@@ -10,7 +10,8 @@ import { PageHeader, PageShell } from '../components/Layout/PageScaffold';
 import { useLadderSeasonCatalog } from '../hooks/useLadderSeasonCatalog';
 import { useVisibleLiveQuery } from '../hooks/useVisibleLiveQuery';
 import { routes, withLadderSeason } from '../routes';
-import type { LadderAccountRow, LadderModelSummary, LadderResponse, LadderSeasonScoring } from '../types/ladder';
+import type { LadderAccountRow, LadderModelSummary, LadderResponse, LadderSeasonScoring, MatchupsResponse } from '../types/ladder';
+import { MatchupMatrix } from '../components/Ladder/MatchupMatrix';
 import { modelDisplayName } from '../utils/modelDisplay';
 import { fmtPt, fmtRank, fmtRate, fmtRating } from '../utils/ladderFormat';
 
@@ -24,8 +25,8 @@ const SORT_OPTIONS = [
 export function LadderPage() {
   const navigate = useNavigate();
   const [sort, setSort] = useState('rank');
-  // R11-F：正式榜以账号为主体；模型汇总为二级分析视图
-  const [tab, setTab] = useState<'accounts' | 'models'>('accounts');
+  // 正式榜以账号为主体；模型汇总为二级分析；对战矩阵展现两两克制与 PT 流动
+  const [tab, setTab] = useState<'accounts' | 'models' | 'matchups'>('accounts');
 
   const catalog = useLadderSeasonCatalog();
   const { seasons, activeSeasonId, loading: catalogLoading } = catalog;
@@ -41,6 +42,18 @@ export function LadderPage() {
         return ladderApi.getLadder(activeSeasonId, sort, signal);
       },
       [activeSeasonId, sort],
+    ),
+  });
+
+  const matchupsQuery = useVisibleLiveQuery<MatchupsResponse>({
+    enabled: Boolean(activeSeasonId && tab === 'matchups'),
+    queryKey: `ladder-matchups:${activeSeasonId ?? ''}`,
+    load: useMemo(
+      () => (signal: AbortSignal) => {
+        if (!activeSeasonId) return Promise.reject(new Error('no active season'));
+        return ladderApi.getMatchups(activeSeasonId, signal);
+      },
+      [activeSeasonId],
     ),
   });
   const ladder = ladderQuery.data;
@@ -97,11 +110,12 @@ export function LadderPage() {
                 ))}
               </select>
             )}
-            {/* R11-F：账号排名（正式） / 模型汇总（二级分析） */}
+            {/* 账号排名（正式） / 模型汇总（二级分析） / 对战矩阵（H2H） */}
             <div style={{ display: 'flex', gap: 4 }}>
               {([
                 ['accounts', '账号排名'],
                 ['models', '模型汇总'],
+                ['matchups', '两两对战矩阵'],
               ] as const).map(([value, label]) => (
                 <button
                   key={value}
@@ -113,18 +127,20 @@ export function LadderPage() {
                 </button>
               ))}
             </div>
-            <div style={{ display: 'flex', gap: 4 }}>
-              {SORT_OPTIONS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => setSort(option.value)}
-                  style={sortButtonStyle(sort === option.value)}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
+            {tab !== 'matchups' && (
+              <div style={{ display: 'flex', gap: 4 }}>
+                {SORT_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => setSort(option.value)}
+                    style={sortButtonStyle(sort === option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
       />
@@ -303,6 +319,25 @@ export function LadderPage() {
                 </table>
               </div>
             </>
+          )}
+
+          {/* 两两对战矩阵（H2H 分析视图） */}
+          {tab === 'matchups' && (
+            <div style={{ marginTop: 8 }}>
+              {matchupsQuery.loading && (
+                <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
+                  正在实时加载模型对战矩阵...
+                </div>
+              )}
+              {!matchupsQuery.loading && matchupsQuery.data?.matchups && (
+                <MatchupMatrix matchups={matchupsQuery.data.matchups} />
+              )}
+              {!matchupsQuery.loading && !matchupsQuery.data?.matchups && (
+                <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
+                  暂无对战矩阵数据（等待批次对战结果落盘）
+                </div>
+              )}
+            </div>
           )}
 
           {ladder.season.scoring && (

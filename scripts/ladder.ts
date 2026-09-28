@@ -288,6 +288,13 @@ export interface LadderAccountRow {
   /** 特上卓内对局数与该卓安定段位（该卓样本不足时为 null） */
   games_tokujou?: number | null;
   stable_dan_tokujou?: number | null;
+  /** 世代号：>1 表示这是上级卓回收后补进来的新席位 */
+  generation?: number;
+  /** 已回收离场：不再出场，但历史数据全部保留在库里 */
+  retired?: boolean;
+  retired_seed?: number | null;
+  /** 血脉：指向被它顶替的那个账号 */
+  lineage?: string | null;
   tenhou_reached?: boolean;
   total_pt_delta?: number | null;
   avg_pt_delta?: number | null;
@@ -339,6 +346,39 @@ export interface LadderResponse {
   sort: string;
   accounts: LadderAccountRow[];
   models: LadderModelSummary[];
+}
+
+export interface MatchupRoomStats {
+  games: number;
+  wins_a: number;
+  wins_b: number;
+  win_rate: number;
+}
+
+export interface MatchupCell {
+  games: number;
+  wins_a: number;
+  wins_b: number;
+  win_rate: number;
+  pt_delta_a: number;
+  pt_delta_b: number;
+  avg_pt_diff: number;
+  total_pt_diff: number;
+  rooms?: {
+    houou: MatchupRoomStats;
+    tokujou: MatchupRoomStats;
+  };
+}
+
+export interface MatchupsData {
+  schema: string;
+  models: string[];
+  matrix: Record<string, Record<string, MatchupCell>>;
+}
+
+export interface MatchupsResponse {
+  season: LadderSeason;
+  matchups: MatchupsData;
 }
 
 export interface LadderCurvePoint {
